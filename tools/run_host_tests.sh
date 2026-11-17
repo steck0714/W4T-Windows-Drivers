@@ -17,6 +17,7 @@ python3 -I tools/check_hwid_matrix.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo
 for t in $(find drivers/t210-icosa/drivers -path '*tests/*.py' -not -path '*/TegraGpu/*'); do run "$t" python3 -I "$(basename "$t")"; done
 for t in $(find drivers/t210-icosa/drivers -path '*tests/test_*.c' -not -path '*/TegraGpu/*'); do
   d=$(dirname "$t"); run "$t" bash -c "cc -std=c99 -Wall -Wextra -Werror -I../src '$(basename "$t")' -o '$tmp/t' && '$tmp/t'"; done
+python3 -I tools/check_l4t_reference.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/check_l4t_reference.py"; } || { fail=$((fail+1)); echo "FAIL tools/check_l4t_reference.py"; tail -5 "$tmp/o"; }
 # Erista GPU: ACPI node vs resource header (always) and full model tests (needs a pinned mesa-switch
 # checkout: MESA_DIR=/path/to/mesa-switch @0ff52079, otherwise skipped).
 python3 -I tools/check_acpi_resources.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/check_acpi_resources.py"; } || { fail=$((fail+1)); echo "FAIL tools/check_acpi_resources.py"; tail -5 "$tmp/o"; }
