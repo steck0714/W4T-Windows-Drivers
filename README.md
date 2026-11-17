@@ -1,6 +1,6 @@
 # W4T-Windows-drivers
 
-Nintendo Switch (Tegra X1) 上の Windows ARM64 で動いているドライバを集め、**WinX の ACPI(SWOA 系 ID)に合わせて**
+(Tegra X1) 上の Windows ARM64 で動いているドライバを集め、**WinX の ACPI(SWOA 系 ID)に合わせて**
 まとめたリポジトリ。Erista(T210/Icosa)、Lite(T214/Hoag)、Mariko(Iowa/Aula)を扱う。
 
 > **未ビルド・未実機。** この環境には WDK が無く、`.sys` は作っていない。確認したのはソース/INF/DSDT の突き合わせと、
