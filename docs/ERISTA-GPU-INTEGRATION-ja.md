@@ -37,3 +37,34 @@
 - NVIDIA ファームウェア 9 ファイルはリポジトリに含まれない。
 - 速度別 CVB 電圧表、ruje 最新 ABI への同期（上記）。
 - Lite / Mariko には影響しない（DSDT の変更はすべて `SWITCH_ERISTA_GPU` 内）。
+
+
+## 追加検証と修正（hekate / Switchroot L4T / mainline Linux / Microsoft 資料との突き合わせ）
+
+### 修正したもの（実装を変更）
+1. **GPU 電圧を固定値から CVB 計算へ**。固定の 460.8MHz@1.000V / 768MHz@1.100V は、nouveau `volt/gm20b.c` の Erista 係数で計算すると、速度ビン（speedo）が低いチップで電圧不足になる。
+   460.8MHz@1.0V は speedo 1650 未満、768MHz@1.1V は speedo 1900 未満で不足し、768MHz は speedo 1750 未満ではレール上限 1.150V でも足りない（計算表は下）。
+   `tg_gpu_clock_required_uv()` を、fuse（`FUSE_CPU_SPEEDO_2` のシャドウ 0x7000F930）から読んだ speedo と CVB 式で決める実装に変更した。下限 950mV、上限 1150mV。
+   fuse が 0 / 読めない、プロファイルが未対応、必要電圧が上限超過の場合は、PMIC にも PLL にも書かずに `RAIL_ERROR` で拒否する。
+   speedo の換算は fuse リビジョンで 3 通りあり、リビジョンは読んでいない。電圧は speedo が高いほど下がるので、3 通りのうち**最小値**を使う（必要電圧が最大になる安全側）。
+2. **電源投入直後のレール電圧を 0.8V → 1.0V**。Switchroot nvgpu `clk_gm20b.c` では Erista（B1）が `BOOT_GPU_UV_B1 = 1.0V`、Mariko（C1）が 0.8V。Lite（C1）の値が残っていた。dtsi の vdd-gpu 初期値（1.0V）とも一致する。
+
+### 必要電圧の計算（mV、950mV 下限の適用前。係数: nouveau gm20b_cvb_coef）
+| speedo | 307.2MHz | 460.8MHz | 768.0MHz | 921.6MHz |
+|---|---|---|---|---|
+| 1500 | 976 | 1064 | 1286 | 1419 |
+| 1700 | 898 | 978 | 1185 | 1310 |
+| 1900 | 832 | 906 | 1097 | 1215 |
+| 2100 | 780 | 846 | 1023 | 1132 |
+
+### 確認だけして変更しなかったもの
+- ACPI のメモリ窓: `cpp` で DSDT を展開した 5 構成で、GPU0 を含むデバイス間の重なりは 0 件。
+- I2C 接続: 0x1C（GPU0 のみ Exclusive）、0x3C（GPU0 と PWRB が Shared）。共有接続は Microsoft の SPB 仕様（複数クライアントが別々の論理接続を開ける）の範囲内。
+- 接続ロック（`IOCTL_SPB_LOCK_CONNECTION`）は使っていない。GPU 側が 0x3C で書くのは GPIO6 CNFG と AME_GPIO で、電源ボタン側のレジスタとは別。I2C の 1 転送は不可分なので実害は低いが、同じレジスタを触る相手が増えたら追加する。
+- 元の DSDT に I2C1 0x4C（温度センサー）の CPUC=Shared / FAN0=Exclusive の組み合わせがある（今回の変更とは無関係。Windows 上の影響は未確認）。
+- チップ ID は Erista 経路で 0x12b、SM 53、クラス 0xb197 に統一されている。
+
+### 未確認のもの
+- 実機での動作、WDK でのコンパイル、GitHub Actions の実行。
+- speedo のリビジョン別換算の実際の値（Erista の個体で、3 通りのどれが正しいか）。
+- 電源投入から PLL 起動までの間の動作（1.0V・PLLP 204MHz 由来のクロックで GPU レジスタを読む）。
