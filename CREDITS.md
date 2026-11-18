@@ -33,7 +33,7 @@
 | GPU speedo の fuse 位置（`FUSE_CPU_SPEEDO_2`、シャドウ 0x7000F930）と、リビジョン別の換算式 | `linux-mainline/tegra-fuse/speedo-tegra210.c` | 同上 | NVIDIA CORPORATION / GPL-2.0-only |
 | GM20B と GM20B_B が同じ HAL であること（Lite 由来の共通コアをそのまま使える根拠）、GR / FIFO / MMU / PMU / ACR の手順 | `nvgpu/gm20b/hal_gm20b.c`、`gr_gm20b.c`、`fifo_gm20b.c`、`mm_gm20b.c`、`pmu_gm20b.c`、`acr_gm20b.c` | 同上 | 同上 |
 | GPU コマンドエンコーダ（ホストテストの検証元） | `src/nouveau/horizon/`（本リポジトリには含めず、CI で取得） | danfromtico/mesa-switch `0ff52079ca9e9e837ed27eb95a8d239f439a1864` | danfromtico、Mesa・NVK 開発者 / MIT |
-| Lite 版 TegraGpu の構造（電源・クロック・計数・巻き戻しのロジック、Windows 側シェル、ACPI リソース構成） | `drivers/t214-hoag/drivers/TegraGpu/` | ruje0504-2/Windows-for-Switch-Drivers、ruje0504-2/mesa-switch-woa | ruje0504-2 / ファイルごとの SPDX（電源実装と KMDF probe は GPL-2.0-only） |
+| Lite 版 TegraGpu の構造（電源・クロック・計数・巻き戻しのロジック、Windows 側シェル、ACPI リソース構成） | `drivers/t214-hoag/TegraGpu/` | ruje0504-2/Windows-for-Switch-Drivers、ruje0504-2/mesa-switch-woa | ruje0504-2 / ファイルごとの SPDX（電源実装と KMDF probe は GPL-2.0-only） |
 
 **電圧**: 速度別（CVB）の表を上記の出典から取り入れ、チップごとの speedo で計算する（固定値は廃止）。下限 950mV は nouveau の `speedo_to_vmin` の最大値、上限 1150mV は dtsi の `regulator-max-microvolt`。speedo の換算（fuse リビジョン別）は不確定なため、3 通りのうち最小値を使う安全側の扱い。
 
@@ -43,10 +43,28 @@
 - Microsoft Learn: [KMDF](https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/)、[SpbCx](https://learn.microsoft.com/en-us/windows-hardware/drivers/spb/)、[GpioClx](https://learn.microsoft.com/en-us/windows-hardware/drivers/gpio/)、[VHF](https://learn.microsoft.com/en-us/windows-hardware/drivers/hid/virtual-hid-framework--vhf-)、[WiFiCx](https://learn.microsoft.com/en-us/windows-hardware/drivers/netcx/writing-a-wificx-client-driver)、[WDDM](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/windows-vista-and-later-display-driver-model-architecture)、[Modern Standby のプラットフォーム設計](https://learn.microsoft.com/en-us/windows-hardware/design/device-experiences/platform-design-for-modern-standby)、[PEP](https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/platform-extension-plug-ins--peps-)
 - NVIDIA / Maxim / TI / Broadcom の公開データシート・公開ソース（各ドライバの README に個別記載）
 
+## ソース先頭のクレジット表示(2026-11-18 追加)
+- `drivers/t210-icosa`・`drivers/t214-hoag` の `src` 等にある `.c/.cpp/.h` のうち、SPDX・Copyright の表示が無かった 39 ファイルに、先頭へクレジットブロック(`W4T-CREDIT-BEGIN`〜`END`)を足した。
+  Erista 版は hayato41200/Windows-for-Switch-Drivers 由来(ruje0504-2 の古いコミットと一致、`docs/HAYATO-DRIVER-AUDIT-ja.md`)、Lite 版は ruje0504-2 の系統で共有実装は hayato41200 由来(`drivers/t214-hoag/README.md`)。
+  **上流のファイルに個人の作者・著作権の行は無いので、ファイル単位の作者は書いていない**(分かっていないものを作らない)。もともと SPDX・Copyright があるファイル(Mesa/NVIDIA/ruje0504-2 等)には触れていない。
+- `drivers/t214-aula` の `.c` 4 本は、上の表の DanilKhmyrov/windows-switch を出典・所有者として明記(`layout.json` で上流とのバイト一致を検証)。
+- ファイル単位の作者が分かる人は PR でブロックを直してほしい。
+
 ## 本リポジトリでの追加作業
-- OLED(Aula)枠 `drivers/t214-aula/` の新設（windows-switch v0.8.0 のテキスト部分と SHA-256 一覧）、`tools/fwfetch/`（実機からの取り出し・照合ツール。2026-11-18 に Rust で作り直し）と混入検査 `tools/check_no_proprietary.py`（Claude による作業）。
+- 2026-11-18: OLED(Aula)枠の `swhid` / `swbatt` / `touchread` / `swagentsvc` と INF 3 本を、t210-icosa / t214-hoag と同じ「ドライバごとのフォルダ」(`drivers/t214-aula/drivers/`)へ移動。`.c` の先頭に出典・作者(DanilKhmyrov)のクレジットブロックを追加(`layout.json`・`tools/aula_layout.py` で上流とのバイト一致を検証)（Claude による作業）。
+- OLED(Aula)枠 `drivers/t214-aula/` の新設（windows-switch v0.8.0 のテキスト部分と SHA-256 一覧、`main` のソース一式 `upstream-src/`）、`tools/fwfetch/`（実機からの取り出し・照合ツール。2026-11-18 に Rust で作り直し）と混入検査 `tools/check_no_proprietary.py`（Claude による作業）。
 - `build/`（型番別のビルド済み置き場）、`tools/build/`、`build-fwfetch.yml`、`build-all-drivers.yml` の組み立て・コミット段（Claude による作業。2026-11-18、ユーザー steck0714 の指示）。fwfetch の Rust 依存は `tools/fwfetch/THIRD-PARTY.md`。
 - 統合・整理、HWID/DSDT 静的検査、windows-switch 互換メモ、電源ボタン長押し(HoldSasMs)の移植、Erista GPU の取り込みと GPCPLL ロック検出修正、電源コールバック検査（Claude による作業。ユーザー steck0714 の指示と所有物に基づく）。
 
 ## 含めないもの
 Broadcom ファームウェア、NVIDIA の GPU / XUSB ファームウェア、`bl31.bin`、秘密鍵。ファームウェアは `tools/fwfetch/` が利用者の実機（Switchroot を入れた SD）から取り出す。ビルド済みの `.sys` / `.exe` は 2026-11-18 から `build/` に置いてよい。
+
+## 2026-11-18 追加（スリープ / HDMI の参照）
+| 参照 | 出典 | ライセンス |
+|---|---|---|
+| `reference/atf/`（`plat_psci_handlers.c`, `tegra_def.h`） | CTCaer/switch-l4t-atf `ed2ef6be`（ARM Limited / NVIDIA / CTCaer） | BSD-3-Clause |
+| `reference/nvidia-dc/dp.c`、`SwitchDisplay/src/dp_link.h`（移植） | CTCaer/switch-l4t-kernel-nvidia `76e6d489`（NVIDIA CORPORATION / CTCaer） | GPL-2.0 |
+| `SwitchSleep` / `lpi.asl.inc` の根拠 | hekate `bootloader/l4t/l4t.c` `8e1392df`（CTCaer）、Switchroot NX DT（Billy Laws / CTCaer） | GPL-2.0 |
+| `reference/nvidia-dc/`（`dc` 全体） | CTCaer/switch-l4t-kernel-nvidia `76e6d489`（NVIDIA CORPORATION / CTCaer） | GPL-2.0 |
+| `reference/hekate-l4t/`、`reference/atf/plat-nvidia-tegra/` | CTCaer/hekate `8e1392df`、CTCaer/switch-l4t-atf `ed2ef6be` | GPL-2.0 / BSD-3-Clause |
+| `reference/ms-pep/` | microsoft/Windows-driver-samples `d49bb7d7`（Microsoft） | MS-PL |

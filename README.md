@@ -12,7 +12,7 @@
 |---|---|
 | `drivers/t210-icosa/` | Erista 用 WinX ドライバのソース・INF・kit（winx `usually` からの複製） |
 | `drivers/t214-hoag/` | Lite 用（Wi-Fi 共通コア、TegraGpu、TegraXusb を含む） |
-| `drivers/t214-aula/` | **OLED(HEG-001)用。windows-switch v0.8.0 の構成**（実機報告は配布者 1 台のみ）。テキストの kit と、全ファイルの SHA-256 一覧。バイナリは `build/HEG-001/` に `tools/build/fill_heg001.py` で置く |
+| `drivers/t214-aula/` | **OLED(HEG-001)用。windows-switch v0.8.0 の構成**（実機報告は配布者 1 台のみ）。テキストの kit、上流ソース一式（`upstream-src/`、未ビルド。ライセンスはファイルごとに `LICENSE-AUDIT.md`、帰属は `NOTICE.md`）、全ファイルの SHA-256 一覧。バイナリは `build/HEG-001/` に `tools/build/fill_heg001.py` で置く |
 | `build/` | **型番別のビルド済みドライバ置き場**（`HAC-001` / `HAC-001-01` / `HDH-001` / `HEG-001`）。いまは置き場と手順だけで `.sys` は未作成（`build/README.md`） |
 | `tools/fwfetch/` | **再配布できない NVIDIA / Broadcom / Switchroot ファイルを自分の SD から取り出して照合・配置するツール（Rust 製、`unsafe` 禁止、読み取り専用、リポジトリ外に出力）** |
 | `tools/build/` | `build/` を埋めるスクリプト（`assemble_build.py` = CI の成果物、`fill_heg001.py` = 上流 zip をハッシュ照合して配置）とそのテスト |
@@ -30,6 +30,11 @@
 | `tools/ci/` | **GitHub 上で全 Erista ドライバをビルド・署名・キット化**（`Build-AllDrivers.ps1` + `drivers-t210.json`） |
 | `COPYING.md`, `LICENSES/` | ライセンスの案内と SPDX 別の全文 |
 | `CREDITS.md`, `reference/l4t/` | 出典・クレジットと、L4T/hekate/Switchroot の参照ソース |
+
+## 2026-11-18 追加分（4 回目: スリープ→HDMI）
+- **スリープ**: `acpi/t210/lpi.asl.inc`（CPU `_LPI`、`SWITCH_LPI` で opt-in。コア停止は Switchroot DT が c7 を無効にしている根拠で無効フラグ付き）、`SwitchSleep/`（PSCI 状態 ID と SC7 前提検査。ATF `ed2ef6be` と突き合わせ）。`tools/check_dsdt_compile.py` が iasl で 3 構成をコンパイル。→ `docs/SLEEP-DESIGN-ja.md`
+- **HDMI**: `SwitchDisplay/src/dp_link.h`（L4T `tegra_dc_dp_calc_config` の移植。原本との差分テスト 2160 通り一致）。→ `docs/HDMI-DESIGN-ja.md`
+- 再開用の進捗は `PROGRESS.md`。**どれも WDK ビルド・Windows・実機は未確認。**
 
 ## 2026-11-18 追加分（3 回目）
 - **ビルド済みバイナリを置いてよい方針に変更**（作者の許可）。置く場所は `build/<型番>/`。再配布できないファームウェアと秘密鍵は引き続き不可。`.gitignore`・`COPYING.md`・`tools/check_no_proprietary.py` を合わせた。

@@ -9,9 +9,12 @@
 | `drivers/*/TegraGpu/` | MIT と **GPL-2.0-only の混在** | `platform/t210_power.c` などは GPL-2.0-only。**リンクして作った `.sys` は全体として GPL-2.0-only で配る**（対応ソース＝このリポジトリの該当コミットを一緒に提供する） |
 | `drivers/t214-hoag/SwitchWifi/core/` | ISC（Broadcom brcmfmac 由来）+ 一部 MIT | `NOTICE` を一緒に配る |
 | `drivers/t210-icosa/gpu/GM20B-Diagnostic/regs/nvgpu/` | MIT（NVIDIA） | 各ファイル先頭の著作権表示・許諾文を消さない |
+| `reference/nvidia-dc/`, `reference/hekate-l4t/` | GPL-2.0（NVIDIA / CTCaer。ファイル冒頭の許諾文） | 上流のまま無改変。固定コミットは各 `README.md` |
+| `reference/atf/` | BSD-3-Clause（ARM / NVIDIA / CTCaer） | 上流のまま。`LICENSE.rst` |
+| `reference/ms-pep/` | **MS-PL**（Microsoft。`LICENSE-MS-PL.txt`）。GPL-2.0 とは別ライセンスの同梱物で、ここから作る PEP は MS-PL のまま別ディレクトリで管理し GPL コードとリンクしない | Windows-driver-samples `pofx/PEP` |
 | `reference/l4t/` | hekate・platform-t210-nx・Linux 由来は GPL-2.0、nvgpu の gm20b は MIT | 上流のままコピー（`MANIFEST.sha256`、`NOTICE.md`） |
 | `reference/windows-switch/` | GPL-2.0 | DanilKhmyrov/windows-switch の抜粋 |
-| `drivers/t214-aula/` | GPL-2.0（windows-switch 由来、`LICENSE` 同梱） | v0.8.0 リリース zip のテキスト部分のみ。INF の出自（hayato41200 / ruje0504-2）のファイル別ライセンスは**未確認** |
+| `drivers/t214-aula/` | GPL-2.0（windows-switch 由来、`LICENSE` 同梱） | v0.8.0 リリース zip のテキスト部分と、`main` のソース一式(`upstream-src/`、バイナリ・画像は除く)。`patches/` は NintendoSwitchPkg(edk2、BSD-2-Clause-Patent 系)への差分で、ファイルごとの確認結果は `drivers/t214-aula/LICENSE-AUDIT.md`、帰属表示は `drivers/t214-aula/NOTICE.md`(`FbFont.h` に Intel の著作権表示が無い等の問題を記載)。INF の出自（hayato41200 / ruje0504-2）のファイル別ライセンスは**未確認** |
 | `tools/fwfetch/`, `tools/build/`, `tools/check_no_proprietary.py` | GPL-2.0-only（SPDX 表記） | 新規作成。fwfetch の Rust 依存は MIT で使う（`tools/fwfetch/THIRD-PARTY.md`） |
 | `build/` | 中身のソースに従う（上と同じ）。`build/HEG-001/` は windows-switch 由来（GPL-2.0） | ビルド済みバイナリ置き場（`build/README.md`） |
 | `acpi/`, `docs/`, `tools/` | ルートの `LICENSE` | |

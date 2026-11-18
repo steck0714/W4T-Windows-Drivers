@@ -231,6 +231,21 @@ try:
         rc, log = run(["--profile", "aula", "--search-root", os.path.join(tmp, "fzsd"), "--out-dir", os.path.join(tmp, "outc"), "--quiet"], manifest=mp)
         if rc not in (0, 1, 2) or "panicked" in log: fz_cpio.append((i, rc))
     check("60 corrupted initramfs files: no crash", not fz_cpio, str(fz_cpio[:5]))
+
+    # 11. Erista profile (real manifest): hekate's sc7entry/sc7exit + L4T XUSB firmware are found on the SD / rootfs copy
+    er = os.path.join(tmp, "erista-root"); os.makedirs(os.path.join(er, "bootloader/sys/l4t")); os.makedirs(os.path.join(er, "lib/firmware"))
+    SC7E, SC7X, XU21 = blob(9000), blob(20000), blob(100000)
+    open(os.path.join(er, "bootloader/sys/l4t/sc7entry.bin"), "wb").write(SC7E)
+    open(os.path.join(er, "bootloader/sys/l4t/sc7exit.bin"), "wb").write(SC7X)
+    open(os.path.join(er, "lib/firmware/tegra21x_xusb_firmware"), "wb").write(XU21)
+    open(os.path.join(er, "bl31.bin"), "wb").write(blob(1000)); os.makedirs(os.path.join(er, "switchroot/ubuntu"), exist_ok=True)
+    open(os.path.join(er, "switchroot/ubuntu/bl31.bin"), "wb").write(BL31)
+    out11 = os.path.join(tmp, "out11")
+    rc, log = run(["--profile", "erista", "--search-root", er, "--out-dir", out11])
+    rd = lambda *a: open(os.path.join(out11, *a), "rb").read() if os.path.exists(os.path.join(out11, *a)) else None
+    check("erista: sc7entry/sc7exit staged byte-identical", rd("bootloader/sys/l4t/sc7entry.bin") == SC7E and rd("bootloader/sys/l4t/sc7exit.bin") == SC7X, log[-700:])
+    check("erista: T210 XUSB firmware staged", rd("tegra21x_xusb_firmware") == XU21, log[-700:])
+    check("erista profile now wants bl31 too", "bl31" in log)
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 

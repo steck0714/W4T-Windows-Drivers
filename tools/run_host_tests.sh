@@ -23,9 +23,14 @@ python3 -I tools/check_l4t_reference.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); ec
 python3 -I tools/check_abi_sync.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/check_abi_sync.py"; } || { fail=$((fail+1)); echo "FAIL tools/check_abi_sync.py"; tail -8 "$tmp/o"; }
 python3 -I tools/check_acpi_resources.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/check_acpi_resources.py"; } || { fail=$((fail+1)); echo "FAIL tools/check_acpi_resources.py"; tail -5 "$tmp/o"; }
 python3 -I tools/check_no_proprietary.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/check_no_proprietary.py"; } || { fail=$((fail+1)); echo "FAIL tools/check_no_proprietary.py"; tail -8 "$tmp/o"; }
+python3 -I tools/check_aula_audit.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/check_aula_audit.py"; } || { fail=$((fail+1)); echo "FAIL tools/check_aula_audit.py"; tail -8 "$tmp/o"; }
+python3 -I tools/aula_layout.py --check >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/aula_layout.py --check"; } || { fail=$((fail+1)); echo "FAIL tools/aula_layout.py --check"; tail -8 "$tmp/o"; }
+python3 -I tools/check_credits.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/check_credits.py"; } || { fail=$((fail+1)); echo "FAIL tools/check_credits.py"; tail -8 "$tmp/o"; }
 # fwfetch (Rust firmware collector): needs cargo + mke2fs, otherwise exit 77 = skipped
 python3 tools/fwfetch/tests/run_tests.py >"$tmp/o" 2>&1; rc=$?
 if [ $rc -eq 0 ]; then pass=$((pass+1)); echo "PASS tools/fwfetch/tests/run_tests.py"; elif [ $rc -eq 77 ]; then echo "SKIP tools/fwfetch tests (need cargo and mke2fs)"; else fail=$((fail+1)); echo "FAIL tools/fwfetch/tests/run_tests.py"; grep FAIL "$tmp/o" | head -8; fi
+python3 -I tools/check_dsdt_compile.py >"$tmp/o" 2>&1; rc=$?
+if [ $rc -eq 0 ]; then pass=$((pass+1)); echo "PASS tools/check_dsdt_compile.py"; elif [ $rc -eq 77 ]; then echo "SKIP tools/check_dsdt_compile.py (need iasl: set IASL or put it on PATH)"; else fail=$((fail+1)); echo "FAIL tools/check_dsdt_compile.py"; tail -8 "$tmp/o"; fi
 python3 -I tools/build/tests/test_build_tools.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/build/tests/test_build_tools.py"; } || { fail=$((fail+1)); echo "FAIL tools/build/tests/test_build_tools.py"; grep FAIL "$tmp/o" | head -8; }
 if [ -n "${MESA_DIR:-}" ]; then
   python3 -I drivers/t210-icosa/drivers/TegraGpu/tools/build.py --mesa "$MESA_DIR" --out "$tmp/gpu" --host-only >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS TegraGpu build.py --host-only"; } || { fail=$((fail+1)); echo "FAIL TegraGpu build.py"; tail -8 "$tmp/o"; }

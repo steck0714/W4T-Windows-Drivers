@@ -69,3 +69,15 @@
 
 ## 4. ライセンス・出典
 `CREDITS.md` と `reference/l4t/SOURCES.md` を参照。
+
+## 追補（2026-11-18）: クレジット整備・OLED 分割・静的レビュー
+- **クレジット**: SPDX / Copyright の無かった 39 ファイル(t210 / t214 のドライバ `.c/.cpp/.h`)に出典ブロックを追加。OLED の 4 本は DanilKhmyrov/windows-switch を出典・所有者として明記。
+  個人の作者・著作権の行は上流に無いので作っていない。再発防止に `tools/check_credits.py`(120 ファイル検査、`run_host_tests.sh` に組み込み)。
+- **OLED の分割**: `drivers/t214-aula/drivers/<ドライバ名>/`(SwitchHid・SwitchBattery・SwitchTouchRead・SwitchAgent・SwitchWifi・SwitchBluetooth・SwitchAudio)。
+  上流のビルドスクリプトは上流の配置が前提なので、`layout.json` と `tools/aula_layout.py`(`--check` で上流と SHA-256 一致、`--materialize` で上流の形に復元)を足した。
+- **テストの不具合を 1 件修正**: `t214-hoag/docs/hdh001/tests/test-ftm4.py` が古いパス(`drivers/SwitchLiteTouch/...`)を読んで失敗していた → `SwitchLiteTouch/src/...` に修正し通過。
+- **静的レビュー(目視 + grep。WDK ビルド・実機は無し)**:
+  - T210 の Dx 対応(Fan / Battery / Sensor / CpuClock / PowerButton / Touch): Suspend で `Stopping` を立ててタイマー停止、Restart で解除して再開、タイマー内の再アーム後の再確認(`WdfTimerStop(..., FALSE)`)まで、6 本とも同じ形で揃っている。Battery の二重オープン防止と Cleanup でのターゲット解放も読んで問題は見つからなかった。SwitchRtc はポーリングを持たないので対象外。
+  - OLED の swhid / swbatt / touchread: `MmMapIoSpace` / `MmUnmapIoSpace`、`ObReference` / `ObDereference`、`ZwCreateFile` / `ZwClose` の対応を数え、swhid のマップ失敗時の分岐を読んだ。明らかな漏れは見つからなかった。**上流のファイルなので修正はしていない**(見つけたら上流へ報告)。
+  - これは網羅的な監査ではない。タイミング競合・レジスタ手順は実機でしか確かめられない。
+- **まだ無いもの**: HDMI(外部ディスプレイ)・スリープ(S0 低電力 / PEP / SC7)・Erista の GPU 以外の不足ドライバは、上の理由(仕様と実機の確認なしに作ると起動不能の恐れ)で**作っていない**。
