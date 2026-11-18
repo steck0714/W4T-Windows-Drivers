@@ -20,4 +20,4 @@ $args = @{
   Libs          = @("$L\netcx\kmdf\adapter\2.2\netadaptercxstub.lib", "$L\wificx\1.0\wificxstub.lib", "$L\ndis.lib")
 }
 if ($NoSign) { $args.NoSign = $true }
-& "$PSScriptRoot\..\..\tools\Build-Driver-WiFiCx.ps1" @args
+& "$PSScriptRoot\..\..\tools\Build-Driver.ps1" @args

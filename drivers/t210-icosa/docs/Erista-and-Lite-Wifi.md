@@ -26,7 +26,7 @@ The firmware folder `System32\drivers\switchwifi` is shared on purpose: it only 
 
 ## Other separated pieces
 
-- `tools/Build-Driver-WiFiCx.ps1` is hayato41200's newer `Build-Driver.ps1` (C++ / WiFiCx support, `-Wdk`, `-Ntddi`). `drivers/SwitchWlan/build.ps1` calls this copy. The existing `tools/Build-Driver.ps1` is untouched.
+- `tools/Build-Driver.ps1` now includes hayato41200's newer version (the former `Build-Driver-WiFiCx.ps1`; it was merged into one script on 2026-11-17) (C++ / WiFiCx support, `-Wdk`, `-Ntddi`), plus signtool/Inf2Cat discovery, `-NoWarnAsError` and `-CertThumbprint`. `drivers/SwitchWlan/build.ps1` calls it.
 - `app-hayato/` is hayato41200's whole `app/` tree (SwitchCenter 0.8.1, SwitchPatcher 0.5.0, shared code). It is self-contained and is **not** merged into `app/`: the existing projects compile `Shared\*.cs` with a wildcard, so new files there would leak into the existing build.
 - `reference-hayato/` holds hayato41200's versions of files that already exist here (`release/Make-Release.ps1`, the OTA design note, kit READMEs), for reading only.
 

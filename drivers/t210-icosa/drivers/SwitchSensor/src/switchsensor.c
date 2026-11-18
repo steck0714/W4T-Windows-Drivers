@@ -1,3 +1,12 @@
+/* W4T-CREDIT-BEGIN
+ * Origin : hayato41200/Windows-for-Switch-Drivers, Erista (t210/Icosa) driver set, which matched an older
+ *          ruje0504-2/Windows-for-Switch-Drivers commit (docs/HAYATO-DRIVER-AUDIT-ja.md); later edits are in CREDITS.md.
+ * Authors: hayato41200, ruje0504-2 (and their contributors). The upstream file has no author or
+ *          copyright line, so per-file authorship is not recorded here.
+ * License: GPL-2.0, from the LICENSE of this directory (the file has no SPDX tag of its own).
+ * Refs   : CTCaer/hekate (GPL-2.0): ambient light sensor.
+ * Credit block added by W4T (2026-11-18); full table in CREDITS.md.
+ * W4T-CREDIT-END */
 /*
  * Nintendo Switch light sensor and accelerometer driver, KMDF.
  *
@@ -113,6 +122,8 @@ EVT_WDF_DEVICE_PREPARE_HARDWARE SwSensEvtPrepareHardware;
 EVT_WDF_DEVICE_RELEASE_HARDWARE SwSensEvtReleaseHardware;
 EVT_WDF_DEVICE_SELF_MANAGED_IO_INIT SwSensEvtSelfManagedIoInit;
 EVT_WDF_DEVICE_SELF_MANAGED_IO_CLEANUP SwSensEvtSelfManagedIoCleanup;
+EVT_WDF_DEVICE_SELF_MANAGED_IO_SUSPEND SwSensEvtSelfManagedIoSuspend;
+EVT_WDF_DEVICE_SELF_MANAGED_IO_RESTART SwSensEvtSelfManagedIoRestart;
 EVT_WDF_TIMER SwSensEvtTimer;
 EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL SwSensEvtIoDeviceControl;
 
@@ -399,6 +410,11 @@ VOID SwSensEvtTimer(WDFTIMER Timer)
     }
     if (!Dev->Stopping) {
         WdfTimerStart(Timer, WDF_REL_TIMEOUT_IN_MS(POLL_MS));    /* one-shot passive timer, re-armed */
+        if (Dev->Stopping) {
+            /* Suspend/Cleanup set Stopping between the check above and this re-arm: cancel it again.
+               (Wait must be FALSE here: we are inside the timer callback.) */
+            (VOID)WdfTimerStop(Timer, FALSE);
+        }
     }
 }
 
@@ -513,6 +529,41 @@ NTSTATUS SwSensEvtSelfManagedIoInit(WDFDEVICE Device)
     return STATUS_SUCCESS;
 }
 
+/* System sleep (Dx): stop polling, then power the light sensor and accelerometer down (the chips keep running
+ * on their own rail otherwise); restart brings them up the same way SelfManagedIoInit does. */
+NTSTATUS SwSensEvtSelfManagedIoSuspend(WDFDEVICE Device)
+{
+    PSWSENS_DEVICE Dev = SwSensGetDevice(Device);
+    Dev->Stopping = TRUE;
+    if (Dev->Timer != NULL) {
+        WdfTimerStop(Dev->Timer, TRUE);
+    }
+    if (Dev->AlsOk) {
+        (VOID)SwSensAlsWrite(Dev, ALS_CONTROL, 0);
+    }
+    if (Dev->ImuOk) {
+        (VOID)SwSensImuWrite(Dev, IMU_CTRL1_XL, 0);
+    }
+    Dev->AlsOk = FALSE;     /* SelfManagedIoCleanup must not touch the chips again while the device is down */
+    Dev->ImuOk = FALSE;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS SwSensEvtSelfManagedIoRestart(WDFDEVICE Device)
+{
+    PSWSENS_DEVICE Dev = SwSensGetDevice(Device);
+    if (Dev->HaveAls) {
+        Dev->AlsOk = NT_SUCCESS(SwSensAlsStart(Dev));
+        Dev->AlsFailures = 0;
+    }
+    Dev->ImuOk = (Dev->Spi != NULL) && NT_SUCCESS(SwSensImuStart(Dev));
+    Dev->Stopping = FALSE;
+    if (Dev->Timer != NULL) {
+        WdfTimerStart(Dev->Timer, WDF_REL_TIMEOUT_IN_MS(POLL_MS));
+    }
+    return STATUS_SUCCESS;
+}
+
 VOID SwSensEvtSelfManagedIoCleanup(WDFDEVICE Device)
 {
     PSWSENS_DEVICE Dev = SwSensGetDevice(Device);
@@ -544,6 +595,8 @@ NTSTATUS SwSensEvtDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT DeviceInit)
     Pnp.EvtDeviceReleaseHardware = SwSensEvtReleaseHardware;
     Pnp.EvtDeviceSelfManagedIoInit = SwSensEvtSelfManagedIoInit;
     Pnp.EvtDeviceSelfManagedIoCleanup = SwSensEvtSelfManagedIoCleanup;
+    Pnp.EvtDeviceSelfManagedIoSuspend = SwSensEvtSelfManagedIoSuspend;
+    Pnp.EvtDeviceSelfManagedIoRestart = SwSensEvtSelfManagedIoRestart;
     WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &Pnp);
     Status = WdfDeviceInitAssignName(DeviceInit, &DeviceName);
     if (!NT_SUCCESS(Status)) {
@@ -577,7 +630,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
         RtlCopyMemory(&SwSensParamsPath[RegistryPath->Length / sizeof(WCHAR)], L"\\Parameters", sizeof(L"\\Parameters"));
         (VOID)RtlCreateRegistryKey(RTL_REGISTRY_ABSOLUTE, SwSensParamsPath);
     }
-    SwSensTrace(L"DriverVersion", 1);
+    SwSensTrace(L"DriverVersion", 2);
     WDF_DRIVER_CONFIG_INIT(&Config, SwSensEvtDeviceAdd);
     return WdfDriverCreate(DriverObject, RegistryPath, WDF_NO_OBJECT_ATTRIBUTES, &Config, WDF_NO_HANDLE);
 }

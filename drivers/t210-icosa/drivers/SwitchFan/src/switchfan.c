@@ -1,3 +1,12 @@
+/* W4T-CREDIT-BEGIN
+ * Origin : hayato41200/Windows-for-Switch-Drivers, Erista (t210/Icosa) driver set, which matched an older
+ *          ruje0504-2/Windows-for-Switch-Drivers commit (docs/HAYATO-DRIVER-AUDIT-ja.md); later edits are in CREDITS.md.
+ * Authors: hayato41200, ruje0504-2 (and their contributors). The upstream file has no author or
+ *          copyright line, so per-file authorship is not recorded here.
+ * License: GPL-2.0, from the LICENSE of this directory (the file has no SPDX tag of its own).
+ * Refs   : see CREDITS.md (per-source table).
+ * Credit block added by W4T (2026-11-18); full table in CREDITS.md.
+ * W4T-CREDIT-END */
 /*
  * Nintendo Switch fan control driver, KMDF.
  *
@@ -81,6 +90,8 @@ EVT_WDF_DEVICE_PREPARE_HARDWARE SwFanEvtPrepareHardware;
 EVT_WDF_DEVICE_RELEASE_HARDWARE SwFanEvtReleaseHardware;
 EVT_WDF_DEVICE_SELF_MANAGED_IO_INIT SwFanEvtSelfManagedIoInit;
 EVT_WDF_DEVICE_SELF_MANAGED_IO_CLEANUP SwFanEvtSelfManagedIoCleanup;
+EVT_WDF_DEVICE_SELF_MANAGED_IO_SUSPEND SwFanEvtSelfManagedIoSuspend;
+EVT_WDF_DEVICE_SELF_MANAGED_IO_RESTART SwFanEvtSelfManagedIoRestart;
 EVT_WDF_TIMER SwFanEvtTimer;
 EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL SwFanEvtIoDeviceControl;
 POWER_SETTING_CALLBACK SwFanDisplayStateCallback;
@@ -196,6 +207,11 @@ VOID SwFanEvtTimer(WDFTIMER Timer)
     SwFanTrace(L"Runs", (ULONG)InterlockedIncrement(&Dev->Runs));
     if (!Dev->Stopping) {
         WdfTimerStart(Timer, WDF_REL_TIMEOUT_IN_MS(POLL_MS));    /* one-shot passive timer, re-armed */
+        if (Dev->Stopping) {
+            /* Suspend/Cleanup set Stopping between the check above and this re-arm: cancel it again.
+               (Wait must be FALSE here: we are inside the timer callback.) */
+            (VOID)WdfTimerStop(Timer, FALSE);
+        }
     }
 }
 
@@ -386,6 +402,33 @@ NTSTATUS SwFanEvtSelfManagedIoInit(WDFDEVICE Device)
     return STATUS_SUCCESS;
 }
 
+/* System sleep (Dx): stop polling BEFORE the PWM/I2C side goes down. The poll timer re-arms itself, so Stopping
+ * is set first (see the re-check in SwFanEvtTimer). Nobody reads the temperature while the system sleeps, so the
+ * fan is left at the level UEFI set (76) rather than at whatever the last poll chose (it could be 0). */
+NTSTATUS SwFanEvtSelfManagedIoSuspend(WDFDEVICE Device)
+{
+    PSWFAN_DEVICE Dev = SwFanGetDevice(Device);
+    Dev->Stopping = TRUE;
+    if (Dev->Timer != NULL) {
+        WdfTimerStop(Dev->Timer, TRUE);
+    }
+    if (Dev->Pwm != NULL) {
+        SwFanSetDuty(Dev, 76);
+    }
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS SwFanEvtSelfManagedIoRestart(WDFDEVICE Device)
+{
+    PSWFAN_DEVICE Dev = SwFanGetDevice(Device);
+    Dev->Failures = 0;
+    Dev->Stopping = FALSE;
+    if (Dev->Timer != NULL) {
+        WdfTimerStart(Dev->Timer, WDF_REL_TIMEOUT_IN_MS(500));
+    }
+    return STATUS_SUCCESS;
+}
+
 VOID SwFanEvtSelfManagedIoCleanup(WDFDEVICE Device)
 {
     PSWFAN_DEVICE Dev = SwFanGetDevice(Device);
@@ -419,6 +462,8 @@ NTSTATUS SwFanEvtDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT DeviceInit)
     Pnp.EvtDeviceReleaseHardware = SwFanEvtReleaseHardware;
     Pnp.EvtDeviceSelfManagedIoInit = SwFanEvtSelfManagedIoInit;
     Pnp.EvtDeviceSelfManagedIoCleanup = SwFanEvtSelfManagedIoCleanup;
+    Pnp.EvtDeviceSelfManagedIoSuspend = SwFanEvtSelfManagedIoSuspend;
+    Pnp.EvtDeviceSelfManagedIoRestart = SwFanEvtSelfManagedIoRestart;
     WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &Pnp);
     Status = WdfDeviceInitAssignName(DeviceInit, &DeviceName);
     if (!NT_SUCCESS(Status)) {
@@ -454,7 +499,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
         RtlCopyMemory(&SwFanParamsPath[RegistryPath->Length / sizeof(WCHAR)], L"\\Parameters", sizeof(L"\\Parameters"));
         (VOID)RtlCreateRegistryKey(RTL_REGISTRY_ABSOLUTE, SwFanParamsPath);
     }
-    SwFanTrace(L"DriverVersion", 2);
+    SwFanTrace(L"DriverVersion", 3);
     WDF_DRIVER_CONFIG_INIT(&Config, SwFanEvtDeviceAdd);
     return WdfDriverCreate(DriverObject, RegistryPath, WDF_NO_OBJECT_ATTRIBUTES, &Config, WDF_NO_HANDLE);
 }

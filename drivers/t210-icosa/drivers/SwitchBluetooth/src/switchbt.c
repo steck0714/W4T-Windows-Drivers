@@ -1,3 +1,12 @@
+/* W4T-CREDIT-BEGIN
+ * Origin : hayato41200/Windows-for-Switch-Drivers, Erista (t210/Icosa) driver set, which matched an older
+ *          ruje0504-2/Windows-for-Switch-Drivers commit (docs/HAYATO-DRIVER-AUDIT-ja.md); later edits are in CREDITS.md.
+ * Authors: hayato41200, ruje0504-2 (and their contributors). The upstream file has no author or
+ *          copyright line, so per-file authorship is not recorded here.
+ * License: GPL-2.0, from the LICENSE of this directory (the file has no SPDX tag of its own).
+ * Refs   : see CREDITS.md (per-source table).
+ * Credit block added by W4T (2026-11-18); full table in CREDITS.md.
+ * W4T-CREDIT-END */
 /*
  * Nintendo Switch Bluetooth driver, KMDF. Stage 2: Windows Bluetooth over BthMini.
  *
@@ -116,6 +125,20 @@
  * 1.0.0.15: allow BthMini to cancel an in-flight write before parent D0
  * exit. Keep the copied H4 frame until the ISR finishes it, even after
  * the request is canceled, so the next write cannot overwrite its tail.
+ *
+ * 1.0.0.17: validate the complete patch before downloading, check every
+ * command status, and never publish a radio after a partial download.
+ * Reuse a verified patch across D0 transitions, and verify the baud rate
+ * instead of treating a missing baud-change reply as success.
+ *
+ * 1.0.0.18: BootPending records an unfinished probe; it no longer disables
+ * Bluetooth on every later boot. Clear it on orderly D0 exit. On T214, one
+ * failed probe may reset PH4/BT_REG_ON before a complete fresh retry, with
+ * UART interrupts disabled. Wi-Fi power and the shared 32 kHz clock stay on.
+ *
+ * 1.0.0.19: restore UART-D's CAR enable/reset before touching UART registers
+ * after D0 context loss. Require the boot PLLP parent to be enabled/locked,
+ * use only UART-D set/clear bits and retain the bounded chip recovery above.
  */
 #include <ntddk.h>
 #include <ntstrsafe.h>
@@ -147,6 +170,16 @@ NTSYSAPI ULONG NTAPI RtlRandomEx(PULONG Seed);     /* ntoskrnl export, declared 
 #define UART_DIV_115200   221u          /* 408 MHz / 16 / 221 = 115384 baud (UEFI R390) */
 #define UART_DIV_3M       1u            /* not counted while the CAR override is on */
 #define CAR_UARTD_SOURCE  0x600061C0u   /* CLK_SOURCE_UARTD */
+#define CAR_BASE          0x60006000u
+#define CAR_LENGTH        0x1000u
+#define CAR_PLLP_BASE     0x0A0u
+#define CAR_CLOCK_U       0x018u
+#define CAR_RESET_U       0x00Cu
+#define CAR_CLOCK_U_SET   0x330u
+#define CAR_RESET_U_SET   0x310u
+#define CAR_RESET_U_CLEAR 0x314u
+#define CAR_UARTD_BIT     (1u << 1)
+#define CAR_PLLP_READY    ((1u << 30) | (1u << 27))
 #define CAR_UART_PLLP     0x00000000u   /* PLLP 408 MHz, the UART divisor counts */
 #define CAR_UART_3M       ((1u << 24) | 15u)   /* override: 2 x 408 / (15 + 2) = 48 MHz = 16 x 3 Mbaud */
 #define UART_MCR_RTS      0x02u
@@ -226,13 +259,15 @@ static VOID SwBtDoneFlush(PSWBT_DONE Done)
 typedef struct _SWBT_DEVICE {
     volatile ULONG *Uart;
     volatile ULONG *CarUartd;       /* CLK_SOURCE_UARTD, so the driver sets the UART clock */
+    volatile ULONG *Car;
+    volatile BOOLEAN HostReady;
     WDFINTERRUPT Interrupt;
     BOOLEAN ChipOk;
-    BOOLEAN SafeMode;               /* the last boot did not finish: stay idle */
     BOOLEAN D0Active;               /* protected by Lock; interrupt connected */
     BOOLEAN BootGuardPending;
-    ULONG HealthyChildTicks;
     BOOLEAN HighSpeedNow;           /* the chip and the UART run at 3 Mbaud */
+    BOOLEAN FirmwareVerified;      /* this device instance verified a full patch */
+    ULONG FirmwareVersion;         /* HCI revision + LMP subversion after patch */
     ULONG ChildTick;                /* timer tick at which the child is added */
     UCHAR BdAddr[6];                /* little endian, as HCI */
 
@@ -326,7 +361,6 @@ EVT_WDF_TIMER SwBtEvtTimer;
 EVT_WDF_REQUEST_CANCEL SwBtEvtTxCancel;
 EVT_WDF_DEVICE_D0_ENTRY SwBtEvtChildD0Entry;
 static NTSTATUS SwBtCreateChild(WDFDEVICE Device);
-static BOOLEAN SwBtSafeModeCleared(PSWBT_DEVICE Dev);
 static VOID SwBtStart(PSWBT_DEVICE Dev);
 #define CHILD_DELAY_TICKS 10            /* timer ticks of 2 s: the child comes 20 s after start */
 
@@ -390,6 +424,36 @@ static BOOLEAN SwBtReadParam(PCWSTR Name, PULONG Value)
 }
 
 /* ------------------------------------------------------------------ UART */
+
+static NTSTATUS SwBtPrepareHost(PSWBT_DEVICE Dev)
+{
+    if (Dev->D0Active) return STATUS_INVALID_DEVICE_STATE;
+    Dev->HostReady = FALSE;
+    if (Dev->Uart == NULL || Dev->Car == NULL || Dev->CarUartd == NULL)
+        return STATUS_DEVICE_NOT_READY;
+    /* Switchroot's resume enables the UART clock/reset before UART restore.
+     * Warmboot/platform code owns the shared PLLP; never retune it here. */
+    ULONG Pll = READ_REGISTER_ULONG((PULONG)&Dev->Car[CAR_PLLP_BASE / 4]);
+    if ((Pll & CAR_PLLP_READY) != CAR_PLLP_READY) return STATUS_DEVICE_POWER_FAILURE;
+    ULONG Enable = READ_REGISTER_ULONG((PULONG)&Dev->Car[CAR_CLOCK_U / 4]);
+    ULONG Reset = READ_REGISTER_ULONG((PULONG)&Dev->Car[CAR_RESET_U / 4]);
+    if (!(Enable & CAR_UARTD_BIT) || (Reset & CAR_UARTD_BIT)) {
+        /* Transport/interrupts are stopped. Recover only UART-D and start
+         * with the existing 408-MHz divisor path; the probe negotiates baud. */
+        WRITE_REGISTER_ULONG((PULONG)&Dev->Car[CAR_RESET_U_SET / 4], CAR_UARTD_BIT);
+        WRITE_REGISTER_ULONG((PULONG)Dev->CarUartd, CAR_UART_PLLP);
+        WRITE_REGISTER_ULONG((PULONG)&Dev->Car[CAR_CLOCK_U_SET / 4], CAR_UARTD_BIT);
+        KeStallExecutionProcessor(2);
+        if (!(READ_REGISTER_ULONG((PULONG)&Dev->Car[CAR_CLOCK_U / 4]) & CAR_UARTD_BIT))
+            return STATUS_DEVICE_POWER_FAILURE;
+        WRITE_REGISTER_ULONG((PULONG)&Dev->Car[CAR_RESET_U_CLEAR / 4], CAR_UARTD_BIT);
+        KeStallExecutionProcessor(2);
+        if (READ_REGISTER_ULONG((PULONG)&Dev->Car[CAR_RESET_U / 4]) & CAR_UARTD_BIT)
+            return STATUS_DEVICE_POWER_FAILURE;
+    }
+    Dev->HostReady = TRUE;
+    return STATUS_SUCCESS;
+}
 
 static ULONG SwBtRead(PSWBT_DEVICE Dev, ULONG Reg)
 {
@@ -540,7 +604,19 @@ static BOOLEAN SwBtReset(PSWBT_DEVICE Dev, UCHAR *Event, ULONG Max)
     ULONG Length;
     SwBtFlushRx(Dev);
     Length = SwBtPollCommand(Dev, HCI_RESET, NULL, 0, Event, Max);
-    return Length >= 7 && Event[6] == 0;
+    if (Length < 7 || Event[6] != 0) return FALSE;
+    /* btbcm_reset: allow the controller to finish its reset before another command. */
+    SwBtSleepMs(100);
+    return TRUE;
+}
+
+static BOOLEAN SwBtReadVersion(PSWBT_DEVICE Dev, UCHAR *Event, ULONG Max, PULONG Version)
+{
+    ULONG Length = SwBtPollCommand(Dev, HCI_READ_VERSION, NULL, 0, Event, Max);
+    if (Length < 15 || Event[6] != 0) return FALSE;
+    *Version = Event[8] | ((ULONG)Event[9] << 8) |
+               ((ULONG)Event[13] << 16) | ((ULONG)Event[14] << 24);
+    return TRUE;
 }
 
 static VOID SwBtTraceVersion(PSWBT_DEVICE Dev, UCHAR *Event, ULONG Max)
@@ -597,6 +673,19 @@ static PUCHAR SwBtLoadFirmware(PULONG Length)
 static ULONG SwBtPatchram(PSWBT_DEVICE Dev, const UCHAR *Fw, ULONG FwLength, UCHAR *Event, ULONG Max)
 {
     ULONG Offset = 0, Records = 0;
+    /* Do not enter the minidriver with a truncated or empty command stream. */
+    while (Offset < FwLength) {
+        if (FwLength - Offset < 3 || FwLength - Offset - 3 < Fw[Offset + 2]) {
+            SwBtTrace(L"FirmwareResult", 0xF0000002u);
+            return 0;
+        }
+        Offset += 3u + Fw[Offset + 2];
+    }
+    if (FwLength == 0) return 0;
+    Offset = 0;
+    SwBtTrace(L"FirmwareFailedRecord", MAXULONG);
+    SwBtTrace(L"FirmwareFailedOpcode", 0);
+    SwBtTrace(L"FirmwareCommandStatus", 0);
     if (SwBtPollCommand(Dev, BCM_DOWNLOAD_MINI, NULL, 0, Event, Max) < 7 || Event[6] != 0) {
         SwBtTrace(L"FirmwareResult", 0xF0000001u);
         return 0;
@@ -609,9 +698,12 @@ static ULONG SwBtPatchram(PSWBT_DEVICE Dev, const UCHAR *Fw, ULONG FwLength, UCH
             SwBtTrace(L"FirmwareResult", 0xF0000002u);       /* truncated file */
             return 0;
         }
-        if (SwBtPollCommand(Dev, Opcode, &Fw[Offset + 3], ParamLength, Event, Max) < 7) {
-            SwBtTrace(L"FirmwareResult", 0xF0000003u);
+        ULONG Length = SwBtPollCommand(Dev, Opcode, &Fw[Offset + 3], ParamLength, Event, Max);
+        if (Length < 7 || Event[6] != 0) {
+            SwBtTrace(L"FirmwareResult", Length < 7 ? 0xF0000003u : 0xF0000005u);
             SwBtTrace(L"FirmwareFailedRecord", Records);
+            SwBtTrace(L"FirmwareFailedOpcode", Opcode);
+            SwBtTrace(L"FirmwareCommandStatus", Length < 7 ? MAXULONG : Event[6]);
             return 0;
         }
         Offset += 3u + ParamLength;
@@ -627,9 +719,20 @@ static BOOLEAN SwBtHighSpeed(PSWBT_DEVICE Dev, UCHAR *Event, ULONG Max)
     UCHAR Params[6] = { 0, 0, (UCHAR)BCM_HIGH_BAUD, (UCHAR)(BCM_HIGH_BAUD >> 8),
                         (UCHAR)(BCM_HIGH_BAUD >> 16), (UCHAR)(BCM_HIGH_BAUD >> 24) };
     ULONG Length = SwBtPollCommand(Dev, BCM_UPDATE_BAUD, Params, sizeof(Params), Event, Max);
-    if (Length < 7 || Event[6] != 0) {
-        SwBtTrace(L"HighSpeedResult", 1);                   /* refused: still 115200 */
-        return TRUE;
+    /* A lost acknowledgement can mean that the chip already changed speed.
+       Probe both rates; only a valid Read_Local_Version establishes success. */
+    SwBtTrace(L"BaudCommandStatus", Length >= 7 ? Event[6] : MAXULONG);
+    if (Length >= 7 && Event[6] != 0) {
+        /* An explicit rejection leaves the old baud rate in force. Do not
+           send 3-Mbaud bytes into a controller that just rejected that rate. */
+        ULONG Version;
+        if (SwBtReadVersion(Dev, Event, Max, &Version)) {
+            Dev->HighSpeedNow = FALSE;
+            SwBtTrace(L"HighSpeedResult", 1);
+            return TRUE;
+        }
+        SwBtTrace(L"HighSpeedResult", 4);
+        return FALSE;
     }
     WRITE_REGISTER_ULONG((PULONG)Dev->CarUartd, CAR_UART_3M);
     KeStallExecutionProcessor(10);
@@ -651,7 +754,18 @@ static BOOLEAN SwBtHighSpeed(PSWBT_DEVICE Dev, UCHAR *Event, ULONG Max)
         Dev->HighSpeedNow = TRUE;
         return TRUE;
     }
-    SwBtTrace(L"HighSpeedResult", 4);                       /* lost: the next boot powers the chip again */
+    WRITE_REGISTER_ULONG((PULONG)Dev->CarUartd, CAR_UART_PLLP);
+    KeStallExecutionProcessor(10);
+    SwBtUartInit(Dev, UART_DIV_115200, UART_MCR_FLOW);
+    SwBtSleepMs(10);
+    SwBtFlushRx(Dev);
+    Length = SwBtPollCommand(Dev, HCI_READ_VERSION, NULL, 0, Event, Max);
+    if (Length >= 15 && Event[6] == 0) {
+        Dev->HighSpeedNow = FALSE;
+        SwBtTrace(L"HighSpeedResult", 1);                   /* verified fallback at 115200 */
+        return TRUE;
+    }
+    SwBtTrace(L"HighSpeedResult", 4);
     return FALSE;
 }
 
@@ -659,7 +773,8 @@ static BOOLEAN SwBtProbe(PSWBT_DEVICE Dev)
 {
     UCHAR Event[260];
     WCHAR Text[256];
-    ULONG Length, Index, CanSwitchClock, FwLength = 0, HighSpeed = 1;
+    ULONG Length, Index, CanSwitchClock, FwLength = 0, HighSpeed = 1, Version;
+    BOOLEAN RetainedPatch;
     PUCHAR Fw;
 
     /* 115200 from PLLP 408 MHz, whatever clock UEFI left (R391 left the 3 Mbaud override). */
@@ -696,26 +811,46 @@ static BOOLEAN SwBtProbe(PSWBT_DEVICE Dev)
     }
     SwBtTrace(L"HciReset", 0x100);
     SwBtTrace(L"UartClockMHz", Dev->HighSpeedNow ? 48 : 408);
+    if (!SwBtReadVersion(Dev, Event, sizeof(Event), &Version)) {
+        SwBtTraceString(L"Result", L"no valid version after reset");
+        return FALSE;
+    }
+    RetainedPatch = Dev->FirmwareVerified && Dev->FirmwareVersion == Version;
+    Dev->FirmwareVerified = RetainedPatch;
     SwBtTraceVersion(Dev, Event, sizeof(Event));
 
-    /* Firmware patch, if the user put the file in place (not when the chip already runs it at 3 Mbaud). */
-    Fw = Dev->HighSpeedNow ? NULL : SwBtLoadFirmware(&FwLength);
-    if (Dev->HighSpeedNow) {
+    /* D0 exit does not remove BT_REG_ON. Re-downloading a live patch on
+       every display sleep can leave the controller in its minidriver. */
+    Fw = (Dev->HighSpeedNow || RetainedPatch) ? NULL : SwBtLoadFirmware(&FwLength);
+    if (Dev->HighSpeedNow || RetainedPatch) {
         SwBtTrace(L"FirmwareResult", 2);                    /* kept from the last session */
     } else if (Fw != NULL) {
-        ULONG Records = SwBtPatchram(Dev, Fw, FwLength, Event, sizeof(Event));
+        ULONG Records;
+        SwBtWrite(Dev, UART_MCR, UART_MCR_FLOW);             /* respect the controller's CTS during RAM writes */
+        Records = SwBtPatchram(Dev, Fw, FwLength, Event, sizeof(Event));
+        SwBtTrace(L"FirmwareRetry", 0);
+        /* Restart the whole download at most once, and only after the
+           controller acknowledges Reset. Never resend an ambiguous record. */
+        if (Records == 0 && SwBtReset(Dev, Event, sizeof(Event))) {
+            SwBtTrace(L"FirmwareRetry", 1);
+            Records = SwBtPatchram(Dev, Fw, FwLength, Event, sizeof(Event));
+        }
         ExFreePoolWithTag(Fw, POOL_TAG);
         SwBtTrace(L"FirmwareRecords", Records);
-        if (Records != 0) {
-            if (SwBtReset(Dev, Event, sizeof(Event))) {
-                SwBtTrace(L"FirmwareResult", 1);            /* patched and answering */
-                SwBtTraceVersion(Dev, Event, sizeof(Event));
-            } else {
-                SwBtTrace(L"FirmwareResult", 0xF0000004u);
-                SwBtTraceString(L"Result", L"no answer after the firmware patch");
-                return FALSE;
-            }
+        if (Records == 0) {
+            SwBtTraceString(L"Result", L"firmware download failed; radio not published");
+            return FALSE;
         }
+        if (!SwBtReset(Dev, Event, sizeof(Event)) ||
+            !SwBtReadVersion(Dev, Event, sizeof(Event), &Version)) {
+            SwBtTrace(L"FirmwareResult", 0xF0000004u);
+            SwBtTraceString(L"Result", L"no answer after the firmware patch");
+            return FALSE;
+        }
+        Dev->FirmwareVerified = TRUE;
+        Dev->FirmwareVersion = Version;
+        SwBtTrace(L"FirmwareResult", 1);
+        SwBtTraceVersion(Dev, Event, sizeof(Event));
     } else {
         SwBtTrace(L"FirmwareResult", 0);                    /* no file: ROM code */
     }
@@ -723,12 +858,19 @@ static BOOLEAN SwBtProbe(PSWBT_DEVICE Dev)
     SwBtChooseAddress(Dev);
     Length = SwBtPollCommand(Dev, BCM_WRITE_BD_ADDR, Dev->BdAddr, 6, Event, sizeof(Event));
     SwBtTrace(L"WriteBdAddr", Length >= 7 ? Event[6] + 0x100u : 0);
+    if (Length < 7 || Event[6] != 0) {
+        SwBtTraceString(L"Result", L"controller rejected its Bluetooth address");
+        return FALSE;
+    }
 
     Length = SwBtPollCommand(Dev, HCI_READ_BD_ADDR, NULL, 0, Event, sizeof(Event));
     if (Length >= 13 && Event[6] == 0) {
         (VOID)RtlStringCchPrintfW(Text, RTL_NUMBER_OF(Text), L"%02X:%02X:%02X:%02X:%02X:%02X",
                                   Event[12], Event[11], Event[10], Event[9], Event[8], Event[7]);
         SwBtTraceString(L"BdAddr", Text);
+    } else {
+        SwBtTraceString(L"Result", L"no valid Bluetooth address reply");
+        return FALSE;
     }
 
     Length = SwBtPollCommand(Dev, HCI_READ_NAME, NULL, 0, Event, sizeof(Event));
@@ -754,6 +896,62 @@ static BOOLEAN SwBtProbe(PSWBT_DEVICE Dev)
     }
     SwBtTraceString(L"Result", L"ok");
     return TRUE;
+}
+
+/* Switchroot B01 DT: PH4 is BT_REG_ON (high = on), PH3 is device wake
+ * (low = awake). Only recover before the UART interrupt/HCI queues become
+ * active. The masked GPIO alias changes these pins alone; do not reset the
+ * Wi-Fi regulator, UART-C controller pins, or the shared PMIC 32 kHz clock.
+ */
+static BOOLEAN SwBtHardwareReset(PSWBT_DEVICE Dev)
+{
+    PHYSICAL_ADDRESS Address;
+    volatile ULONG *Hid, *Port;
+    ULONG Chip, Pins = (1u << 3) | (1u << 4);
+    BOOLEAN Low, High;
+    if (Dev->D0Active || Dev->Uart == NULL || Dev->CarUartd == NULL) return FALSE;
+    Address.QuadPart = 0x70000804;
+    Hid = MmMapIoSpaceEx(Address, sizeof(ULONG), PAGE_READONLY | PAGE_NOCACHE);
+    if (Hid == NULL) return FALSE;
+    Chip = READ_REGISTER_ULONG((PULONG)Hid);
+    MmUnmapIoSpace((PVOID)Hid, sizeof(ULONG));
+    if ((Chip & 0xfff0u) != 0x2120u) return FALSE;
+    Address.QuadPart = 0x6000d10c; /* GPIO bank 1, port H: CNF/OE/OUT at +0/+16/+32. */
+    Port = MmMapIoSpaceEx(Address, 0xa4, PAGE_READWRITE | PAGE_NOCACHE);
+    if (Port == NULL) return FALSE;
+    if ((READ_REGISTER_ULONG((PULONG)&Port[0]) & Pins) != Pins ||
+        (READ_REGISTER_ULONG((PULONG)&Port[4]) & Pins) != Pins) {
+        MmUnmapIoSpace((PVOID)Port, 0xa4);
+        return FALSE; /* Firmware must have configured these pins as outputs. */
+    }
+    SwBtWrite(Dev, UART_IER, 0);
+    WRITE_REGISTER_ULONG((PULONG)&Port[40], 1u << 12); /* PH4 low. */
+    WRITE_REGISTER_ULONG((PULONG)&Port[40], 1u << 11); /* PH3 low. */
+    Low = (READ_REGISTER_ULONG((PULONG)&Port[8]) & Pins) == 0;
+    SwBtSleepMs(20);
+    WRITE_REGISTER_ULONG((PULONG)Dev->CarUartd, CAR_UART_PLLP);
+    KeStallExecutionProcessor(10);
+    SwBtUartInit(Dev, UART_DIV_115200, UART_MCR_RTS);
+    Dev->HighSpeedNow = FALSE;
+    Dev->FirmwareVerified = FALSE;
+    WRITE_REGISTER_ULONG((PULONG)&Port[40], (1u << 12) | (1u << 4));
+    High = (READ_REGISTER_ULONG((PULONG)&Port[8]) & Pins) == (1u << 4);
+    SwBtSleepMs(150); /* Same ROM startup delay as the Lite DXE power sequence. */
+    MmUnmapIoSpace((PVOID)Port, 0xa4);
+    SwBtFlushRx(Dev);
+    return Low && High;
+}
+
+static BOOLEAN SwBtProbeWithRecovery(PSWBT_DEVICE Dev)
+{
+    SwBtTrace(L"HardwareRecovery", 0);
+    if (SwBtProbe(Dev)) return TRUE;
+    SwBtTrace(L"HardwareRecovery", 1);
+    if (!SwBtHardwareReset(Dev)) return FALSE;
+    SwBtTrace(L"HardwareRecovery", 2);
+    BOOLEAN Ok = SwBtProbe(Dev); /* One complete retry, never a partial record replay. */
+    SwBtTrace(L"HardwareRecovery", Ok ? 3 : 4);
+    return Ok;
 }
 
 /* ---------------------------------------------------------- interrupt */
@@ -832,9 +1030,10 @@ NTSTATUS SwBtEvtInterruptEnable(WDFINTERRUPT Interrupt, WDFDEVICE AssociatedDevi
 {
     PSWBT_DEVICE Dev = SwBtGetDevice(AssociatedDevice);
     UNREFERENCED_PARAMETER(Interrupt);
+    if (!Dev->HostReady) return STATUS_DEVICE_NOT_READY;
     Dev->RxHead = Dev->RxTail = 0;
     Dev->TxBusy = Dev->TxDone = FALSE;
-    Dev->Ier = Dev->SafeMode || !Dev->ChipOk ? 0 : UART_IER_RX;
+    Dev->Ier = !Dev->ChipOk ? 0 : UART_IER_RX;
     SwBtWrite(Dev, UART_IER, Dev->Ier);
     return STATUS_SUCCESS;
 }
@@ -844,7 +1043,7 @@ NTSTATUS SwBtEvtInterruptDisable(WDFINTERRUPT Interrupt, WDFDEVICE AssociatedDev
     PSWBT_DEVICE Dev = SwBtGetDevice(AssociatedDevice);
     UNREFERENCED_PARAMETER(Interrupt);
     Dev->Ier = 0;
-    SwBtWrite(Dev, UART_IER, 0);
+    if (Dev->HostReady) SwBtWrite(Dev, UART_IER, 0);
     return STATUS_SUCCESS;
 }
 
@@ -1293,26 +1492,12 @@ VOID SwBtEvtTimer(WDFTIMER Timer)
     SwBtTraceString(L"LastEvents", Text);
 
     ++Dev->Ticks;
-    if (Dev->SafeMode && SwBtSafeModeCleared(Dev)) {
-        /* -Mode Retry while running: start now, with the UART interrupt held off. */
-        WdfInterruptAcquireLock(Dev->Interrupt);
-        Dev->Ier = 0;
-        SwBtWrite(Dev, UART_IER, 0);
-        WdfInterruptReleaseLock(Dev->Interrupt);
-        SwBtStart(Dev);
-        WdfInterruptAcquireLock(Dev->Interrupt);
-        Dev->RxHead = Dev->RxTail = 0;
-        Dev->TxBusy = Dev->TxDone = FALSE;
-        Dev->Ier = Dev->ChipOk ? UART_IER_RX : 0;
-        SwBtWrite(Dev, UART_IER, Dev->Ier);
-        WdfInterruptReleaseLock(Dev->Interrupt);
-    }
     if (Dev->BootGuardPending && Dev->ChipOk && Dev->ChildAdded &&
-        ++Dev->HealthyChildTicks >= 5 && NT_SUCCESS(SwBtTrace(L"BootPending", 0))) {
+        Dev->EventsIn != 0 && NT_SUCCESS(SwBtTrace(L"BootPending", 0))) {
         Dev->BootGuardPending = FALSE;
         SwBtFlush();
     }
-    if (!Dev->SafeMode && Dev->Ticks >= Dev->ChildTick && !Dev->ChildAdded && Dev->ChipOk) {
+    if (Dev->Ticks >= Dev->ChildTick && !Dev->ChildAdded && Dev->ChipOk) {
         WDFDEVICE Device = (WDFDEVICE)WdfTimerGetParentObject(Timer);
         NTSTATUS Status;
         WdfFdoLockStaticChildListForIteration(Device);
@@ -1324,7 +1509,7 @@ VOID SwBtEvtTimer(WDFTIMER Timer)
     }
     {
         BOOLEAN Settled = Dev->ChipOk && Dev->ChildAdded && !Dev->BootGuardPending;
-        if (!Settled && !Dev->SafeMode) {
+        if (!Settled) {
             SwBtFlush();
         }
         WdfSpinLockAcquire(Dev->Lock);
@@ -1387,7 +1572,7 @@ NTSTATUS SwBtEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST Raw, WDFCMRESLIST
     for (Index = 0; Index < Count; ++Index) {
         PCM_PARTIAL_RESOURCE_DESCRIPTOR Desc = WdfCmResourceListGetDescriptor(Translated, Index);
         if (Desc != NULL && Desc->Type == CmResourceTypeMemory && Dev->Uart == NULL) {
-            if (Desc->u.Memory.Length < UART_LENGTH) {
+            if (Desc->u.Memory.Length < UART_LENGTH || Desc->u.Memory.Start.QuadPart != 0x70006300) {
                 return STATUS_DEVICE_CONFIGURATION_ERROR;
             }
             Dev->Uart = (volatile ULONG *)MmMapIoSpaceEx(Desc->u.Memory.Start, UART_LENGTH, PAGE_READWRITE | PAGE_NOCACHE);
@@ -1397,14 +1582,16 @@ NTSTATUS SwBtEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST Raw, WDFCMRESLIST
         }
     }
     SwBtTrace(L"HaveUart", Dev->Uart != NULL);
-    if (Dev->Uart != NULL && Dev->CarUartd == NULL) {
+    if (Dev->Uart != NULL && Dev->Car == NULL) {
         PHYSICAL_ADDRESS Car;
-        Car.QuadPart = CAR_UARTD_SOURCE;
-        Dev->CarUartd = (volatile ULONG *)MmMapIoSpaceEx(Car, sizeof(ULONG), PAGE_READWRITE | PAGE_NOCACHE);
+        Car.QuadPart = CAR_BASE;
+        Dev->Car = (volatile ULONG *)MmMapIoSpaceEx(Car, CAR_LENGTH, PAGE_READWRITE | PAGE_NOCACHE);
+        if (Dev->Car != NULL) Dev->CarUartd = &Dev->Car[(CAR_UARTD_SOURCE - CAR_BASE) / 4];
     }
     SwBtTrace(L"HaveCar", Dev->CarUartd != NULL);
     SwBtStage(3);
-    return Dev->Uart == NULL ? STATUS_DEVICE_CONFIGURATION_ERROR : STATUS_SUCCESS;
+    if (Dev->Uart == NULL) return STATUS_DEVICE_CONFIGURATION_ERROR;
+    return Dev->Car == NULL ? STATUS_INSUFFICIENT_RESOURCES : STATUS_SUCCESS;
 }
 
 NTSTATUS SwBtEvtReleaseHardware(WDFDEVICE Device, WDFCMRESLIST Translated)
@@ -1415,13 +1602,15 @@ NTSTATUS SwBtEvtReleaseHardware(WDFDEVICE Device, WDFCMRESLIST Translated)
     WdfSpinLockAcquire(Dev->Lock);
     SwBtFreeKept(Dev);
     WdfSpinLockRelease(Dev->Lock);
+    Dev->HostReady = FALSE;
     if (Dev->Uart != NULL) {
         MmUnmapIoSpace((PVOID)Dev->Uart, UART_LENGTH);
         Dev->Uart = NULL;
     }
-    if (Dev->CarUartd != NULL) {
-        MmUnmapIoSpace((PVOID)Dev->CarUartd, sizeof(ULONG));
-        Dev->CarUartd = NULL;
+    Dev->CarUartd = NULL;
+    if (Dev->Car != NULL) {
+        MmUnmapIoSpace((PVOID)Dev->Car, CAR_LENGTH);
+        Dev->Car = NULL;
     }
     return STATUS_SUCCESS;
 }
@@ -1438,7 +1627,12 @@ NTSTATUS SwBtEvtD0Exit(WDFDEVICE Device, WDF_POWER_DEVICE_STATE TargetState)
     ULONG Length;
     UNREFERENCED_PARAMETER(TargetState);
 
-    if (Dev->SafeMode || Dev->Uart == NULL || Dev->CarUartd == NULL || !Dev->HighSpeedNow) {
+    /* An orderly stop is not an unfinished boot, even before child creation. */
+    Dev->BootGuardPending = FALSE;
+    SwBtTrace(L"BootPending", 0);
+    if (!Dev->HostReady || Dev->Uart == NULL || Dev->CarUartd == NULL || !Dev->HighSpeedNow) {
+        Dev->HostReady = FALSE;
+        SwBtFlush();
         return STATUS_SUCCESS;
     }
     SwBtFlushRx(Dev);
@@ -1448,24 +1642,9 @@ NTSTATUS SwBtEvtD0Exit(WDFDEVICE Device, WDF_POWER_DEVICE_STATE TargetState)
     SwBtUartInit(Dev, UART_DIV_115200, UART_MCR_RTS);
     Dev->HighSpeedNow = FALSE;
     SwBtTrace(L"ExitTo115200", Length >= 7 ? Event[6] + 0x100u : 0);
+    Dev->HostReady = FALSE;
     SwBtFlush();
     return STATUS_SUCCESS;
-}
-
-/* Safe mode ends when BootPending was cleared (-Mode Retry). PASSIVE. */
-static BOOLEAN SwBtSafeModeCleared(PSWBT_DEVICE Dev)
-{
-    ULONG Pending = 1;
-    if (!Dev->SafeMode || !SwBtReadParam(L"BootPending", &Pending) || Pending != 0) {
-        return FALSE;
-    }
-    Dev->SafeMode = FALSE;
-    SwBtTrace(L"SafeMode", 0);
-    SwBtTrace(L"SafeModeLeftByRetry", 1);
-    Dev->BootGuardPending = TRUE;
-    SwBtTrace(L"BootPending", 1);
-    SwBtStage(1);
-    return TRUE;
 }
 
 /* Probes the chip (polling, the UART interrupt off) and schedules the child. */
@@ -1473,14 +1652,18 @@ static VOID SwBtStart(PSWBT_DEVICE Dev)
 {
     BOOLEAN ChipOk;
     SwBtStage(4);
-    ChipOk = SwBtProbe(Dev);
+    ChipOk = SwBtProbeWithRecovery(Dev);
     WdfSpinLockAcquire(Dev->Lock);
     Dev->ChipOk = ChipOk;
     Dev->RxGot = 0;
     SwBtFreeKept(Dev);
     WdfSpinLockRelease(Dev->Lock);
     SwBtTrace(L"ChipOk", ChipOk);
-    Dev->HealthyChildTicks = 0;
+    if (!ChipOk) {
+        /* A completed, reported initialization failure is not a hung boot. */
+        Dev->BootGuardPending = FALSE;
+        SwBtTrace(L"BootPending", 0);
+    }
     Dev->ChildTick = Dev->Ticks + CHILD_DELAY_TICKS;
     SwBtStage(5);
 }
@@ -1491,11 +1674,20 @@ NTSTATUS SwBtEvtD0Entry(WDFDEVICE Device, WDF_POWER_DEVICE_STATE PreviousState)
     PSWBT_DEVICE Dev = SwBtGetDevice(Device);
     UNREFERENCED_PARAMETER(PreviousState);
 
-    if (Dev->SafeMode && !SwBtSafeModeCleared(Dev)) {
-        return STATUS_SUCCESS;
+    NTSTATUS Status = SwBtPrepareHost(Dev);
+    SwBtTrace(L"HostResumeStatus", (ULONG)Status);
+    if (!NT_SUCCESS(Status)) {
+        WdfSpinLockAcquire(Dev->Lock);
+        Dev->ChipOk = FALSE;
+        WdfSpinLockRelease(Dev->Lock);
+        Dev->BootGuardPending = FALSE;
+        SwBtTrace(L"BootPending", 0);
+        return Status;
     }
+    Dev->BootGuardPending = TRUE;
+    SwBtTrace(L"BootPending", 1);
     SwBtStart(Dev);
-    return STATUS_SUCCESS;
+    return Dev->ChipOk ? STATUS_SUCCESS : STATUS_DEVICE_HARDWARE_ERROR;
 }
 
 NTSTATUS SwBtEvtD0Ready(WDFDEVICE Device, WDF_POWER_DEVICE_STATE PreviousState)
@@ -1651,17 +1843,13 @@ NTSTATUS SwBtEvtDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT DeviceInit)
     }
     {
         ULONG Pending = 0;
-        Dev->SafeMode = SwBtReadParam(L"BootPending", &Pending) && Pending != 0;
+        (VOID)SwBtReadParam(L"BootPending", &Pending);
+        SwBtTrace(L"PreviousBootPending", Pending);
     }
-    SwBtTrace(L"SafeMode", Dev->SafeMode);
+    /* A stale diagnostic must not permanently suppress a bounded probe. */
+    SwBtTrace(L"SafeMode", 0);
     SwBtTrace(L"SafeModeLeftByRetry", 0);
-    if (Dev->SafeMode) {
-        SwBtFlush();                            /* idle until -Mode Retry clears BootPending */
-    } else {
-        Dev->BootGuardPending = TRUE;
-        SwBtTrace(L"BootPending", 1);
-        SwBtStage(1);
-    }
+    SwBtStage(1);
     Dev->ChildTick = CHILD_DELAY_TICKS;
     WDF_INTERRUPT_CONFIG_INIT(&InterruptConfig, SwBtEvtIsr, SwBtEvtDpc);
     InterruptConfig.EvtInterruptEnable = SwBtEvtInterruptEnable;
@@ -1707,7 +1895,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
         RtlCopyMemory(&SwBtParamsPath[RegistryPath->Length / sizeof(WCHAR)], L"\\Parameters", sizeof(L"\\Parameters"));
         (VOID)RtlCreateRegistryKey(RTL_REGISTRY_ABSOLUTE, SwBtParamsPath);
     }
-    SwBtTrace(L"DriverVersion", 15);
+    SwBtTrace(L"DriverVersion", 19);
     WDF_DRIVER_CONFIG_INIT(&Config, SwBtEvtDeviceAdd);
     return WdfDriverCreate(DriverObject, RegistryPath, WDF_NO_OBJECT_ATTRIBUTES, &Config, WDF_NO_HANDLE);
 }

@@ -1,0 +1,4 @@
+USB on Windows 11 needs NVIDIA's XUSB firmware for Tegra X1+ (T210B01), which cannot be
+redistributed here. Take lib/firmware/tegra210b01_xusb_firmware (122368 bytes) from the
+initramfs of a Switchroot Ubuntu image and copy it to the root of this FAT partition, next to
+this file. Without it Windows works as before, just without USB. See the README, section USB.

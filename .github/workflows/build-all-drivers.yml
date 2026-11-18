@@ -1,0 +1,183 @@
+# Build and test-sign ALL Erista (t210-icosa) drivers on GitHub, plus the host tests.
+#
+#   host     (ubuntu)   tools/run_host_tests.sh = HWID/ACPI checks, ABI-header check, battery/bluetooth/power-button
+#                       tests and the full TegraGpu model tests. No WDK needed.
+#   drivers  (windows)  tools/ci/Build-AllDrivers.ps1: every driver in tools/ci/drivers-t210.json, ONE signing
+#                       certificate for all of them, kits assembled, BUILD-INFO.md with OK / WARN / FAIL per driver.
+#   release  (tag v*)   attaches the kit zip + SHA256SUMS + the public .cer to a GitHub *pre-release*.
+#
+# UNTESTED on GitHub when written (no WDK / runner in the authoring environment). If a step fails, the log names the
+# missing path; the per-driver logs are in the artifact (logs/).
+#
+# Signing certificate (test-signing only):
+#   - repository secrets SWOA_PFX_BASE64 (base64 of a .pfx) and SWOA_PFX_PASSWORD -> the SAME certificate on every run,
+#     so you install its .cer on the Switch once. Keep the .pfx out of the repo (.gitignore blocks it).
+#   - without them each run makes a NEW self-signed certificate; install the .cer from THAT run's artifact.
+name: build-all-drivers
+on:
+  workflow_dispatch:
+    inputs:
+      commit_build:
+        description: 'Also commit the finished driver set to build/HAC-001/ on this branch (test-signed .sys/.cat/.inf, public .cer, SHA256SUMS)'
+        type: boolean
+        default: false
+  push:
+    branches: [main, master]
+    tags: ['v*']
+    paths:
+      - 'drivers/t210-icosa/**'
+      - 'tools/**'
+      - '!tools/fwfetch/**'
+      - 'acpi/**'
+      - 'build/models.json'
+      - '.github/workflows/build-all-drivers.yml'
+  pull_request:
+    paths:
+      - 'drivers/t210-icosa/**'
+      - 'tools/**'
+      - 'acpi/**'
+
+permissions:
+  contents: read
+
+env:
+  MESA_REV: 0ff52079ca9e9e837ed27eb95a8d239f439a1864
+
+jobs:
+  host:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y clang acpica-tools
+      - name: mesa-switch at the pinned commit (needed by the TegraGpu host tests)
+        run: |
+          git init -q mesa-switch
+          git -C mesa-switch remote add origin https://github.com/danfromtico/mesa-switch.git
+          git -C mesa-switch fetch -q --depth 1 origin "$MESA_REV"
+          git -C mesa-switch checkout -q FETCH_HEAD
+      - name: Host tests
+        run: MESA_DIR="$PWD/mesa-switch" bash tools/run_host_tests.sh
+      - name: ABI headers vs ruje's current mesa-switch-woa (informational)
+        continue-on-error: true
+        run: |
+          git clone -q --depth 1 https://github.com/ruje0504-2/mesa-switch-woa.git ruje
+          python3 tools/check_abi_sync.py --upstream ruje/src/nouveau/vulkan/nvkmd/windows
+
+  drivers:
+    needs: host
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: LLVM (clang-cl, lld-link) - the image has it; install only when missing
+        run: |
+          if (-not (Test-Path 'C:\Program Files\LLVM\bin\clang-cl.exe')) { choco install llvm --no-progress -y }
+          & 'C:\Program Files\LLVM\bin\clang-cl.exe' --version
+
+      - name: WDK 10.0.19041 (the image has the SDK, and the WDK 10.0.26100 that the Wi-Fi driver uses)
+        run: |
+          $k = "${env:ProgramFiles(x86)}\Windows Kits\10"
+          if (-not (Test-Path "$k\Include\10.0.19041.0\km\wdm.h")) {
+            Invoke-WebRequest 'https://go.microsoft.com/fwlink/?linkid=2128854' -OutFile "$env:RUNNER_TEMP\wdksetup.exe"
+            $p = Start-Process "$env:RUNNER_TEMP\wdksetup.exe" -ArgumentList '/quiet', '/norestart' -Wait -PassThru
+            Write-Host "wdksetup exit code: $($p.ExitCode)"
+          }
+          foreach ($f in 'Include\10.0.19041.0\km\wdm.h', 'Include\wdf\kmdf\1.15\wdf.h', 'Lib\wdf\kmdf\arm64\1.15\wdfldr.lib', 'Lib\10.0.19041.0\km\arm64\ntoskrnl.lib') {
+            Write-Host ("{0,-6} {1}" -f $(if (Test-Path "$k\$f") { 'ok' } else { 'MISSING' }), $f)
+          }
+          if (-not (Test-Path "$k\Include\10.0.19041.0\km\wdm.h")) {
+            Write-Host '::warning::WDK 10.0.19041 is not installed; falling back to 10.0.26100.0 for every driver (not the same headers as the local build)'
+            'SWOA_FALLBACK_WDK=1' | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+          }
+          Get-ChildItem "$k\bin" -Directory | ForEach-Object { Write-Host "bin: $($_.Name)  signtool=$(Test-Path "$($_.FullName)\x64\signtool.exe")  Inf2Cat=$(Test-Path "$($_.FullName)\x86\Inf2Cat.exe")" }
+
+      - name: Signing certificate (secret PFX if given)
+        env:
+          PFX_B64: ${{ secrets.SWOA_PFX_BASE64 }}
+          PFX_PASS: ${{ secrets.SWOA_PFX_PASSWORD }}
+        run: |
+          if ($env:PFX_B64) {
+            $f = Join-Path $env:RUNNER_TEMP 'swoa.pfx'
+            [IO.File]::WriteAllBytes($f, [Convert]::FromBase64String($env:PFX_B64))
+            $c = Import-PfxCertificate -FilePath $f -CertStoreLocation Cert:\CurrentUser\My -Password (ConvertTo-SecureString $env:PFX_PASS -AsPlainText -Force)
+            Remove-Item $f -Force
+            "SWOA_CERT_THUMBPRINT=$($c.Thumbprint)" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+            Write-Host "using the secret certificate $($c.Subject) $($c.Thumbprint)"
+          } else {
+            Write-Host 'no secret: Build-Driver.ps1 makes ONE new self-signed certificate for this run'
+          }
+
+      - name: Build all drivers
+        run: .\tools\ci\Build-AllDrivers.ps1 -OutRoot "$PWD\build\t210"
+
+      - name: Assemble build/HAC-001 (drivers, INF, CAT, public .cer, SHA256SUMS, licences; refuses private keys)
+        run: python tools/build/assemble_build.py --model HAC-001 --kit-dir build/t210/kit --build-info build/t210/BUILD-INFO.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-HAC-001
+          path: build/HAC-001
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Switch-Drivers-Erista
+          path: |
+            build/t210/kit
+            build/t210/BUILD-INFO.md
+            build/t210/logs
+          if-no-files-found: warn
+
+  commit-build:
+    # Only on a manual run with commit_build = true. Puts the finished set into build/HAC-001/ of THIS branch.
+    if: github.event_name == 'workflow_dispatch' && inputs.commit_build
+    needs: [host, drivers]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-HAC-001
+          path: build/HAC-001
+      - name: Commit build/HAC-001
+        run: |
+          set -e
+          python3 tools/check_no_proprietary.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f build/HAC-001
+          git diff --cached --quiet && { echo "nothing changed"; exit 0; }
+          git commit -m "build: HAC-001 driver set from ${GITHUB_SHA::8} (test-signed, not verified on a console)"
+          git push
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [host, drivers]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Switch-Drivers-Erista
+          path: dl
+      - name: "Pre-release with the kits (the .pfx is never in the artifact)"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          cd dl
+          zip -qr "../SwitchDrivers-Erista-${GITHUB_REF_NAME}.zip" kit
+          cp kit/SHA256SUMS.txt ../SHA256SUMS.txt
+          cp kit/SwitchWOA-Test.cer ../SwitchWOA-Test.cer || true
+          cd ..
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --prerelease \
+            --title "$GITHUB_REF_NAME (test-signed, not verified on a real Switch)" \
+            --notes-file dl/BUILD-INFO.md \
+            "SwitchDrivers-Erista-${GITHUB_REF_NAME}.zip" SHA256SUMS.txt SwitchWOA-Test.cer

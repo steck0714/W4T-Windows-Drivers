@@ -37,6 +37,7 @@
 
 ## うまくいかないとき
 
+- **`bcdedit` が「要求されたシステム デバイスが見つかりません」で失敗する:** 原因は 2 つ(windows-switch v0.8.0 のリリースノートと `agent\w64.cmd` の `:bcdfix` による。同作者が ntoskrnl.exe を公開シンボルで逆アセンブルして特定)。(a) MBR のディスクでは、起動パーティションが**アクティブ**でないとカーネルがシステムパーティションを受け付けない(MBR の 446 バイト目＝パーティション 1 のブート インジケータを 0x80 にする。hekate とペイロードローダーはこの値を見ない)。(b) BCD にシステムストアの印(`Description\System` と `TreatAsSystem` = 1)が無い(BCD-Template から作った BCD に起こる)。(b) は `-Mode Prepare` が自動で直す。(a) は Windows の外(PC)からしか直せない。未実機。
 - **`bcdedit` が「Secure Boot」で拒否される:** UEFI で Secure Boot が有効になっている。`-Mode Status` の `SecureBoot:` の行を見せてほしい。
 - **`sc start` が 577 や 1275 になる:** 署名を検証できていない。テスト署名モードになっているか、証明書がストアに入っているかを `-Mode Status` で確認する。
 - **テストモードをやめる:** `bcdedit /set {current} testsigning off` を実行して、再起動する。

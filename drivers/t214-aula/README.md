@@ -22,9 +22,34 @@ Lite 側の設定・ドライバは OLED の根拠にならないので、ここ
 | 起動エージェント | `agent/swagentsvc.exe` + `w64.cmd` | | 起動のたびに設定・ドライバ導入を実行 |
 | ローダー | `wp11/bl33.bin`, `wp64/bl33.bin` + `bootloader/ini/*.ini` | UEFI | **`bl31.bin` と XUSB ファームは別途**(下記) |
 
-`kit/` には**テキストだけ**(INF・ps1・cmd・ini)を無改変で置いた。`.sys` / `.exe` は `build/HEG-001/` に置く
+`kit/` には**テキストだけ**(INF・ps1・cmd・ini・`PUT_*_HERE.txt`)を無改変で置いた。`.sys` / `.exe` は `build/HEG-001/` に置く
 (`python tools/build/fill_heg001.py --zip windows-switch-arm64-drivers-v0_8_0.zip`。`manifest/` のサイズと SHA-256 に一致したものだけ書く)。
 `bl33.bin` / ビットマップはここでは扱わない。
+
+## 上流のソース(`upstream-src/`)
+
+windows-switch の `main`(ユーザー提供の `windows-switch-main.zip`)から、**バイナリと画像を除いた 110 ファイル**を置いた。
+うち 7 ファイル(下の「ドライバ別フォルダ」)は `drivers/<ドライバ名>/` に移した。残りの 103 ファイルは**無改変**で `upstream-src/` にある:
+`shim/`(EL2 shim)、`uefi/` と `patches/`(NintendoSwitchPkg への 27 パッチ)、`desktop/` のカード作成・設定スクリプト、
+`drivers/` のビルドスクリプト・Dockerfile・`compat.c`・`test-cert/`・`nvk/`、`docs/`。
+
+## ドライバ別フォルダ(`drivers/`、t210-icosa / t214-hoag と同じ並べ方)
+
+| フォルダ | 中身 | 上流での位置 |
+|---|---|---|
+| `drivers/SwitchHid/` | swhid(タッチ・音量・電源ボタン・RTC・OLED 輝度) | `drivers/swhid/swhid.c` |
+| `drivers/SwitchBattery/` | swbatt(電池・充電・ファン) | `drivers/swbatt/swbatt.c` |
+| `drivers/SwitchTouchRead/` | touchread(swhid が `#include` するタッチ I2C 部) | `drivers/touchread/touchread.c` |
+| `drivers/SwitchAgent/` | swagentsvc(起動エージェントのサービスホスト) | `desktop/swagentsvc.c` |
+| `drivers/SwitchWifi/` `SwitchBluetooth/` `SwitchAudio/` | INF のみ(`.sys` は winx Lite 系の配布物) | `drivers/switch{wifi,bt,audio}/*.inf` |
+
+- `.c` の 4 本には**作者・出典のクレジットブロック**(`W4T-CREDIT-BEGIN`〜`END`)を先頭に入れた。上流のファイルには作者・著作権の行が無いので、
+  READMEが所有者と書いている DanilKhmyrov を「出典・所有者」として書き、個人の著作権行を新しく作ってはいない。INF は上流の表示を残すため無改変。
+- 上流の `build*.sh` と `#include "../touchread/touchread.c"` は上流の配置を前提にしている。**`layout.json`** が移動先と上流の位置、上流の SHA-256 を持ち、
+  `python tools/aula_layout.py --check` が「クレジットブロックと `#include` の 1 行を除くと上流とバイト一致」を確かめ、
+  `python tools/aula_layout.py --materialize <空のディレクトリ>` が上流と同じ形の木を作る(ビルドはそこで行う。こちらではビルドしていない)。
+**このリポジトリではビルドも実行もしていない**(WDK・mingw・Docker・実機が無い)。v0.8.0 のバイナリとの一致も、スクリプト・INF・`swagentsvc.exe` の SHA-256 で
+確かめただけで、`swhid.sys` / `swbatt.sys` がこのソースから出来る証拠は無い。出自・除外したもの・確認内容は `UPSTREAM-SOURCE.md`、**ファイルごとのライセンス監査は `LICENSE-AUDIT.md`、帰属表示は `NOTICE.md`**。
 
 ## 再配布できないファイルは実機から取る(`tools/fwfetch`)
 
@@ -48,8 +73,9 @@ Windows 側から SD の ext4 が見えない場合(Lite の SD ミニポート�
 ## 未確認・未対応
 
 - OLED の GPU: `w64.cmd` に実験的な GPU 導入(`agent\gpu\`)があるが、v0.8.0 の zip には中身が無い。
-  NVIDIA の GPU ファームは `-Profile all` で集められるが、OLED で動く証拠は無い。
+  NVIDIA の GPU ファームは `--profile all` で集められるが、OLED で動く証拠は無い。
 - OLED 輝度(swhid 経由)・長期動作・スリープ復帰・USB-C ホスト: 上流の報告以上のことは分からない。
 - Aula の WinX 側(`acpi/`・SWOA 系ドライバ)の専用プロファイルは**無い**。
+- `upstream-src/` は未ビルド。上流の `README.md` が参照するスクリーンショット(`docs/screenshots/` ほか)は、画像なので置いていない。
 
 ライセンス: windows-switch 由来(GPL-2.0、`LICENSE` 同梱)。INF の元は hayato41200 / ruje0504-2 のドライバ(`CREDITS.md`)。

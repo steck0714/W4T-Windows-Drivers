@@ -16,20 +16,31 @@ param(
   [string]$Inf,
   [string]$KmdfVersion = '1.15',
   [string[]]$ExtraIncludes = @(),   # searched after the WDK 10.0.19041 headers (e.g. km\spb\1.0)
+  [string]$Wdk = '10.0.19041.0',   # switchwlan (WiFiCx/NetAdapterCx) builds against 10.0.26100.0
+  [string]$Ntddi = '0x0A000008',   # 0x0A00000C = Windows 11 22H2 (NTDDI_WIN10_NI)
   [switch]$NoSign,
+  [switch]$NoWarnAsError,           # drop /WX (CI retries with this when a newer clang adds warnings)
+  [string]$CertThumbprint = $env:SWOA_CERT_THUMBPRINT,   # sign with this cert from CurrentUser\My instead of the self-made one
   [switch]$Wdm                      # plain WDM driver (DriverEntry, no KMDF), e.g. an sdport miniport
 )
 
 $ErrorActionPreference = 'Stop'
 $Llvm = 'C:\Program Files\LLVM\bin'
 $Kits = "${env:ProgramFiles(x86)}\Windows Kits\10"
-$Wdk = '10.0.19041.0'
 $Inc = "$Kits\Include\$Wdk"
 $KmLib = "$Kits\Lib\$Wdk\km\arm64"
 $KmdfInc = "$Kits\Include\wdf\kmdf\$KmdfVersion"
 $KmdfLib = "$Kits\Lib\wdf\kmdf\arm64\$KmdfVersion"
-$SignTool = "$Kits\bin\10.0.26100.0\x64\signtool.exe"
-$Inf2Cat = "$Kits\bin\10.0.26100.0\x86\Inf2Cat.exe"
+# signtool (x64) and Inf2Cat (x86): the newest Windows Kits bin folder that has both. The version differs per machine
+# and CI image, so it is not hard-coded (it used to be 10.0.26100.0 only).
+$BinDir = Get-ChildItem "$Kits\bin" -Directory -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -match '^10\.' -and (Test-Path "$($_.FullName)\x64\signtool.exe") -and (Test-Path "$($_.FullName)\x86\Inf2Cat.exe") } |
+  Sort-Object Name -Descending | Select-Object -First 1
+if ($BinDir) {
+  $SignTool = "$($BinDir.FullName)\x64\signtool.exe"; $Inf2Cat = "$($BinDir.FullName)\x86\Inf2Cat.exe"
+} else {
+  $SignTool = "$Kits\bin\10.0.26100.0\x64\signtool.exe"; $Inf2Cat = "$Kits\bin\10.0.26100.0\x86\Inf2Cat.exe"
+}
 $CertSubject = 'CN=SwitchWOA Test Driver Signing'
 $CertDir = Join-Path $PSScriptRoot 'cert'
 
@@ -39,22 +50,39 @@ foreach ($p in "$Llvm\clang-cl.exe", "$Llvm\lld-link.exe", "$Inc\km\wdm.h", "$Km
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $OutDir = (Resolve-Path $OutDir).Path    # .NET calls below need an absolute path
 $KmdfMinor = $KmdfVersion.Split('.')[1]
+# clang rejects the C++ forward declaration "enum _WDF_REQUEST_TYPE : int;" in
+# wdfdevice.h (MSVC accepts it). For C++ sources use a local copy of the KMDF
+# headers with that line removed (build/ is not in git; the WDK is not copied anywhere else).
+if (@($Sources | Where-Object { $_ -like '*.cpp' }).Count -gt 0) {
+  $patched = Join-Path $PSScriptRoot "..\build\_kmdfinc\$KmdfVersion"
+  if (-not (Test-Path (Join-Path $patched 'wdf.h'))) {
+    New-Item -ItemType Directory -Force $patched | Out-Null
+    Copy-Item "$KmdfInc\*" $patched -Recurse -Force
+    $dev = Join-Path $patched 'wdfdevice.h'
+    (Get-Content $dev -Raw) -replace 'enum _WDF_REQUEST_TYPE : int;', '' | Set-Content $dev -NoNewline
+  }
+  $KmdfInc = (Resolve-Path $patched).Path
+}
 
 $cflags = @(
-  '--target=aarch64-pc-windows-msvc', '/c', '/kernel', '/GS-', '/Gy', '/Zl', '/O2', '/W4', '/WX',
+  '--target=aarch64-pc-windows-msvc', '/c', '/kernel', '/GS-', '/Gy', '/Zl', '/O2', '/W4',
   '-Wno-unused-parameter', '-Wno-microsoft-anon-tag', '-Wno-ignored-pragma-intrinsic',
   '-Wno-pragma-pack', '-Wno-invalid-token-paste', '-Wno-unknown-pragmas', '-Wno-ignored-attributes', '-Wno-nonportable-include-path',
-  '/D_ARM64_', '/DARM64', '/D_WIN64', '/DNTDDI_VERSION=0x0A000008', '/D_WIN32_WINNT=0x0A00', '/DWINVER=0x0A00',
+  '/D_ARM64_', '/DARM64', '/D_WIN64', "/DNTDDI_VERSION=$Ntddi", '/D_WIN32_WINNT=0x0A00', '/DWINVER=0x0A00',
   '/DKMDF_VERSION_MAJOR=1', "/DKMDF_VERSION_MINOR=$KmdfMinor", '/DPOOL_NX_OPTIN=1',
   # WDK headers as system headers: their warnings are not ours (/W4 /WX applies to our sources only).
   "/imsvc$Inc\km\crt", "/imsvc$Inc\km", "/imsvc$Inc\shared", "/imsvc$KmdfInc"
 ) + ($ExtraIncludes | ForEach-Object { "/imsvc$($_ -replace '^\$Kits', $Kits)" }) + ($Defines | ForEach-Object { "/D$_" })
 
+if (-not $NoWarnAsError) { $cflags += '/WX' }
+
 $objs = @()
 foreach ($s in @($Sources) + (Join-Path $PSScriptRoot 'kmdf_support.c')) {
   $src = (Resolve-Path $s).Path
   $obj = Join-Path $OutDir ([IO.Path]::GetFileNameWithoutExtension($src) + '.obj')
-  & "$Llvm\clang-cl.exe" @cflags $src "/Fo$obj"
+  # C++ sources (WiFiCx headers are C++): no RTTI, no exceptions, C++17.
+  $extra = if ($src -like '*.cpp') { @('/GR-', '/EHs-c-', '/std:c++17', '-Wno-unused-function', '-Wno-missing-field-initializers', '-Wno-duplicate-decl-specifier') } else { @() }
+  & "$Llvm\clang-cl.exe" @cflags @extra $src "/Fo$obj"
   if ($LASTEXITCODE -ne 0) { throw "compile failed: $src" }
   $objs += $obj
 }
@@ -81,7 +109,14 @@ if ($NoSign) { Write-Host "Built (unsigned): $sys"; return }
 
 # Test certificate (created once; the .cer is installed on the Switch).
 New-Item -ItemType Directory -Force $CertDir | Out-Null
-$cert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -eq $CertSubject -and $_.NotAfter -gt (Get-Date) } | Select-Object -First 1
+$cert = $null
+if ($CertThumbprint) {
+  $cert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Thumbprint -eq $CertThumbprint } | Select-Object -First 1
+  if (-not $cert) { throw "certificate $CertThumbprint is not in CurrentUser\My" }
+}
+if (-not $cert) {
+  $cert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -eq $CertSubject -and $_.NotAfter -gt (Get-Date) } | Select-Object -First 1
+}
 if (-not $cert) {
   $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject $CertSubject -CertStoreLocation Cert:\CurrentUser\My `
           -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -NotAfter (Get-Date).AddYears(10)

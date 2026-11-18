@@ -1,0 +1,61 @@
+{
+ "schema": 1,
+ "about": "Maps the per-driver folders in drivers/ back to the DanilKhmyrov/windows-switch layout. Credit blocks (between W4T-CREDIT-BEGIN and W4T-CREDIT-END) and the listed include rewrites are the only differences from upstream; tools/aula_layout.py --check proves it by SHA-256.",
+ "upstream": "DanilKhmyrov/windows-switch main (windows-switch-main.zip, SHA-256 c303804ca7c65fabd5424e6e044263117b56489c8e8ff6ffc1e4a2be05f7be65)",
+ "files": [
+  {
+   "path": "drivers/SwitchHid/src/swhid.c",
+   "upstream": "drivers/swhid/swhid.c",
+   "upstream_sha256": "8177f47705da4a8d0aaa9e1f77b72cb9fc1c8564f64b442267d30f6f0534097d",
+   "credit_block": true,
+   "include_rewrites": [
+    [
+     "#include \"../../SwitchTouchRead/src/touchread.c\"",
+     "#include \"../touchread/touchread.c\""
+    ]
+   ]
+  },
+  {
+   "path": "drivers/SwitchBattery/src/swbatt.c",
+   "upstream": "drivers/swbatt/swbatt.c",
+   "upstream_sha256": "d7e9f57b218ae1de0b325c4a3e5214266f6bb6b1f5e0b6f0e57d14edecba08b1",
+   "credit_block": true,
+   "include_rewrites": []
+  },
+  {
+   "path": "drivers/SwitchTouchRead/src/touchread.c",
+   "upstream": "drivers/touchread/touchread.c",
+   "upstream_sha256": "b070c739c514d21001ed075c9e58c4197de6eb4624872bcc7d82199da76e3b45",
+   "credit_block": true,
+   "include_rewrites": []
+  },
+  {
+   "path": "drivers/SwitchAgent/src/swagentsvc.c",
+   "upstream": "desktop/swagentsvc.c",
+   "upstream_sha256": "3badea6a8257736fa4b73ba6a709c04383bb370fbb671c5cd3db444c7b21054f",
+   "credit_block": true,
+   "include_rewrites": []
+  },
+  {
+   "path": "drivers/SwitchWifi/switchwifi.inf",
+   "upstream": "drivers/switchwifi/switchwifi.inf",
+   "upstream_sha256": "1322053143b1cf58db98b953b9b21176d01e4d01e55acb4719cddd48ad5e9482",
+   "credit_block": false,
+   "include_rewrites": []
+  },
+  {
+   "path": "drivers/SwitchBluetooth/switchbt.inf",
+   "upstream": "drivers/switchbt/switchbt.inf",
+   "upstream_sha256": "23ccd51c32eab5b22bec6799cea78d0c567ffd340cb242d54d10d86843152b53",
+   "credit_block": false,
+   "include_rewrites": []
+  },
+  {
+   "path": "drivers/SwitchAudio/switchaudio.inf",
+   "upstream": "drivers/switchaudio/switchaudio.inf",
+   "upstream_sha256": "b804a9322d81aa747774db790a61318942036799261fdc0be4e612f3e9d72627",
+   "credit_block": false,
+   "include_rewrites": []
+  }
+ ]
+}

@@ -1,0 +1,5 @@
+Put bl31.bin here.
+
+Take it from a Switchroot L4T Ubuntu release (switchroot/ubuntu/bl31.bin).
+It is the ARM Trusted Firmware build that Hekate L4T entries use; it is not
+redistributed here.

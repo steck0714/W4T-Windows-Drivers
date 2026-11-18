@@ -56,7 +56,8 @@ NTSTATUS TgGpuClosePlatform(TG_GPU_PLATFORM *p)
     return failure(p,NT_SUCCESS(status)?second:status);
 }
 
-static NTSTATUS Spb(TG_GPU_PLATFORM *p,HANDLE target,UCHAR reg,UCHAR *value,BOOLEAN write)
+/* One SPB transfer. The caller decides whether a failure is recorded (see Spb). */
+static NTSTATUS SpbOnce(HANDLE target,UCHAR reg,UCHAR *value,BOOLEAN write)
 {
     IO_STATUS_BLOCK iosb={0};NTSTATUS status;
     UCHAR out[2]={reg,write?*value:0},in=0;
@@ -78,6 +79,24 @@ static NTSTATUS Spb(TG_GPU_PLATFORM *p,HANDLE target,UCHAR reg,UCHAR *value,BOOL
         if(status==STATUS_PENDING){status=ZwWaitForSingleObject(target,FALSE,NULL);if(status==STATUS_SUCCESS)status=iosb.Status;}
         if(NT_SUCCESS(status) && iosb.Information!=2)status=STATUS_DEVICE_PROTOCOL_ERROR;
         if(NT_SUCCESS(status))*value=in;
+    }
+    return status;
+}
+
+/* PMIC register accesses are idempotent (write reg+value / read reg), and I2C5 is shared with the battery, fan and
+ * charger drivers, so a transfer can fail transiently (bus arbitration, a NACK during someone else's transaction).
+ * Retry a few times before reporting; only the failure that survives is recorded in IoStatus (a recovered transient
+ * must not poison it). Runs at PASSIVE_LEVEL like the transfer itself. windows-switch v0.8.0's swbatt GPU power
+ * bridge made the same change ("retries PMIC I2C transfers"). */
+#define TG_GPU_SPB_ATTEMPTS 3u
+static NTSTATUS Spb(TG_GPU_PLATFORM *p,HANDLE target,UCHAR reg,UCHAR *value,BOOLEAN write)
+{
+    NTSTATUS status=STATUS_UNSUCCESSFUL;ULONG attempt;LARGE_INTEGER interval;
+    for(attempt=0;attempt<TG_GPU_SPB_ATTEMPTS;attempt++){
+        status=SpbOnce(target,reg,value,write);
+        if(NT_SUCCESS(status)||status==STATUS_INVALID_PARAMETER||status==STATUS_INVALID_HANDLE||
+           status==STATUS_ACCESS_DENIED||status==STATUS_INSUFFICIENT_RESOURCES||status==STATUS_CANCELLED)break;
+        if(attempt+1<TG_GPU_SPB_ATTEMPTS){interval.QuadPart=-10000;(VOID)KeDelayExecutionThread(KernelMode,FALSE,&interval);} /* 1 ms */
     }
     return failure(p,status);
 }

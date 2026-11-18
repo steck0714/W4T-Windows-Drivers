@@ -1,3 +1,12 @@
+/* W4T-CREDIT-BEGIN
+ * Origin : hayato41200/Windows-for-Switch-Drivers, Erista (t210/Icosa) driver set, which matched an older
+ *          ruje0504-2/Windows-for-Switch-Drivers commit (docs/HAYATO-DRIVER-AUDIT-ja.md); later edits are in CREDITS.md.
+ * Authors: hayato41200, ruje0504-2 (and their contributors). The upstream file has no author or
+ *          copyright line, so per-file authorship is not recorded here.
+ * License: GPL-2.0, from the LICENSE of this directory (the file has no SPDX tag of its own).
+ * Refs   : CTCaer/hekate (GPL-2.0): touch panel power and I2C sequences.
+ * Credit block added by W4T (2026-11-18); full table in CREDITS.md.
+ * W4T-CREDIT-END */
 /*
  * Nintendo Switch touch screen driver, KMDF + Virtual HID Framework (VHF).
  *
@@ -129,6 +138,8 @@ EVT_WDF_DEVICE_PREPARE_HARDWARE SwTouchEvtPrepareHardware;
 EVT_WDF_DEVICE_RELEASE_HARDWARE SwTouchEvtReleaseHardware;
 EVT_WDF_DEVICE_SELF_MANAGED_IO_INIT SwTouchEvtSelfManagedIoInit;
 EVT_WDF_DEVICE_SELF_MANAGED_IO_CLEANUP SwTouchEvtSelfManagedIoCleanup;
+EVT_WDF_DEVICE_SELF_MANAGED_IO_SUSPEND SwTouchEvtSelfManagedIoSuspend;
+EVT_WDF_DEVICE_SELF_MANAGED_IO_RESTART SwTouchEvtSelfManagedIoRestart;
 EVT_WDF_INTERRUPT_ISR SwTouchEvtIsr;
 EVT_WDF_TIMER SwTouchEvtTimer;
 EVT_VHF_ASYNC_OPERATION SwTouchEvtGetFeature;
@@ -388,6 +399,11 @@ VOID SwTouchEvtTimer(WDFTIMER Timer)
     }
     if (!Dev->Stopping) {
         WdfTimerStart(Timer, WDF_REL_TIMEOUT_IN_MS((Irqs != 0 && !Touching) ? POLL_SLOW_MS : POLL_FAST_MS));
+        if (Dev->Stopping) {
+            /* Suspend/Cleanup set Stopping between the check above and this re-arm: cancel it again.
+               (Wait must be FALSE here: we are inside the timer callback.) */
+            (VOID)WdfTimerStop(Timer, FALSE);
+        }
     }
 }
 
@@ -524,6 +540,28 @@ NTSTATUS SwTouchEvtSelfManagedIoInit(WDFDEVICE Device)
     return STATUS_SUCCESS;
 }
 
+/* System sleep (Dx): stop the poll timer (it reads the controller over I2C). The interrupt object is handled by
+ * KMDF itself (disabled in D0Exit, enabled in D0Entry). */
+NTSTATUS SwTouchEvtSelfManagedIoSuspend(WDFDEVICE Device)
+{
+    PSWTOUCH_DEVICE Dev = SwTouchGetDevice(Device);
+    Dev->Stopping = TRUE;
+    if (Dev->Timer != NULL) {
+        WdfTimerStop(Dev->Timer, TRUE);
+    }
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS SwTouchEvtSelfManagedIoRestart(WDFDEVICE Device)
+{
+    PSWTOUCH_DEVICE Dev = SwTouchGetDevice(Device);
+    Dev->Stopping = FALSE;
+    if (Dev->Timer != NULL) {
+        WdfTimerStart(Dev->Timer, WDF_REL_TIMEOUT_IN_MS(100));
+    }
+    return STATUS_SUCCESS;
+}
+
 VOID SwTouchEvtSelfManagedIoCleanup(WDFDEVICE Device)
 {
     PSWTOUCH_DEVICE Dev = SwTouchGetDevice(Device);
@@ -553,6 +591,8 @@ NTSTATUS SwTouchEvtDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT DeviceInit)
     Pnp.EvtDeviceReleaseHardware = SwTouchEvtReleaseHardware;
     Pnp.EvtDeviceSelfManagedIoInit = SwTouchEvtSelfManagedIoInit;
     Pnp.EvtDeviceSelfManagedIoCleanup = SwTouchEvtSelfManagedIoCleanup;
+    Pnp.EvtDeviceSelfManagedIoSuspend = SwTouchEvtSelfManagedIoSuspend;
+    Pnp.EvtDeviceSelfManagedIoRestart = SwTouchEvtSelfManagedIoRestart;
     WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &Pnp);
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&Attributes, SWTOUCH_DEVICE);
     Status = WdfDeviceCreate(&DeviceInit, &Attributes, &Device);
@@ -584,7 +624,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
         RtlCopyMemory(&SwTouchParamsPath[RegistryPath->Length / sizeof(WCHAR)], L"\\Parameters", sizeof(L"\\Parameters"));
         (VOID)RtlCreateRegistryKey(RTL_REGISTRY_ABSOLUTE, SwTouchParamsPath);
     }
-    SwTouchTrace(L"DriverVersion", 4);
+    SwTouchTrace(L"DriverVersion", 5);
     WDF_DRIVER_CONFIG_INIT(&Config, SwTouchEvtDeviceAdd);
     return WdfDriverCreate(DriverObject, RegistryPath, WDF_NO_OBJECT_ATTRIBUTES, &Config, WDF_NO_HANDLE);
 }

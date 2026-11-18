@@ -1,3 +1,12 @@
+/* W4T-CREDIT-BEGIN
+ * Origin : hayato41200/Windows-for-Switch-Drivers, Erista (t210/Icosa) driver set, which matched an older
+ *          ruje0504-2/Windows-for-Switch-Drivers commit (docs/HAYATO-DRIVER-AUDIT-ja.md); later edits are in CREDITS.md.
+ * Authors: hayato41200, ruje0504-2 (and their contributors). The upstream file has no author or
+ *          copyright line, so per-file authorship is not recorded here.
+ * License: GPL-2.0, from the LICENSE of this directory (the file has no SPDX tag of its own).
+ * Refs   : CTCaer/hekate (GPL-2.0): MAX17050 / BQ24193 / BM92T36 registers and sequences; structure after Microsoft's SimBatt sample (as stated in the file).
+ * Credit block added by W4T (2026-11-18); full table in CREDITS.md.
+ * W4T-CREDIT-END */
 /*
  * Nintendo Switch battery miniclass driver (battc), KMDF.
  *
@@ -118,6 +127,8 @@ EVT_WDF_DRIVER_DEVICE_ADD SwBatEvtDeviceAdd;
 EVT_WDF_DEVICE_PREPARE_HARDWARE SwBatEvtPrepareHardware;
 EVT_WDF_DEVICE_SELF_MANAGED_IO_INIT SwBatEvtSelfManagedIoInit;
 EVT_WDF_DEVICE_SELF_MANAGED_IO_CLEANUP SwBatEvtSelfManagedIoCleanup;
+EVT_WDF_DEVICE_SELF_MANAGED_IO_SUSPEND SwBatEvtSelfManagedIoSuspend;
+EVT_WDF_DEVICE_SELF_MANAGED_IO_RESTART SwBatEvtSelfManagedIoRestart;
 EVT_WDFDEVICE_WDM_IRP_PREPROCESS SwBatPreprocessDeviceControl;
 EVT_WDF_TIMER SwBatEvtTimer;
 EVT_WDF_TIMER SwBatEvtUsbcTimer;
@@ -481,6 +492,11 @@ VOID SwBatEvtUsbcTimer(WDFTIMER Timer)
     WdfWaitLockRelease(Dev->Lock);
     if (!Dev->Stopping) {
         WdfTimerStart(Timer, WDF_REL_TIMEOUT_IN_MS(USBC_POLL_MS));    /* one-shot timer, re-armed */
+        if (Dev->Stopping) {
+            /* Suspend/Cleanup set Stopping between the check above and this re-arm: cancel it again.
+               (Wait must be FALSE here: we are inside the timer callback.) */
+            (VOID)WdfTimerStop(Timer, FALSE);
+        }
     }
 }
 
@@ -668,6 +684,11 @@ VOID SwBatEvtTimer(WDFTIMER Timer)
     }
     if (!Dev->Stopping) {
         WdfTimerStart(Timer, WDF_REL_TIMEOUT_IN_MS(POLL_MS));    /* one-shot timer, re-armed */
+        if (Dev->Stopping) {
+            /* Suspend/Cleanup set Stopping between the check above and this re-arm: cancel it again.
+               (Wait must be FALSE here: we are inside the timer callback.) */
+            (VOID)WdfTimerStop(Timer, FALSE);
+        }
     }
 }
 
@@ -712,13 +733,20 @@ NTSTATUS SwBatEvtSelfManagedIoInit(WDFDEVICE Device)
     BATTERY_STATUS First;
     NTSTATUS Status;
 
-    Status = SwBatOpenTarget(Device, Dev->GaugeId, &Dev->Gauge);
-    SwBatTrace(L"OpenGaugeStatus", (ULONG)Status);
+    /* Open only what is not open yet: a disable/enable or resource rebalance runs this again, and a second
+     * SwBatOpenTarget would overwrite (leak) the handle of the first. */
+    Status = STATUS_SUCCESS;
+    if (Dev->Gauge == NULL) {
+        Status = SwBatOpenTarget(Device, Dev->GaugeId, &Dev->Gauge);
+        SwBatTrace(L"OpenGaugeStatus", (ULONG)Status);
+    }
     if (!NT_SUCCESS(Status)) {
         return Status;
     }
-    Status = SwBatOpenTarget(Device, Dev->ChargerId, &Dev->Charger);
-    SwBatTrace(L"OpenChargerStatus", (ULONG)Status);    /* not fatal: unknown = on battery */
+    if (Dev->Charger == NULL) {
+        Status = SwBatOpenTarget(Device, Dev->ChargerId, &Dev->Charger);
+        SwBatTrace(L"OpenChargerStatus", (ULONG)Status);    /* not fatal: unknown = on battery */
+    }
 
     WdfWaitLockAcquire(Dev->Lock, NULL);
     Status = SwBatReadStatus(Dev, &First);
@@ -811,6 +839,34 @@ NTSTATUS SwBatEvtSelfManagedIoInit(WDFDEVICE Device)
     return STATUS_SUCCESS;
 }
 
+/* System sleep (Dx): both poll timers re-arm themselves, so Stopping is set first (see the re-check in the
+ * timer callbacks). The battery class stays registered; its next query after resume reads the gauge again. */
+NTSTATUS SwBatEvtSelfManagedIoSuspend(WDFDEVICE Device)
+{
+    PSWBAT_DEVICE Dev = SwBatGetDevice(Device);
+    Dev->Stopping = TRUE;
+    if (Dev->Timer != NULL) {
+        WdfTimerStop(Dev->Timer, TRUE);
+    }
+    if (Dev->UsbcTimer != NULL) {
+        WdfTimerStop(Dev->UsbcTimer, TRUE);
+    }
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS SwBatEvtSelfManagedIoRestart(WDFDEVICE Device)
+{
+    PSWBAT_DEVICE Dev = SwBatGetDevice(Device);
+    Dev->Stopping = FALSE;
+    if (Dev->Timer != NULL) {
+        WdfTimerStart(Dev->Timer, WDF_REL_TIMEOUT_IN_MS(POLL_MS));
+    }
+    if (Dev->UsbcTimer != NULL) {
+        WdfTimerStart(Dev->UsbcTimer, WDF_REL_TIMEOUT_IN_MS(USBC_POLL_MS));
+    }
+    return STATUS_SUCCESS;
+}
+
 VOID SwBatEvtSelfManagedIoCleanup(WDFDEVICE Device)
 {
     PSWBAT_DEVICE Dev = SwBatGetDevice(Device);
@@ -827,6 +883,23 @@ VOID SwBatEvtSelfManagedIoCleanup(WDFDEVICE Device)
         Dev->ClassHandle = NULL;
     }
     WdfWaitLockRelease(Dev->ClassLock);
+    /* The class (the only other user of the targets) is gone and both timers are stopped: close the targets so
+     * the next SelfManagedIoInit opens fresh ones instead of reusing handles to a stopped controller. */
+    if (Dev->Pd != NULL) {
+        WdfIoTargetClose(Dev->Pd);
+        WdfObjectDelete(Dev->Pd);
+        Dev->Pd = NULL;
+    }
+    if (Dev->Charger != NULL) {
+        WdfIoTargetClose(Dev->Charger);
+        WdfObjectDelete(Dev->Charger);
+        Dev->Charger = NULL;
+    }
+    if (Dev->Gauge != NULL) {
+        WdfIoTargetClose(Dev->Gauge);
+        WdfObjectDelete(Dev->Gauge);
+        Dev->Gauge = NULL;
+    }
 }
 
 NTSTATUS SwBatPreprocessDeviceControl(WDFDEVICE Device, PIRP Irp)
@@ -865,6 +938,8 @@ NTSTATUS SwBatEvtDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT DeviceInit)
     Pnp.EvtDevicePrepareHardware = SwBatEvtPrepareHardware;
     Pnp.EvtDeviceSelfManagedIoInit = SwBatEvtSelfManagedIoInit;
     Pnp.EvtDeviceSelfManagedIoCleanup = SwBatEvtSelfManagedIoCleanup;
+    Pnp.EvtDeviceSelfManagedIoSuspend = SwBatEvtSelfManagedIoSuspend;
+    Pnp.EvtDeviceSelfManagedIoRestart = SwBatEvtSelfManagedIoRestart;
     WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &Pnp);
     Status = WdfDeviceInitAssignWdmIrpPreprocessCallback(DeviceInit,
         SwBatPreprocessDeviceControl, IRP_MJ_DEVICE_CONTROL, NULL, 0);
@@ -895,7 +970,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
         RtlCopyMemory(&SwBatParamsPath[RegistryPath->Length / sizeof(WCHAR)], L"\\Parameters", sizeof(L"\\Parameters"));
         (VOID)RtlCreateRegistryKey(RTL_REGISTRY_ABSOLUTE, SwBatParamsPath);
     }
-    SwBatTrace(L"DriverVersion", 7);
+    SwBatTrace(L"DriverVersion", 8);
 
     WDF_DRIVER_CONFIG_INIT(&Config, SwBatEvtDeviceAdd);
     return WdfDriverCreate(DriverObject, RegistryPath, WDF_NO_OBJECT_ATTRIBUTES, &Config, WDF_NO_HANDLE);

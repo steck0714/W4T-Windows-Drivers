@@ -149,7 +149,7 @@
    "path": "PUT_tegra210b01_xusb_firmware_HERE.txt",
    "size": 364,
    "sha256": "e1be024660fd781f61c31615fa6d2cee96b713a283d2a494b45b7b97c53c992c",
-   "in_repo": null,
+   "in_repo": "kit/loader/PUT_tegra210b01_xusb_firmware_HERE.txt",
    "role": ""
   },
   {
@@ -189,7 +189,7 @@
    "path": "wp11/PUT_bl31.bin_HERE.txt",
    "size": 196,
    "sha256": "939f0010978bcad01633179487b90819196c336a4d8746aecf37fe36547f356e",
-   "in_repo": null,
+   "in_repo": "kit/loader/wp11/PUT_bl31.bin_HERE.txt",
    "role": ""
   },
   {
@@ -205,7 +205,7 @@
    "path": "wp64/PUT_bl31.bin_HERE.txt",
    "size": 196,
    "sha256": "939f0010978bcad01633179487b90819196c336a4d8746aecf37fe36547f356e",
-   "in_repo": null,
+   "in_repo": "kit/loader/wp64/PUT_bl31.bin_HERE.txt",
    "role": ""
   },
   {

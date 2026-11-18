@@ -1,3 +1,12 @@
+/* W4T-CREDIT-BEGIN
+ * Origin : hayato41200/Windows-for-Switch-Drivers, Erista (t210/Icosa) driver set, which matched an older
+ *          ruje0504-2/Windows-for-Switch-Drivers commit (docs/HAYATO-DRIVER-AUDIT-ja.md); later edits are in CREDITS.md.
+ * Authors: hayato41200, ruje0504-2 (and their contributors). The upstream file has no author or
+ *          copyright line, so per-file authorship is not recorded here.
+ * License: GPL-2.0, from the LICENSE of this directory (the file has no SPDX tag of its own).
+ * Refs   : CTCaer/hekate (GPL-2.0): MAX77620 registers.
+ * Credit block added by W4T (2026-11-18); full table in CREDITS.md.
+ * W4T-CREDIT-END */
 /*
  * Nintendo Switch power button driver, KMDF + Virtual HID Framework (VHF).
  *
@@ -94,6 +103,8 @@ EVT_WDF_DRIVER_DEVICE_ADD SwPwrEvtDeviceAdd;
 EVT_WDF_DEVICE_PREPARE_HARDWARE SwPwrEvtPrepareHardware;
 EVT_WDF_DEVICE_SELF_MANAGED_IO_INIT SwPwrEvtSelfManagedIoInit;
 EVT_WDF_DEVICE_SELF_MANAGED_IO_CLEANUP SwPwrEvtSelfManagedIoCleanup;
+EVT_WDF_DEVICE_SELF_MANAGED_IO_SUSPEND SwPwrEvtSelfManagedIoSuspend;
+EVT_WDF_DEVICE_SELF_MANAGED_IO_RESTART SwPwrEvtSelfManagedIoRestart;
 EVT_WDF_TIMER SwPwrEvtTimer;
 
 static WCHAR SwPwrParamsPath[256];
@@ -286,6 +297,11 @@ VOID SwPwrEvtTimer(WDFTIMER Timer)
     }
     if (!Dev->Stopping) {
         WdfTimerStart(Timer, WDF_REL_TIMEOUT_IN_MS(POLL_MS));    /* one-shot passive timer, re-armed */
+        if (Dev->Stopping) {
+            /* Suspend/Cleanup set Stopping between the check above and this re-arm: cancel it again.
+               (Wait must be FALSE here: we are inside the timer callback.) */
+            (VOID)WdfTimerStop(Timer, FALSE);
+        }
     }
 }
 
@@ -383,6 +399,39 @@ NTSTATUS SwPwrEvtSelfManagedIoInit(WDFDEVICE Device)
     return STATUS_SUCCESS;
 }
 
+/* System sleep (Dx): stop polling. The press that WAKES the system (and any edge the PMIC latched while we were
+ * not polling) must not be reported as a new button press, or Windows would go straight back to sleep: Restart
+ * seeds the hold logic from the current level and drops the latched edges, exactly like SelfManagedIoInit. */
+NTSTATUS SwPwrEvtSelfManagedIoSuspend(WDFDEVICE Device)
+{
+    PSWPWR_DEVICE Dev = SwPwrGetDevice(Device);
+    Dev->Stopping = TRUE;
+    if (Dev->Timer != NULL) {
+        WdfTimerStop(Dev->Timer, TRUE);
+    }
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS SwPwrEvtSelfManagedIoRestart(WDFDEVICE Device)
+{
+    PSWPWR_DEVICE Dev = SwPwrGetDevice(Device);
+    UCHAR Stat = 0, Irq = 0;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
+
+    if (Dev->I2c != NULL) {
+        Status = SwPwrReadReg(Dev->I2c, MAX77620_ONOFFSTAT, &Stat);
+        (VOID)SwPwrReadReg(Dev->I2c, MAX77620_ONOFFIRQ, &Irq);    /* drop edges latched while asleep */
+    }
+    /* If the level cannot be read, assume "held": the hold logic then waits for a release before it reports. */
+    swpwr_hold_init(&Dev->Hold, NT_SUCCESS(Status) ? ((Stat & ONOFFSTAT_EN0) != 0) : 1);
+    Dev->Failures = 0;
+    Dev->Stopping = FALSE;
+    if (Dev->Timer != NULL) {
+        WdfTimerStart(Dev->Timer, WDF_REL_TIMEOUT_IN_MS(POLL_MS));
+    }
+    return STATUS_SUCCESS;
+}
+
 VOID SwPwrEvtSelfManagedIoCleanup(WDFDEVICE Device)
 {
     PSWPWR_DEVICE Dev = SwPwrGetDevice(Device);
@@ -412,6 +461,8 @@ NTSTATUS SwPwrEvtDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT DeviceInit)
     Pnp.EvtDevicePrepareHardware = SwPwrEvtPrepareHardware;
     Pnp.EvtDeviceSelfManagedIoInit = SwPwrEvtSelfManagedIoInit;
     Pnp.EvtDeviceSelfManagedIoCleanup = SwPwrEvtSelfManagedIoCleanup;
+    Pnp.EvtDeviceSelfManagedIoSuspend = SwPwrEvtSelfManagedIoSuspend;
+    Pnp.EvtDeviceSelfManagedIoRestart = SwPwrEvtSelfManagedIoRestart;
     WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &Pnp);
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&Attributes, SWPWR_DEVICE);
     return WdfDeviceCreate(&DeviceInit, &Attributes, &Device);
@@ -426,7 +477,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
         RtlCopyMemory(&SwPwrParamsPath[RegistryPath->Length / sizeof(WCHAR)], L"\\Parameters", sizeof(L"\\Parameters"));
         (VOID)RtlCreateRegistryKey(RTL_REGISTRY_ABSOLUTE, SwPwrParamsPath);
     }
-    SwPwrTrace(L"DriverVersion", 2);
+    SwPwrTrace(L"DriverVersion", 3);
     WDF_DRIVER_CONFIG_INIT(&Config, SwPwrEvtDeviceAdd);
     return WdfDriverCreate(DriverObject, RegistryPath, WDF_NO_OBJECT_ATTRIBUTES, &Config, WDF_NO_HANDLE);
 }

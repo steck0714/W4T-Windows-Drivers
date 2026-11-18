@@ -1,0 +1,40 @@
+diff --git a/tegra-x1-wddm/windows/adapter.c b/tegra-x1-wddm/windows/adapter.c
+index 639c9f6fb3a..a27193458ea 100644
+--- a/tegra-x1-wddm/windows/adapter.c
++++ b/tegra-x1-wddm/windows/adapter.c
+@@ -68,6 +68,15 @@ NTSTATUS APIENTRY TgGpuDdiStopDevice(PVOID context)
+     a->State=TgGpuAdapterAdded;
+     return STATUS_SUCCESS;
+ }
++/* switch-wp: which StartDevice step failed (Parameters\StartStep = step, StartStepStatus). */
++static VOID record_step(ULONG step,NTSTATUS status)
++{
++    ULONG value=(ULONG)status;
++    (VOID)RtlWriteRegistryValue(RTL_REGISTRY_SERVICES,L"tegragpurender\\Parameters",
++                              L"StartStep",REG_DWORD,&step,sizeof(step));
++    (VOID)RtlWriteRegistryValue(RTL_REGISTRY_SERVICES,L"tegragpurender\\Parameters",
++                              L"StartStepStatus",REG_DWORD,&value,sizeof(value));
++}
+ NTSTATUS APIENTRY TgGpuDdiStartDevice(PVOID context,DXGK_START_INFO *start,
+     DXGKRNL_INTERFACE *dxgk,ULONG *sources,ULONG *children)
+ {
+@@ -88,15 +97,19 @@ NTSTATUS APIENTRY TgGpuDdiStartDevice(PVOID context,DXGK_START_INFO *start,
+     *sources=*children=0; /* Render only; retain the existing POST display. */
+     a->State=TgGpuAdapterStarting;a->Engine.Dxgk=*dxgk;
+     status=TgGpuAcquireResources(dxgk,&a->Resources);
++    record_step(1,status);
+     if(!NT_SUCCESS(status))goto fail;
+     if(!a->Resources.LicMapping) {status=STATUS_DEVICE_CONFIGURATION_ERROR;goto fail;}
+     status=TgGpuCreateTableSegment(dxgk,TG_GPU_EXPLICIT_TABLE_SEGMENT,
+                                    TG_GPU_ADAPTER_TABLE_BYTES,&a->Tables);
++    record_step(2,status);
+     if(!NT_SUCCESS(status))goto fail;
+     status=TgGpuInitializeContextEngine(&a->Engine,dxgk,&a->Tables);
++    record_step(3,status);
+     if(!NT_SUCCESS(status))goto fail;
+     a->EngineReady=TRUE;
+     status=TgGpuInitializeWorkQueue(&a->Queue,&a->Engine);
++    record_step(4,status);
+     if(!NT_SUCCESS(status))goto fail;
+     a->QueueReady=TRUE;
+     /* This publishes OS identity only. It must not claim a native submission
