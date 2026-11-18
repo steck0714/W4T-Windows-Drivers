@@ -62,94 +62,94 @@ core = [root / "core/gm20b_mmu.c", root / "core/report.c", root / "core/gpfifo.c
         root / "core/gr_submit.c", root / "core/gr_clear.c", root / "core/gr_draw.c",
         root / "platform/t210_gr_context.c", root / "platform/t210_interrupt.c", encoder]
 host = args.out / "test-gm20b-core"
-subprocess.run([args.cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+subprocess.run([args.cc, "-std=c11", "-D_CRT_SECURE_NO_WARNINGS", "-O2", "-Wall", "-Wextra", "-Werror",
                 *[f"-I{p}" for p in mesa_includes], *map(str, core), str(root / "tests/test_core.c"),
                 str(root / "tests/test_execute_init.c"),
                 str(root / "tests/test_boot_bar1.c"),
                 "-o", str(host)], check=True)
 subprocess.run([str(host.resolve())], check=True)
 stream_test=args.out / "test-command-stream"
-subprocess.run([args.cc,"-std=c11","-O2","-Wall","-Wextra","-Werror",
+subprocess.run([args.cc,"-std=c11", "-D_CRT_SECURE_NO_WARNINGS","-O2","-Wall","-Wextra","-Werror",
                 *[f"-I{p}" for p in mesa_includes],str(root / "core/command_stream.c"),
                 str(root / "tests/test_command_stream.c"),"-o",str(stream_test)],check=True)
 subprocess.run([str(stream_test.resolve())],check=True)
 power = root / "platform/t210_power.c"
 power_test = args.out / "test-t210-power"
-subprocess.run([args.cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+subprocess.run([args.cc, "-std=c11", "-D_CRT_SECURE_NO_WARNINGS", "-O2", "-Wall", "-Wextra", "-Werror",
                 str(power), str(root / "tests/test_power.c"), "-o", str(power_test)], check=True)
 subprocess.run([str(power_test.resolve())], check=True)
 clock = root / "platform/t210_clock.c"
 clock_test = args.out / "test-t210-clock"
-subprocess.run([args.cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+subprocess.run([args.cc, "-std=c11", "-D_CRT_SECURE_NO_WARNINGS", "-O2", "-Wall", "-Wextra", "-Werror",
                 str(clock), str(root / "tests/test_clock.c"), "-o", str(clock_test)], check=True)
 subprocess.run([str(clock_test.resolve())], check=True)
 frontend_test = args.out / "test-t210-frontend"
-subprocess.run([args.cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+subprocess.run([args.cc, "-std=c11", "-D_CRT_SECURE_NO_WARNINGS", "-O2", "-Wall", "-Wextra", "-Werror",
                 str(root / "platform/t210_frontend.c"), str(root / "tests/test_frontend.c"),
                 "-o", str(frontend_test)], check=True)
 subprocess.run([str(frontend_test.resolve())], check=True)
 interrupt_test=args.out / "test-interrupt"
-subprocess.run([args.cc,"-std=c11","-O2","-Wall","-Wextra","-Werror",
+subprocess.run([args.cc,"-std=c11", "-D_CRT_SECURE_NO_WARNINGS","-O2","-Wall","-Wextra","-Werror",
                 str(root / "platform/t210_interrupt.c"),str(root / "tests/test_interrupt.c"),
                 "-o",str(interrupt_test)],check=True)
 subprocess.run([str(interrupt_test.resolve())],check=True)
 tlb = root / "platform/t210_mmu.c"
 tlb_test = args.out / "test-tlb"
-subprocess.run([args.cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+subprocess.run([args.cc, "-std=c11", "-D_CRT_SECURE_NO_WARNINGS", "-O2", "-Wall", "-Wextra", "-Werror",
                 str(tlb), str(root / "tests/test_tlb.c"), "-o", str(tlb_test)], check=True)
 subprocess.run([str(tlb_test.resolve())], check=True)
 channel_test=args.out / "test-channel"
-subprocess.run([args.cc,"-std=c11","-O2","-Wall","-Wextra","-Werror",
+subprocess.run([args.cc,"-std=c11", "-D_CRT_SECURE_NO_WARNINGS","-O2","-Wall","-Wextra","-Werror",
                 str(root / "core/channel.c"),str(root / "core/fault.c"),str(tlb),
                 str(root / "platform/t210_frontend.c"),str(root / "tests/test_channel.c"),
                 "-o",str(channel_test)],check=True)
 subprocess.run([str(channel_test.resolve())],check=True)
 gr_firmware = root / "core/gr_firmware.c"
 gr_firmware_test = args.out / "test-gr-firmware"
-subprocess.run([args.cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+subprocess.run([args.cc, "-std=c11", "-D_CRT_SECURE_NO_WARNINGS", "-O2", "-Wall", "-Wextra", "-Werror",
                 str(gr_firmware), str(root / "tests/test_gr_firmware.c"),
                 "-o", str(gr_firmware_test)], check=True)
 subprocess.run([str(gr_firmware_test.resolve())], check=True)
 acr_test = args.out / "test-acr-firmware"
-subprocess.run([args.cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+subprocess.run([args.cc, "-std=c11", "-D_CRT_SECURE_NO_WARNINGS", "-O2", "-Wall", "-Wextra", "-Werror",
                 str(root / "core/acr_firmware.c"), str(gr_firmware),
                 str(root / "tests/test_acr_firmware.c"), "-o", str(acr_test)], check=True)
 subprocess.run([str(acr_test.resolve()), *([str(args.acr_firmware.resolve())] if args.acr_firmware else [])], check=True)
 acr_boot_test = args.out / "test-acr-boot"
-subprocess.run([args.cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+subprocess.run([args.cc, "-std=c11", "-D_CRT_SECURE_NO_WARNINGS", "-O2", "-Wall", "-Wextra", "-Werror",
                 str(root / "platform/t210_acr.c"), str(root / "tests/test_acr_boot.c"),
                 "-o", str(acr_boot_test)], check=True)
 subprocess.run([str(acr_boot_test.resolve())], check=True)
 pmu_test = args.out / "test-pmu-boot"
-subprocess.run([args.cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+subprocess.run([args.cc, "-std=c11", "-D_CRT_SECURE_NO_WARNINGS", "-O2", "-Wall", "-Wextra", "-Werror",
                 str(root / "platform/t210_pmu.c"), str(root / "tests/test_pmu_boot.c"),
                 "-o", str(pmu_test)], check=True)
 subprocess.run([str(pmu_test.resolve())], check=True)
 gr = root / "platform/t210_gr.c"
 gr_test = args.out / "test-gr-boot"
-subprocess.run([args.cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+subprocess.run([args.cc, "-std=c11", "-D_CRT_SECURE_NO_WARNINGS", "-O2", "-Wall", "-Wextra", "-Werror",
                 str(gr), str(gr_firmware), str(root / "platform/t210_frontend.c"),
                 str(root / "tests/test_gr_boot.c"), "-o", str(gr_test)], check=True)
 subprocess.run([str(gr_test.resolve())], check=True)
 gr_image_test = args.out / "test-gr-image"
-subprocess.run([args.cc,"-std=c11","-O2","-Wall","-Wextra","-Werror",
+subprocess.run([args.cc,"-std=c11", "-D_CRT_SECURE_NO_WARNINGS","-O2","-Wall","-Wextra","-Werror",
                 str(root / "core/gr_image.c"),str(root / "tests/test_gr_image.c"),
                 "-o",str(gr_image_test)],check=True)
 subprocess.run([str(gr_image_test.resolve())],check=True)
 gr_clear_test = args.out / "test-gr-clear"
-subprocess.run([args.cc,"-std=c11","-O2","-Wall","-Wextra","-Werror",
+subprocess.run([args.cc,"-std=c11", "-D_CRT_SECURE_NO_WARNINGS","-O2","-Wall","-Wextra","-Werror",
                 *[f"-I{p}" for p in mesa_includes],
                 str(root / "core/gr_clear.c"),str(root / "core/report.c"),str(root / "core/command_stream.c"),str(encoder),
                 str(root / "tests/test_gr_clear.c"),"-o",str(gr_clear_test)],check=True)
 subprocess.run([str(gr_clear_test.resolve())],check=True)
 gr_draw_test=args.out / "test-gr-draw"
-subprocess.run([args.cc,"-std=c11","-O2","-Wall","-Wextra","-Werror",
+subprocess.run([args.cc,"-std=c11", "-D_CRT_SECURE_NO_WARNINGS","-O2","-Wall","-Wextra","-Werror",
                 *[f"-I{p}" for p in mesa_includes],
                 str(root / "core/gr_draw.c"),str(root / "core/report.c"),str(root / "core/command_stream.c"),str(encoder),
                 str(root / "tests/test_gr_draw.c"),"-o",str(gr_draw_test)],check=True)
 subprocess.run([str(gr_draw_test.resolve())],check=True)
 gr_context_test = args.out / "test-gr-context"
-subprocess.run([args.cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+subprocess.run([args.cc, "-std=c11", "-D_CRT_SECURE_NO_WARNINGS", "-O2", "-Wall", "-Wextra", "-Werror",
                 str(root / "platform/t210_gr_context.c"),str(root / "core/gr_image.c"), str(gr), str(gr_firmware),
                 str(root / "platform/t210_frontend.c"), str(root / "core/gm20b_mmu.c"),
                 str(root / "tests/test_gr_context.c"), "-o", str(gr_context_test)], check=True)
