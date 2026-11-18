@@ -39,4 +39,4 @@
 
 - winx 由来のソース: 各ディレクトリの `LICENSE`（`drivers/*/LICENSE`）に従う。出典は winx の `NOTICE.winx.md`（hayato41200、ruje0504-2、CTCaer 等）。
 - `reference/windows-switch/`: DanilKhmyrov/windows-switch の `LICENSE`（GPL-2.0）をそのまま同梱。再配布条件に注意。
-- Broadcom ファームウェア、NVIDIA XUSB ファームウェア、ビルド済み `.sys` は現時点では未完成の為、含めない。
+- ビルド済み `.sys` は現時点では未完成の為、含めない。
