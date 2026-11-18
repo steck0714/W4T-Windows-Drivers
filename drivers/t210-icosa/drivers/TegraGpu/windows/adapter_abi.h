@@ -3,7 +3,7 @@
 #define TG_GPU_ADAPTER_ABI_H
 #include <stdint.h>
 
-/* Shared with the future Windows NVK nvkmd backend. A budget ceiling, not
+/* Shared by the Windows NVK backend and the Tegra KMD. A budget ceiling, not
  * reserved physical RAM or a promise that VidMm can make all of it resident.
  */
 #define TG_GPU_MEMORY_BUDGET_BYTES (UINT64_C(512)*1024*1024)
