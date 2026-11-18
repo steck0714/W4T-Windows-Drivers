@@ -164,7 +164,7 @@ int main(int argc,char **argv)
         if(test==4)m.save_fail=true;if(test==5)m.no_image=true;
         if(test==6)m.bad_magic=true;if(test==7)m.busy_reg=0x70010;
         if(test==8)m.pri=true;
-        const unsigned expected[]={TG_GPU_GR_CTX_TIMEOUT,TG_GPU_GR_CTX_TIMEOUT,
+        const enum tg_gpu_gr_context_result expected[]={TG_GPU_GR_CTX_TIMEOUT,TG_GPU_GR_CTX_TIMEOUT,
             TG_GPU_GR_CTX_FECS_REJECTED,TG_GPU_GR_CTX_TIMEOUT,TG_GPU_GR_CTX_FECS_REJECTED,
             TG_GPU_GR_CTX_IMAGE,TG_GPU_GR_CTX_IMAGE,TG_GPU_GR_CTX_VISIBILITY,TG_GPU_GR_CTX_VISIBILITY};
         assert(run(&m,&net,&s)==expected[test] && s.stage<9);
