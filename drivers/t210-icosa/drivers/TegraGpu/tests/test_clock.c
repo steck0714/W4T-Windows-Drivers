@@ -6,7 +6,7 @@
 
 static uint32_t registers[0x140000 / 4];
 static bool counter_bad, no_lock, slowdown_stuck, pmic_fail;
-static uint32_t writes, target_khz;
+static uint32_t writes, target_khz, speedo_raw;
 static uint8_t vout, dvs;
 static void forbid(uint32_t off)
 {
@@ -17,6 +17,7 @@ static void forbid(uint32_t off)
 static uint32_t read_reg(void *ctx, uint32_t address)
 {
     (void)ctx;
+    if (address == 0x7000f930) return speedo_raw; /* FUSE_CPU_SPEEDO_2 shadow: the GPU speed bin */
     assert(address >= 0x57000000 && address < 0x57140000);
     return registers[(address - 0x57000000) / 4];
 }
@@ -69,7 +70,7 @@ static void reset(void)
     registers[0x20798 / 4] = 0x105;
     registers[0x20160 / 4] = 0x00220000;
     vout = dvs = 0x80 | 31;
-    target_khz = TG_GPU_FIXED_KHZ;
+    target_khz = TG_GPU_FIXED_KHZ; speedo_raw = 2000;
     counter_bad = no_lock = slowdown_stuck = pmic_fail = false;
     writes = 0;
 }
@@ -78,14 +79,26 @@ int main(void)
     struct tg_gpu_power p = {.owned = true, .ready = true, .pmic_address = 0x1c};
     struct tg_gpu_power_io io = {NULL, read_reg, write_reg, read_pmic, write_pmic, delay};
     struct tg_gpu_clock c = {0};
-    assert(tg_gpu_clock_required_uv(0, TG_GPU_FIXED_KHZ) == UINT32_MAX);
-    assert(tg_gpu_clock_required_uv(1400, 1234567) == UINT32_MAX);
-    assert(tg_gpu_clock_required_uv(1400, TG_GPU_FIXED_KHZ) == 1000000);
-    assert(tg_gpu_clock_required_uv(1400, TG_GPU_OVERCLOCK_KHZ) == 1100000);
+    /* Expected values computed independently from the nouveau gm20b CVB table
+     * (c0, c1, c2 per frequency; ((c2*s/100 + c1)*s/100 + c0) in uV, up to whole
+     * mV, floor 950 mV, up to the 6.25 mV grid). Smallest speedo reading is used. */
+    assert(tg_gpu_clock_required_uv(0, TG_GPU_FIXED_KHZ) == UINT32_MAX);      /* fuse unreadable */
+    assert(tg_gpu_clock_required_uv(75, TG_GPU_FIXED_KHZ) == UINT32_MAX);     /* speedo <= 0 */
+    assert(tg_gpu_clock_required_uv(0x10000, TG_GPU_FIXED_KHZ) == UINT32_MAX);
+    assert(tg_gpu_clock_required_uv(2000, 1234567) == UINT32_MAX);            /* unsupported profile */
+    assert(tg_gpu_clock_required_uv(2000, TG_GPU_FIXED_KHZ) == 950000);       /* vmin floor */
+    assert(tg_gpu_clock_required_uv(2300, TG_GPU_FIXED_KHZ) == 950000);
+    assert(tg_gpu_clock_required_uv(1700, TG_GPU_FIXED_KHZ) == 1012500);
+    assert(tg_gpu_clock_required_uv(1500, TG_GPU_FIXED_KHZ) == 1100000);
+    assert(tg_gpu_clock_required_uv(1400, TG_GPU_FIXED_KHZ) == 1150000);      /* exactly the rail limit */
+    assert(tg_gpu_clock_required_uv(2300, TG_GPU_OVERCLOCK_KHZ) == 987500);
+    assert(tg_gpu_clock_required_uv(2000, TG_GPU_OVERCLOCK_KHZ) == 1087500);
+    assert(tg_gpu_clock_required_uv(1700, TG_GPU_OVERCLOCK_KHZ) == UINT32_MAX); /* would need > 1.150 V */
+    assert(tg_gpu_clock_required_uv(1400, TG_GPU_OVERCLOCK_KHZ) == UINT32_MAX);
     reset();
     assert(tg_gpu_clock_start(&io, &p, target_khz, &c) == TG_GPU_CLOCK_OK);
     assert(c.measured_khz == 460800 && c.counter == 9600 && c.stage == 5);
-    assert(c.rail_uv == 1000000 && (vout & 0x7f) == 63 && (dvs & 0x7f) == 63);
+    assert(c.rail_uv == 950000 && (vout & 0x7f) == 55 && (dvs & 0x7f) == 55);
     assert(registers[0x20798 / 4] == 0x105);
     assert(registers[0x20160 / 4] == 0); /* persists beyond the counter sample */
     assert(tg_gpu_clock_stop(&io, &c) == TG_GPU_CLOCK_OK);
@@ -120,9 +133,20 @@ int main(void)
     reset(); memset(&c, 0, sizeof(c)); target_khz = TG_GPU_OVERCLOCK_KHZ;
     assert(tg_gpu_clock_start(&io, &p, target_khz, &c) == TG_GPU_CLOCK_OK);
     assert(c.target_khz == 768000 && c.measured_khz == 768000);
-    assert(c.rail_uv == 1100000 && (vout & 0x7f) == 79);
+    assert(c.rail_uv == 1087500 && (vout & 0x7f) == 77);
     assert(tg_gpu_clock_stop(&io, &c) == TG_GPU_CLOCK_OK);
     assert(tg_gpu_clock_start(&io, &p, 1234567, &c) == TG_GPU_CLOCK_BAD_STATE);
+    /* Low speed bins: refused before any PMIC/PLL write instead of running under-volted. */
+    reset(); memset(&c, 0, sizeof(c)); speedo_raw = 0;
+    assert(tg_gpu_clock_start(&io, &p, TG_GPU_FIXED_KHZ, &c) == TG_GPU_CLOCK_RAIL_ERROR);
+    assert(!writes && !c.owned && vout == (0x80 | 31));
+    reset(); memset(&c, 0, sizeof(c)); speedo_raw = 1700; target_khz = TG_GPU_OVERCLOCK_KHZ;
+    assert(tg_gpu_clock_start(&io, &p, target_khz, &c) == TG_GPU_CLOCK_RAIL_ERROR);
+    assert(!writes && !c.owned && vout == (0x80 | 31));
+    reset(); memset(&c, 0, sizeof(c)); speedo_raw = 1700; /* default profile still runs, at its own voltage */
+    assert(tg_gpu_clock_start(&io, &p, TG_GPU_FIXED_KHZ, &c) == TG_GPU_CLOCK_OK);
+    assert(c.rail_uv == 1012500 && (vout & 0x7f) == 65 && (dvs & 0x7f) == 65);
+    assert(tg_gpu_clock_stop(&io, &c) == TG_GPU_CLOCK_OK);
     puts("T210 legacy GPCPLL ordering, counter and unwind tests passed (host model).");
     return 0;
 }

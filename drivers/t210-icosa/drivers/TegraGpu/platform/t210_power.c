@@ -58,7 +58,10 @@
  * T_JUNCTION_120|WDTMR|CKKADV 75mV/us|NOMINAL inductor. */
 #define M621_CTRL1_HOS  0xb0u
 #define M621_CTRL2_HOS  0xc1u
-#define GPU_BOOT_UV     800000u
+/* Switchroot nvgpu clk_gm20b.c: BOOT_GPU_UV_B1 = 1.0 V for Erista (0.8 V,
+ * BOOT_GPU_UV_C1, is the Mariko value) and the vdd-gpu init voltage in
+ * platform-t210-nx tegra210-odin-pmic.dtsi. */
+#define GPU_BOOT_UV     1000000u
 
 static void update32(const struct tg_gpu_power_io *io, uint32_t address,
                      uint32_t mask, uint32_t value)

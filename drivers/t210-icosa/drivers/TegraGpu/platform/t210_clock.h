@@ -6,8 +6,8 @@
 
 /* Fixed bring-up profiles for Erista (GM20B B1, legacy GPCPLL), not a governor.
  * GPCCLK = 38.4 MHz * N / PL_div / 2, VCO = 38.4 MHz * N (1.3 .. 2.6 GHz).
- *   460.8 MHz: N=48, PL=2 (VCO 1843.2 MHz) at 1.000 V   <- default
- *   768.0 MHz: N=40, PL=1 (VCO 1536.0 MHz) at 1.100 V   <- opt-in
+ *   460.8 MHz: N=48, PL=2 (VCO 1843.2 MHz) (rail from speedo, >= 950 mV)   <- default
+ *   768.0 MHz: N=40, PL=1 (VCO 1536.0 MHz) (rail from speedo; low bins are refused)   <- opt-in
  */
 #define TG_GPU_FIXED_KHZ 460800u
 #define TG_GPU_OVERCLOCK_KHZ 768000u
@@ -51,11 +51,13 @@ enum tg_gpu_clock_result tg_gpu_clock_measure(const struct tg_gpu_power_io *io,
 enum tg_gpu_clock_result tg_gpu_clock_stop(const struct tg_gpu_power_io *io,
     struct tg_gpu_clock *clock);
 
-/* Fixed conservative rail per profile (uV). Not taken from the Erista
- * CVB/speedo tables: chosen above the known Horizon operating points so a
- * cold bring-up does not under-volt. speedo is accepted for ABI parity and
- * must be non-zero. UINT32_MAX for an unsupported profile.
+/* Rail voltage (uV) for a profile, from the chip's own GPU speed bin.
+ * raw_speedo is the FUSE_CPU_SPEEDO_2 shadow (0x7000F930). Uses the Erista
+ * CVB table of Linux nouveau gm20b (NVIDIA, MIT) with a 950 mV floor, rounded
+ * up to the MAX77621 6.25 mV grid. UINT32_MAX when the fuse is 0/unreadable,
+ * the profile is unsupported, or the need exceeds the 1.150 V rail limit
+ * (the driver then refuses to start rather than under-volt).
  */
-uint32_t tg_gpu_clock_required_uv(uint32_t gpu_speedo, uint32_t target_khz);
+uint32_t tg_gpu_clock_required_uv(uint32_t raw_speedo, uint32_t target_khz);
 
 #endif

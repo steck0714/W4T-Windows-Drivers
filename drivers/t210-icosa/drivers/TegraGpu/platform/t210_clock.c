@@ -57,11 +57,58 @@ static void clk_select(const struct tg_gpu_power_io *io, uint32_t vco)
     clk_write(io, THERM, saved);
 }
 
-uint32_t tg_gpu_clock_required_uv(uint32_t speedo, uint32_t target)
+/* Erista GM20B CVB table (legacy / speedo id 0), voltage = f(speedo, frequency).
+ * Coefficients and formula: Linux nouveau drivers/gpu/drm/nouveau/nvkm/subdev/
+ * volt/gm20b.c (gm20b_cvb_coef) and volt/gk20a.c (gk20a_volt_get_cvb_voltage /
+ * gk20a_volt_calc_voltage), (c) 2014-2016 NVIDIA CORPORATION, MIT. Same
+ * numbers as NVIDIA L4T tegra21_dvfs.c. Only the two profiles used here. */
+struct cvb { uint32_t khz; int32_t c0, c1, c2; };
+static const struct cvb cvb_table[] = {
+    { TG_GPU_FIXED_KHZ,     2122872,  -95095, 1632 },
+    { TG_GPU_OVERCLOCK_KHZ, 2458841, -102685, 1632 },
+};
+#define SPEEDO_FUSE   0x7000f930u  /* FUSE_CPU_SPEEDO_2 shadow: GPU speedo is fused here */
+#define SPEEDO_SCALE  100
+#define VMIN_UV       950000u      /* nouveau speedo_to_vmin[], highest entry (conservative) */
+#define VMAX_UV       1150000u     /* regulator-max-microvolt of vdd-gpu (platform-t210-nx) */
+
+static int32_t div_round_closest(int64_t n, int32_t d)
 {
-    if (!speedo || speedo > 0xffffu) return UINT32_MAX;
-    if (target == TG_GPU_FIXED_KHZ) return 1000000u;
-    if (target == TG_GPU_OVERCLOCK_KHZ) return 1100000u;
+    return (int32_t)(n < 0 ? -((-n + d / 2) / d) : (n + d / 2) / d);
+}
+
+/* The raw fuse maps to the GPU speedo value differently per speedo revision
+ * (Linux speedo-tegra210.c): raw (rev >= 3), (-1662 + 1082 * raw / 100) / 10
+ * (rev 2) or raw - 75 (older). The revision is not read here. Voltage falls
+ * as speedo rises, so the smallest candidate gives the highest voltage: safe. */
+static int32_t gpu_speedo_floor(uint32_t raw)
+{
+    int32_t a = (int32_t)raw, b = (-1662 + (int32_t)(1082u * raw / 100u)) / 10, c = (int32_t)raw - 75;
+    int32_t m = a < b ? a : b;
+    return m < c ? m : c;
+}
+
+uint32_t tg_gpu_clock_required_uv(uint32_t raw_speedo, uint32_t target)
+{
+    uint32_t i, uv, code;
+    int32_t s, mv;
+    if (!raw_speedo || raw_speedo > 0xffffu) return UINT32_MAX;
+    s = gpu_speedo_floor(raw_speedo);
+    if (s <= 0) return UINT32_MAX;
+    for (i = 0; i < sizeof(cvb_table) / sizeof(cvb_table[0]); ++i) {
+        const struct cvb *e = &cvb_table[i];
+        if (e->khz != target) continue;
+        /* ((c2 * s / scale + c1) * s / scale + c0), then up to whole mV (nouveau). */
+        mv = div_round_closest((int64_t)e->c2 * s, SPEEDO_SCALE);
+        mv = div_round_closest((int64_t)(mv + e->c1) * s, SPEEDO_SCALE) + e->c0;
+        if (mv <= 0) return UINT32_MAX;
+        uv = (uint32_t)((mv + 999) / 1000) * 1000u;
+        if (uv < VMIN_UV) uv = VMIN_UV;
+        /* Round up onto the MAX77621 6.25 mV grid; refuse beyond the rail limit. */
+        code = (uv - TG_GPU_MAX77621_BASE_UV + TG_GPU_MAX77621_STEP_UV - 1u) / TG_GPU_MAX77621_STEP_UV;
+        uv = TG_GPU_MAX77621_BASE_UV + code * TG_GPU_MAX77621_STEP_UV;
+        return uv > VMAX_UV ? UINT32_MAX : uv;
+    }
     return UINT32_MAX;
 }
 
@@ -87,8 +134,11 @@ enum tg_gpu_clock_result tg_gpu_clock_start(const struct tg_gpu_power_io *io,
     /* Freshly reset GPU only. Existing clock owners are never displaced. */
     if ((clk_read(io, CFG) & ENABLE) || (clk_read(io, VCO) & 1))
         return TG_GPU_CLOCK_BAD_STATE;
-    required_uv = tg_gpu_clock_required_uv(1, target);
-    if (required_uv == UINT32_MAX || required_uv > 1100000u)
+    /* Rail from this chip's own speed bin. An unreadable (0) or unsupported
+     * bin, or one that needs more than the rail limit at this clock, is refused
+     * before any PMIC write rather than run under-volted. */
+    required_uv = tg_gpu_clock_required_uv(io->read32(io->context, SPEEDO_FUSE), target);
+    if (required_uv == UINT32_MAX)
         return TG_GPU_CLOCK_RAIL_ERROR;
     /* PLL is still disabled; program voltage before frequency. power_down
      * restores the pre-acquisition PMIC state after clocks/reset are stopped.

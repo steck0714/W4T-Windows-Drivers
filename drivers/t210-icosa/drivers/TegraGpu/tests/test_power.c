@@ -47,7 +47,7 @@ static void write32(void *opaque, uint32_t address, uint32_t value)
         if ((value & 1) && m->fail_clamp_set) break;
         if (!(value & 1)) {
             /* The rail must be on and 800 mV programmed before unclamp. */
-            assert((m->gpio6 & 0x0b) == 0x09 && (m->vout & 0x80) && (m->vout & 0x7f) == 31);
+            assert((m->gpio6 & 0x0b) == 0x09 && (m->vout & 0x80) && (m->vout & 0x7f) == 63);
             assert((m->clocks & 0x21000000) == 0x21000000);
             assert(m->reset & (1u << 24));
         }
