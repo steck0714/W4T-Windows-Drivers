@@ -53,11 +53,24 @@ jobs:
       - name: WDK 10.0.19041 (SDK 10.0.19041 is on the image)
         shell: pwsh
         run: |
-          Invoke-WebRequest 'https://go.microsoft.com/fwlink/?linkid=2128854' -OutFile "$env:RUNNER_TEMP\wdksetup.exe"
-          Start-Process "$env:RUNNER_TEMP\wdksetup.exe" -ArgumentList '/quiet','/norestart' -Wait
           $k = "${env:ProgramFiles(x86)}\Windows Kits\10"
-          foreach ($p in "Include\10.0.19041.0\km\wdm.h","Include\10.0.19041.0\km\spb\1.0\spb.h","Include\wdf\kmdf\1.15\wdf.h","Lib\wdf\kmdf\arm64\1.15\wdfldr.lib") {
+          $inc = "$k\Include\10.0.19041.0"
+          # Install only when missing (same as build-all-drivers.yml); show the exit code.
+          if (-not (Test-Path "$inc\km\wdm.h")) {
+            Invoke-WebRequest 'https://go.microsoft.com/fwlink/?linkid=2128854' -OutFile "$env:RUNNER_TEMP\wdksetup.exe"
+            $p = Start-Process "$env:RUNNER_TEMP\wdksetup.exe" -ArgumentList '/quiet','/norestart' -Wait -PassThru
+            Write-Host "wdksetup exit code: $($p.ExitCode)"
+          }
+          # Required files. spb.h / spbcx.h are located by search, not by a fixed path:
+          # spb.h is not under km\spb\1.0 (that was the failure); build.py passes both shared\ and km\spb\1.0 to /imsvc.
+          foreach ($p in "Include\10.0.19041.0\km\wdm.h","Include\wdf\kmdf\1.15\wdf.h","Lib\wdf\kmdf\arm64\1.15\wdfldr.lib") {
             if (-not (Test-Path "$k\$p")) { throw "missing $p" } }
+          foreach ($h in 'spb.h','spbcx.h') {
+            $f = Get-ChildItem $inc -Recurse -Filter $h -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $f) { throw "missing $h under $inc" }
+            Write-Host "found $h -> $($f.FullName.Substring($k.Length + 1))"
+          }
+          Get-ChildItem "$k\Include\wdf\kmdf" -Name | ForEach-Object { Write-Host "kmdf include: $_" }
       - name: mesa-switch + firmware
         shell: pwsh
         env:
