@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "tg_aligned.h"
 
 int main(void)
 {
@@ -50,7 +51,7 @@ int main(void)
     assert(words==0x76543210);
     for(unsigned i=0;i<TG_GPU_DRAW_MAX_WORDS+1;++i)assert(p[i]==0xa5a5a5a5);
 
-    uint32_t *backing=aligned_alloc(4096,16384);assert(backing);
+    uint32_t *backing=tg_aligned_alloc(4096,16384);assert(backing);
     memset(backing,0xa5,16384);
     uint32_t *code=backing+1024;struct tg_gpu_draw_status s={0};
     assert(tg_gpu_prepare_draw_code(code,8192,&s));
@@ -64,7 +65,7 @@ int main(void)
     code[(4096+0x30)/4]^=1;assert(!tg_gpu_check_draw_code(code,8192));
     assert(!tg_gpu_prepare_draw_code(code,8191,&s));
     assert(!tg_gpu_prepare_draw_code(code+1,8192,&s));
-    free(backing);
+    tg_aligned_free(backing);
     puts("GM20B NAK shader upload, scissored triangle packet and corruption checks: PASS (model only)");
     return 0;
 }
