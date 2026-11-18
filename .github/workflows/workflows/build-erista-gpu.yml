@@ -1,0 +1,105 @@
+# Erista (T210) TegraGpu bring-up driver. UNTESTED workflow: written without running it.
+# Jobs:
+#   host   (ubuntu)  all host-side model tests + ACPI node check; no WDK, no firmware.
+#   driver (windows) clang-cl/lld-link against the WDK; builds TegraGpuCore.lib always,
+#                    and the signed KMDF probe when NVIDIA firmware is supplied.
+# NVIDIA firmware is NOT in the repo. Provide a zip with these 9 files at the root:
+#   NETB_img.bin fecs.bin gpccs.bin nv_acr_ucode_prod.bin pmu_bl.bin
+#   gpmu_ucode_image.bin gpmu_ucode_desc.bin pmu_sig.bin fecs_sig.bin
+# (collect them from your own Switchroot SD with tools/fwfetch (fwfetch.exe --profile erista --auto), zip the 9 files from gpu\,
+# keep the zip PRIVATE) via the secret NVIDIA_FW_URL (any URL `curl` can fetch, e.g. a private release asset
+# link with a token) or the workflow input firmware_url.
+# Signing: optional secrets SWOA_PFX_BASE64 / SWOA_PFX_PASSWORD, else a self-signed cert per run.
+name: build-erista-gpu
+on:
+  workflow_dispatch:
+    inputs:
+      firmware_url: { description: "URL of the firmware zip (optional)", required: false, default: "" }
+  push:
+    paths: ['drivers/t210-icosa/drivers/TegraGpu/**', 'acpi/t210/**', '.github/workflows/build-erista-gpu.yml']
+
+env:
+  MESA_REV: 0ff52079ca9e9e837ed27eb95a8d239f439a1864
+
+jobs:
+  host:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y clang acpica-tools
+      - name: mesa-switch at the pinned commit
+        run: |
+          git clone https://github.com/danfromtico/mesa-switch.git mesa-switch
+          git -C mesa-switch checkout "$MESA_REV"
+      - name: Host tests (power, legacy GPCPLL, core)
+        run: python3 drivers/t210-icosa/drivers/TegraGpu/tools/build.py --mesa mesa-switch --out build/host --host-only --cc clang
+      - name: ACPI node consistency + syntax
+        run: |
+          python3 tools/check_acpi_resources.py
+          { echo 'DefinitionBlock("t.aml","DSDT",1,"T","T",1){ Scope(_SB){ Device(I2C5){Name(_HID,"SWOA0201")}'
+            cat acpi/t210/gpu0.asl.inc; echo '}}'; } > /tmp/t.asl
+          iasl -p /tmp/t -D SWITCH_ERISTA_GPU /tmp/t.asl
+
+  driver:
+    needs: host
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: LLVM
+        shell: pwsh
+        run: |
+          choco install llvm --no-progress -y
+          'C:\Program Files\LLVM\bin' | Out-File -Append -Encoding ascii $env:GITHUB_PATH
+      - name: WDK 10.0.19041 (SDK 10.0.19041 is on the image)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest 'https://go.microsoft.com/fwlink/?linkid=2128854' -OutFile "$env:RUNNER_TEMP\wdksetup.exe"
+          Start-Process "$env:RUNNER_TEMP\wdksetup.exe" -ArgumentList '/quiet','/norestart' -Wait
+          $k = "${env:ProgramFiles(x86)}\Windows Kits\10"
+          foreach ($p in "Include\10.0.19041.0\km\wdm.h","Include\10.0.19041.0\km\spb\1.0\spb.h","Include\wdf\kmdf\1.15\wdf.h","Lib\wdf\kmdf\arm64\1.15\wdfldr.lib") {
+            if (-not (Test-Path "$k\$p")) { throw "missing $p" } }
+      - name: mesa-switch + firmware
+        shell: pwsh
+        env:
+          FW_URL: ${{ inputs.firmware_url || secrets.NVIDIA_FW_URL }}
+        run: |
+          git clone https://github.com/danfromtico/mesa-switch.git mesa-switch
+          git -C mesa-switch checkout $env:MESA_REV
+          if ($env:FW_URL) {
+            curl.exe -L --fail -o fw.zip "$env:FW_URL"
+            Expand-Archive fw.zip -DestinationPath fw -Force
+            "HAVE_FW=1" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+          }
+      - name: Build
+        shell: pwsh
+        run: |
+          $inc = "${env:ProgramFiles(x86)}\Windows Kits\10\Include\10.0.19041.0"
+          $bargs = @('drivers\t210-icosa\drivers\TegraGpu\tools\build.py','--mesa','mesa-switch','--wdk-include',$inc,'--sdk-include',$inc,'--out','build\gpu')
+          if ($env:HAVE_FW) { $bargs += @('--probe','--gr-firmware','fw','--acr-firmware','fw') }
+          python @bargs
+          if ($LASTEXITCODE -ne 0) { throw 'build failed' }
+      - name: Sign probe and make catalog
+        if: env.HAVE_FW == '1'
+        shell: pwsh
+        env: { PFX_B64: "${{ secrets.SWOA_PFX_BASE64 }}", PFX_PASS: "${{ secrets.SWOA_PFX_PASSWORD }}" }
+        run: |
+          $bin = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+          $v = Get-ChildItem $bin -Directory | ? { $_.Name -match '^10\.' -and (Test-Path "$($_.FullName)\x64\signtool.exe") -and (Test-Path "$($_.FullName)\x86\Inf2Cat.exe") } | sort Name -Desc | select -First 1
+          $sign = "$($v.FullName)\x64\signtool.exe"; $cat = "$($v.FullName)\x86\Inf2Cat.exe"
+          if ($env:PFX_B64) {
+            [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\s.pfx",[Convert]::FromBase64String($env:PFX_B64))
+            $c = Import-PfxCertificate -FilePath "$env:RUNNER_TEMP\s.pfx" -CertStoreLocation Cert:\CurrentUser\My -Password (ConvertTo-SecureString $env:PFX_PASS -AsPlainText -Force)
+          } else {
+            $c = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=SwitchWOA Test Driver Signing' -CertStoreLocation Cert:\CurrentUser\My -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -NotAfter (Get-Date).AddYears(5)
+          }
+          $d = 'build\gpu\kit\tegragpuprobe'
+          Export-Certificate -Cert $c -FilePath 'build\gpu\kit\SwitchWOA-Test.cer' | Out-Null
+          & $sign sign /q /fd sha256 /sha1 $c.Thumbprint /s My "$d\tegragpuprobe.sys"; if ($LASTEXITCODE) { throw 'sign sys' }
+          & $cat "/driver:$d" /os:10_VB_ARM64 /uselocaltime | Out-Null; if ($LASTEXITCODE) { throw 'Inf2Cat' }
+          Get-ChildItem $d -Filter *.cat | % { & $sign sign /q /fd sha256 /sha1 $c.Thumbprint /s My $_.FullName; if ($LASTEXITCODE) { throw 'sign cat' } }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Erista-GPU
+          path: |
+            build/gpu/kit
+            build/gpu/TegraGpuCore.lib
