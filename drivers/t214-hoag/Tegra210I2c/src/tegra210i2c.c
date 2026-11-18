@@ -293,6 +293,21 @@ static NTSTATUS TegraI2cMdlCopy(PMDL Mdl, PUCHAR Flat, SIZE_T Length, BOOLEAN To
     return (Offset == Length) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL;
 }
 
+/* Microsoft: KeStallExecutionProcessor should not stall longer than ~50 us. Short delays still stall; longer ones
+ * wait (below DISPATCH_LEVEL) so a 1 ms request does not hold a CPU, and are capped at 1 ms at DISPATCH_LEVEL. */
+static VOID TegraI2cDelayUs(ULONG Us)
+{
+    if (Us <= 50) {
+        KeStallExecutionProcessor(Us);
+    } else if (KeGetCurrentIrql() < DISPATCH_LEVEL) {
+        LARGE_INTEGER Interval;
+        Interval.QuadPart = -(LONGLONG)Us * 10;
+        (VOID)KeDelayExecutionThread(KernelMode, FALSE, &Interval);
+    } else {
+        KeStallExecutionProcessor(Us > 1000 ? 1000 : Us);
+    }
+}
+
 /* Run SPB transfers [0, Count) of Request; repeated start between them. */
 static VOID TegraI2cRunRequest(WDFDEVICE Controller, SPBTARGET Target, SPBREQUEST Request, ULONG Count)
 {
@@ -320,7 +335,7 @@ static VOID TegraI2cRunRequest(WDFDEVICE Controller, SPBTARGET Target, SPBREQUES
             break;
         }
         if (Desc.DelayInUs != 0) {
-            KeStallExecutionProcessor(Desc.DelayInUs > 1000 ? 1000 : Desc.DelayInUs);
+            TegraI2cDelayUs(Desc.DelayInUs > 1000 ? 1000 : Desc.DelayInUs);
         }
         Bounce = (PUCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, Desc.TransferLength, 'c2iT');
         if (Bounce == NULL) {
