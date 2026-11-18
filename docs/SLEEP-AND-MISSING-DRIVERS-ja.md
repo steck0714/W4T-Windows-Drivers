@@ -30,6 +30,28 @@
 4. ハイバネート(S4)は Windows 側ではストレージ(SDHC ミニポート)のダンプ経路とファームウェア(UEFI)の再開が前提。先に SD ミニポートの休止対応を確認する。
 5. PEP は最後。ATF の SC7 エントリ/復帰と PMC の復帰要因を実機で確認してから設計する。
 
+## 追補（2026-11-17・2 回目）: T210 のポーリング系ドライバに Dx 停止/再開を実装
+
+根拠: KMDF は**ドライバ自身のタイマーを止めない**。`EvtDeviceSelfManagedIoSuspend`（D0 を出る前、まだ I/O できる）で止め、`EvtDeviceSelfManagedIoRestart` で再開するのが定石
+（[Self-managed I/O](https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/self-managed-i-o-device-states)）。
+止めないと、D3 の I2C コントローラへ SPB 転送を投げ続ける。
+
+| ドライバ(T210) | 版 | 実装 |
+|---|---|---|
+| SwitchFan | 1.0.0.3 | 停止: タイマー停止 + ファンを UEFI 既定 76 へ。再開: 失敗カウンタ 0、500 ms 後から再開 |
+| SwitchBattery | 1.0.0.8 | 停止/再開: 2 本のタイマー。**Init の二重オープンと Cleanup の閉じ忘れも修正** |
+| SwitchSensor | 1.0.0.2 | 停止: ALS/IMU を停止。再開: 起動時と同じ手順で初期化 |
+| SwitchCpuClock | 1.0.0.4 | 停止: ガード停止 + 既定クロックへ。再開: 要求プロファイルを再適用 |
+| SwitchPowerButton | 1.0.0.3 | 再開時に現在のレベルでホールド状態を作り直し、PMIC に溜まった ONOFFIRQ を捨てる（**起こした押下を新しい押下にしない**） |
+| SwitchTouch | 1.0.0.5 | 停止/再開: 100 ms ポーリング |
+
+- 全タイマーのコールバックに「再アーム後に `Stopping` を再確認して取り消す」を追加（停止処理との競合で止めたタイマーが復活していた）。
+- `tools/check_power_callbacks.py` に SMIOSusp / SMIORest 列と「WDF タイマーでポーリングするのに Dx で止めていない」検査を追加。**T210 は 0 件**。
+  残りは **T214 の CpuClock / Touch / Wi-Fi**（Lite 側。T210 と同一ソースなので同じ修正が使える。Lite は動作中なので触っていない）。
+- **未対応・要確認**: Rtc / Gpio（状態保存復元が要るかは実機で）、Tegra210I2c の D0Exit、USB-C ホスト給電（OTG）中のスリープで VBUS が出たままになる件、
+  タッチコントローラ自体の再初期化（スリープでコンフィグが消えるか未確認）。
+- 本物のスリープ（S3 / Modern Standby）は FADT・PEP・ATF の SC7 が要り、**このリポジトリの範囲外**（上の §1 のとおり）。ここまでは「その時に壊れないための下地」。
+
 ## 2. HDMI / 外部ディスプレイ
 
 - WinX の標準表示は UEFI の GOP フレームバッファを使う Microsoft Basic Display で、**Windows 側に表示コントローラードライバは存在しない**。ドック経由の HDMI 出力には T210 の DC / SOR1 / DisplayPort リンク学習(ドック内の DP→HDMI 変換)を駆動する **WDDM ディスプレイミニポート**が必要で、GPU の WDDM(KMD+UMD)と一体の作業になる（[WDDM 構成](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/windows-vista-and-later-display-driver-model-architecture)）。
@@ -42,7 +64,7 @@
 | Joy-Con(UART/HID) | Tegra UART コントローラードライバが無い。hekate の `bdk/input/joycon.c` が手順の出典（同梱済み） |
 | T210 の XUSB（USB3） | T214 の `TegraXusb` は 358 行の足場。NVIDIA XUSB ファームウェア（再配布しない）が要る |
 | ruje 最新の NVDEC / 動画デコード ABI(`nvdec_abi.h`) | 取り込んでいない。GPU KMD(WDDM)の完成が先 |
-| Iowa / Aula(Mariko)専用ドライバ | ボードごとの ACPI・電源・タッチ・パネルの検証が前提 |
+| Iowa / Aula(Mariko)専用ドライバ | ボードごとの ACPI・電源・タッチ・パネルの検証が前提。Aula には windows-switch v0.8.0 の構成を `drivers/t214-aula/` に別枠で置いてある（WinX の SWOA 系ではない） |
 | T214 側の ABI ヘッダ同期 | T214 は WDK が無く検証できないため据え置き |
 
 ## 4. ライセンス・出典

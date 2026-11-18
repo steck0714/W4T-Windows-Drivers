@@ -1,0 +1,22 @@
+[
+  { "name": "swoahello",      "kit": "Switch-Stage0",      "dir": "SwoaHello",         "sources": ["src/hello.c"],               "inf": null },
+  { "name": "tegra210gpio",   "kit": "Switch-Stage1",      "dir": "Tegra210Gpio",      "sources": ["src/tegra210gpio.c"],        "inf": "tegra210gpio.inf", "libs": ["msgpioclxstub.lib"] },
+  { "name": "tegra210i2c",    "kit": "Switch-Stage3",      "dir": "Tegra210I2c",       "sources": ["src/tegra210i2c.c"],         "inf": "tegra210i2c.inf",  "libs": ["spbcxstubs.lib"] },
+  { "name": "switchfan",      "kit": "Switch-Fan",         "dir": "SwitchFan",         "sources": ["src/switchfan.c"],           "inf": "switchfan.inf" },
+  { "name": "switchcpu",      "kit": "Switch-CpuClock",    "dir": "SwitchCpuClock",    "sources": ["src/switchcpu.c"],           "inf": "switchcpu.inf" },
+  { "name": "switchbattery",  "kit": "Switch-Battery",     "dir": "SwitchBattery",     "sources": ["src/switchbattery.c"],       "inf": "switchbattery.inf", "libs": ["battc.lib"] },
+  { "name": "switchpwrbtn",   "kit": "Switch-PowerButton", "dir": "SwitchPowerButton", "sources": ["src/switchpwrbtn.c"],        "inf": "switchpwrbtn.inf", "libs": ["vhfkm.lib"] },
+  { "name": "switchrtc",      "kit": "Switch-Rtc",         "dir": "SwitchRtc",         "sources": ["src/switchrtc.c"],           "inf": "switchrtc.inf" },
+  { "name": "switchsensor",   "kit": "Switch-Sensor",      "dir": "SwitchSensor",      "sources": ["src/switchsensor.c"],        "inf": "switchsensor.inf" },
+  { "name": "switchtouch",    "kit": "Switch-Touch",       "dir": "SwitchTouch",       "sources": ["src/switchtouch.c"],         "inf": "switchtouch.inf", "libs": ["vhfkm.lib"] },
+  { "name": "switchbt",       "kit": "Switch-Bluetooth",   "dir": "SwitchBluetooth",   "sources": ["src/switchbt.c"],            "inf": "switchbt.inf" },
+  { "name": "nvtsdhc",        "kit": "Switch-Sd",          "dir": "Tegra210Sdhc",      "sources": ["src/nvtsdhc.c"],             "inf": "nvtsdhc.inf", "libs": ["sdport.lib"], "wdm": true },
+  { "name": "switchaudio",    "kit": "Switch-Audio",       "dir": "SwitchAudio",       "sources": ["src/switchaudio.cpp"],       "inf": "switchaudio.inf", "libs": ["portcls.lib", "libcntpr.lib"], "wdm": true },
+  { "name": "swoadiag",       "kit": "Switch-UsbDiag",     "dir": "SwoaDiag",          "sources": ["src/swoadiag.c"],            "inf": null },
+  { "name": "switchwprobe",   "kit": "Switch-Wifi-Probe",  "dir": "SwitchWifiProbe",   "sources": ["src/switchwprobe.c"],        "inf": "switchwprobe.inf", "optional": true },
+  { "name": "switchwlan",     "kit": "Switch-Wlan",        "dir": "SwitchWlan",        "sources": ["src/wlan.cpp", "src/bcm.c"], "inf": "switchwlan.inf",
+    "wdk": "10.0.26100.0", "kmdf": "1.33", "ntddi": "0x0A00000C",
+    "defines": ["NET_VERSION_MAJOR=2", "NET_VERSION_MINOR=2", "WIFI_VERSION_MAJOR=1", "WIFI_VERSION_MINOR=0"],
+    "includes": ["km\\netcx\\kmdf\\adapter\\2.2", "shared\\netcx\\shared\\1.0", "km\\wificx\\1.0"],
+    "libs": ["{KMLIB}\\netcx\\kmdf\\adapter\\2.2\\netadaptercxstub.lib", "{KMLIB}\\wificx\\1.0\\wificxstub.lib", "{KMLIB}\\ndis.lib"] }
+]

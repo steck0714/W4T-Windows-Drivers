@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "about": "Switch model number -> SoC / board codename -> where its drivers come from. 'status' says whether this repository can produce a driver set for the model. Nothing here claims a driver works on hardware.",
+  "models": {
+    "HAC-001": {
+      "name": "Nintendo Switch (original, Erista / Tegra X1)",
+      "codename": "Icosa",
+      "family": "t210-icosa",
+      "source_dir": "drivers/t210-icosa",
+      "build": "ci",
+      "ci_config": "tools/ci/drivers-t210.json",
+      "status": "buildable-by-ci",
+      "note": "Built and test-signed by .github/workflows/build-all-drivers.yml (Windows runner with WDK); tools/build/assemble_build.py puts the result in build/HAC-001/drivers/. Not built in the authoring environment, no real-console test of the whole set."
+    },
+    "HAC-001-01": {
+      "name": "Nintendo Switch (2019 revision, Mariko / Tegra X1+)",
+      "codename": "Iowa",
+      "family": null,
+      "build": "none",
+      "status": "no-driver-set",
+      "note": "This repository has no driver set for Iowa (docs/DRIVER-INVENTORY.md: 'Iowa は専用の枠なし'). The Erista and Lite sets are NOT reused: board, power and I2C wiring are not shown to match."
+    },
+    "HDH-001": {
+      "name": "Nintendo Switch Lite (Mariko / Tegra X1+)",
+      "codename": "Hoag",
+      "family": "t214-hoag",
+      "source_dir": "drivers/t214-hoag",
+      "build": "not-wired",
+      "status": "sources-only",
+      "note": "Sources and INFs are present, but no CI build configuration exists yet (the Lite copy of Build-Driver.ps1 is older than the Erista one, and the per-driver build flags have not been written down)."
+    },
+    "HEG-001": {
+      "name": "Nintendo Switch OLED (Mariko / Tegra X1+)",
+      "codename": "Aula",
+      "family": "t214-aula",
+      "source_dir": "drivers/t214-aula",
+      "build": "upstream-binaries",
+      "status": "upstream-prebuilt",
+      "note": "No source in this repository builds for OLED. The only reported-working set is windows-switch v0.8.0 (one console, per its release note). tools/build/fill_heg001.py takes YOUR copy of that release zip, checks every file against the SHA-256 in drivers/t214-aula/manifest/, and fills build/HEG-001/."
+    }
+  }
+}

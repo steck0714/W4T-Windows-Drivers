@@ -44,7 +44,9 @@
 - NVIDIA / Maxim / TI / Broadcom の公開データシート・公開ソース（各ドライバの README に個別記載）
 
 ## 本リポジトリでの追加作業
+- OLED(Aula)枠 `drivers/t214-aula/` の新設（windows-switch v0.8.0 のテキスト部分と SHA-256 一覧）、`tools/fwfetch/`（実機からの取り出し・照合ツール。2026-11-18 に Rust で作り直し）と混入検査 `tools/check_no_proprietary.py`（Claude による作業）。
+- `build/`（型番別のビルド済み置き場）、`tools/build/`、`build-fwfetch.yml`、`build-all-drivers.yml` の組み立て・コミット段（Claude による作業。2026-11-18、ユーザー steck0714 の指示）。fwfetch の Rust 依存は `tools/fwfetch/THIRD-PARTY.md`。
 - 統合・整理、HWID/DSDT 静的検査、windows-switch 互換メモ、電源ボタン長押し(HoldSasMs)の移植、Erista GPU の取り込みと GPCPLL ロック検出修正、電源コールバック検査（Claude による作業。ユーザー steck0714 の指示と所有物に基づく）。
 
 ## 含めないもの
-Broadcom ファームウェア、NVIDIA の GPU / XUSB ファームウェア、ビルド済み `.sys`。
+Broadcom ファームウェア、NVIDIA の GPU / XUSB ファームウェア、`bl31.bin`、秘密鍵。ファームウェアは `tools/fwfetch/` が利用者の実機（Switchroot を入れた SD）から取り出す。ビルド済みの `.sys` / `.exe` は 2026-11-18 から `build/` に置いてよい。

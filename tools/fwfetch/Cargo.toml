@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: GPL-2.0-only
+[package]
+name = "fwfetch"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-2.0-only"
+description = "Reads firmware you may not redistribute from YOUR OWN Switch SD card (read-only), verifies it, stages it outside the repository."
+publish = false
+
+[dependencies]
+sha2 = "0.10"
+flate2 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+getrandom = "0.3"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+# a parser of untrusted disk images: arithmetic overflow must be an error, never a silent wrap
+overflow-checks = true
+panic = "abort"
+
+[lints.rust]
+unsafe_code = "forbid"

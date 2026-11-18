@@ -20,7 +20,13 @@ for t in $(find drivers/t210-icosa/drivers -path '*tests/test_*.c' -not -path '*
 python3 -I tools/check_l4t_reference.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/check_l4t_reference.py"; } || { fail=$((fail+1)); echo "FAIL tools/check_l4t_reference.py"; tail -5 "$tmp/o"; }
 # Erista GPU: ACPI node vs resource header (always) and full model tests (needs a pinned mesa-switch
 # checkout: MESA_DIR=/path/to/mesa-switch @0ff52079, otherwise skipped).
+python3 -I tools/check_abi_sync.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/check_abi_sync.py"; } || { fail=$((fail+1)); echo "FAIL tools/check_abi_sync.py"; tail -8 "$tmp/o"; }
 python3 -I tools/check_acpi_resources.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/check_acpi_resources.py"; } || { fail=$((fail+1)); echo "FAIL tools/check_acpi_resources.py"; tail -5 "$tmp/o"; }
+python3 -I tools/check_no_proprietary.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/check_no_proprietary.py"; } || { fail=$((fail+1)); echo "FAIL tools/check_no_proprietary.py"; tail -8 "$tmp/o"; }
+# fwfetch (Rust firmware collector): needs cargo + mke2fs, otherwise exit 77 = skipped
+python3 tools/fwfetch/tests/run_tests.py >"$tmp/o" 2>&1; rc=$?
+if [ $rc -eq 0 ]; then pass=$((pass+1)); echo "PASS tools/fwfetch/tests/run_tests.py"; elif [ $rc -eq 77 ]; then echo "SKIP tools/fwfetch tests (need cargo and mke2fs)"; else fail=$((fail+1)); echo "FAIL tools/fwfetch/tests/run_tests.py"; grep FAIL "$tmp/o" | head -8; fi
+python3 -I tools/build/tests/test_build_tools.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/build/tests/test_build_tools.py"; } || { fail=$((fail+1)); echo "FAIL tools/build/tests/test_build_tools.py"; grep FAIL "$tmp/o" | head -8; }
 if [ -n "${MESA_DIR:-}" ]; then
   python3 -I drivers/t210-icosa/drivers/TegraGpu/tools/build.py --mesa "$MESA_DIR" --out "$tmp/gpu" --host-only >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS TegraGpu build.py --host-only"; } || { fail=$((fail+1)); echo "FAIL TegraGpu build.py"; tail -8 "$tmp/o"; }
 else echo "SKIP TegraGpu model tests (set MESA_DIR to a mesa-switch checkout)"; fi
