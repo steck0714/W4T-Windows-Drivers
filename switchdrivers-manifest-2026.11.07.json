@@ -1,0 +1,169 @@
+{
+  "release": "drivers-2026.11.07",
+  "prerelease": false,
+  "created": "2026-11-07T22:03:43+09:00",
+  "signer": "A9E1F054DFCC96F43010918892C3C30D5A522712",
+  "app": {
+    "version": "0.7.0",
+    "file": "SwitchCenter-0.7.0-arm64.zip",
+    "sha256": "8e739a58ac753881d8e3868ca7a1616383e096dd18d86d23220a06c0a430d591"
+  },
+  "patcher": {
+    "version": "0.4.0",
+    "file": "SwitchPatcher-0.4.0-x64.zip",
+    "sha256": "2c944e8b053a19b648a9bb769c1bf12964131f6e31b4dfad11b93c1be10840c9"
+  },
+  "drivers": {
+    "file": "SwitchDrivers-2026.11.07.zip",
+    "sha256": "4caf89cd79ad272c765ef36a4256e6bc6ffc5b0c136fc89c709c59be5b0fa8bd",
+    "items": [
+      {
+        "service": "tegra210gpio",
+        "kit": "Switch-Stage1",
+        "inf": "Switch-Stage1/tegra210gpio.inf",
+        "hwid": "ACPI\\SWOA0101",
+        "version": "1.0.0.4",
+        "minUefi": "R367",
+        "sysSha256": "da53b5eab5c18eb6c9e7df878fed8c5912ac28c6c9911fc1e2a24579622279f7",
+        "nameJa": "GPIO コントローラー",
+        "nameEn": "GPIO controller",
+        "installAt": "boot",
+        "beta": false
+      },
+      {
+        "service": "tegra210i2c",
+        "kit": "Switch-Stage3",
+        "inf": "Switch-Stage3/tegra210i2c.inf",
+        "hwid": "ACPI\\SWOA0201",
+        "version": "1.0.0.4",
+        "minUefi": "R370",
+        "sysSha256": "ce7046dcedb32903a34d3713aef864de9065f48c9ebbe1e73a108a690b450ff7",
+        "nameJa": "I2C コントローラー",
+        "nameEn": "I2C controller",
+        "installAt": "boot",
+        "beta": false
+      },
+      {
+        "service": "switchbattery",
+        "kit": "Switch-Battery",
+        "inf": "Switch-Battery/switchbattery.inf",
+        "hwid": "ACPI\\SWOA0301",
+        "version": "1.0.0.6",
+        "minUefi": "R371",
+        "sysSha256": "aa9ea0dfe34c60c2d90a072a6a3df639c5787620c9b15180b038d04b4868914d",
+        "nameJa": "バッテリー・USB-C",
+        "nameEn": "Battery, USB-C",
+        "installAt": "live",
+        "beta": false
+      },
+      {
+        "service": "switchfan",
+        "kit": "Switch-Fan",
+        "inf": "Switch-Fan/switchfan.inf",
+        "hwid": "ACPI\\SWOA0401",
+        "version": "1.0.0.2",
+        "minUefi": "R372",
+        "sysSha256": "7d1f85596ded02f7b4900c51d7c5218ea0d2815681badd06748253bb76799a61",
+        "nameJa": "ファン・バックライト",
+        "nameEn": "Fan, backlight",
+        "installAt": "live",
+        "beta": false
+      },
+      {
+        "service": "switchtouch",
+        "kit": "Switch-Touch",
+        "inf": "Switch-Touch/switchtouch.inf",
+        "hwid": "ACPI\\SWOA0501",
+        "version": "1.0.0.4",
+        "minUefi": "R373",
+        "sysSha256": "b54d56290a54d4c5e3402198a21c7936ceee45bf6ede5326853e565a91a64ad9",
+        "nameJa": "タッチパネル",
+        "nameEn": "Touch screen",
+        "installAt": "live",
+        "beta": false
+      },
+      {
+        "service": "switchpwrbtn",
+        "kit": "Switch-PowerButton",
+        "inf": "Switch-PowerButton/switchpwrbtn.inf",
+        "hwid": "ACPI\\SWOA0601",
+        "version": "1.0.0.1",
+        "minUefi": "R374",
+        "sysSha256": "15ef198595f8a9851bacd560a118e4f0a2e71865f313653738e86c5401b4a633",
+        "nameJa": "電源ボタン",
+        "nameEn": "Power button",
+        "installAt": "live",
+        "beta": false
+      },
+      {
+        "service": "switchcpu",
+        "kit": "Switch-CpuClock",
+        "inf": "Switch-CpuClock/switchcpu.inf",
+        "hwid": "ACPI\\SWOA0701",
+        "version": "1.0.0.3",
+        "minUefi": "R375",
+        "sysSha256": "aabcc0469356ca2bde478fcb63bdbd97d6f266cc815473f823824476a608d9b0",
+        "nameJa": "CPU のクロック",
+        "nameEn": "CPU clock",
+        "installAt": "live",
+        "beta": false
+      },
+      {
+        "service": "switchrtc",
+        "kit": "Switch-Rtc",
+        "inf": "Switch-Rtc/switchrtc.inf",
+        "hwid": "ACPI\\SWOA0801",
+        "version": "1.0.0.2",
+        "minUefi": "R377",
+        "sysSha256": "4ff04aa9f2dc11fcf93d4f00e96d1cfef5c7dc8845b1f1d5fc26d20f2975d8a3",
+        "nameJa": "時計（RTC）",
+        "nameEn": "Clock (RTC)",
+        "installAt": "live",
+        "beta": false
+      },
+      {
+        "service": "switchsensor",
+        "kit": "Switch-Sensor",
+        "inf": "Switch-Sensor/switchsensor.inf",
+        "hwid": "ACPI\\SWOA0901",
+        "version": "1.0.0.1",
+        "minUefi": "R379",
+        "sysSha256": "51119972558077d36e13e68f4b3e171588ff5d71534509e65069ff3e8f4f59f2",
+        "nameJa": "明るさ・傾きセンサー",
+        "nameEn": "Light, tilt sensors",
+        "installAt": "live",
+        "beta": false
+      },
+      {
+        "service": "switchbt",
+        "kit": "Switch-Bluetooth",
+        "inf": "Switch-Bluetooth/switchbt.inf",
+        "hwid": "ACPI\\SWOA0B01",
+        "version": "1.0.0.13",
+        "minUefi": "R390",
+        "sysSha256": "ef78a8b2b6edcdf53cb45aa5df434a8272293760e63f0cf234b7a363c2b94dd5",
+        "nameJa": "Bluetooth",
+        "nameEn": "Bluetooth",
+        "installAt": "live",
+        "beta": false
+      }
+    ]
+  },
+  "sd": {
+    "kit": "Switch-Sd",
+    "service": "nvtsdhc",
+    "inf": "Switch-Sd/nvtsdhc.inf",
+    "hwid": "ACPI\\NVDA0101",
+    "minBuild": 22000,
+    "version": "0.3.2.0",
+    "sysSha256": "da0cb02af941446b887ab127fae02b1d28d1eae34efb31404607a0eb954e4065",
+    "loader": {
+      "file": "Switch-Sd/SDLOADAA64.EFI",
+      "sha256": "a290e4b211465442d3b866d855699edbe977f805023bc61d8bf425c778df8277"
+    },
+    "loaderNoCid": {
+      "file": "Switch-Sd/SDLOADAA64-NOCID.EFI",
+      "sha256": "9e213da4e1edb0414b527792789420ab0d0e9f79b5147eff60ed21688f8d6422"
+    }
+  }
+}
