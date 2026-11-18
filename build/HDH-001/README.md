@@ -11,6 +11,6 @@
 
 ## 手元でビルドするとき
 
-`drivers/t214-hoag/README.md` と、その `docs/hdh001/` の手順（WDK、ARM64 ツールチェーン、テスト署名）に従う。
+`drivers/t214-hoag/README.md` と、その `drivers/t214-hoag/docs/hdh001/` の手順（WDK、ARM64 ツールチェーン、テスト署名）に従う。
 できた一式は `tools/build/assemble_build.py` と同じ形（`drivers/<キット名>/` + `MANIFEST.json` + `SHA256SUMS.txt`）で、ここへ置く。
 Wi-Fi は WDK 10.0.26100 が必要。

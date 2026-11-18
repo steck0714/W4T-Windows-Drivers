@@ -36,7 +36,7 @@
       "source_dir": "drivers/t214-aula",
       "build": "upstream-binaries",
       "status": "upstream-prebuilt",
-      "note": "No source in this repository builds for OLED. The only reported-working set is windows-switch v0.8.0 (one console, per its release note). tools/build/fill_heg001.py takes YOUR copy of that release zip, checks every file against the SHA-256 in drivers/t214-aula/manifest/, and fills build/HEG-001/."
+      "note": "The only reported-working OLED set is windows-switch v0.8.0 (one console, per its release note). Its source (swhid, swbatt, swagentsvc, shim, UEFI patches, scripts) is kept under drivers/t214-aula/drivers/<Driver>/ (swhid, swbatt, touchread, swagentsvc) and drivers/t214-aula/upstream-src/ but has NOT been built in this repository (needs the upstream Docker/mingw toolchain); the prebuilt binaries are the upstream ones. tools/build/fill_heg001.py takes YOUR copy of that release zip, checks every file against the SHA-256 in drivers/t214-aula/manifest/, and fills build/HEG-001/."
     }
   }
 }

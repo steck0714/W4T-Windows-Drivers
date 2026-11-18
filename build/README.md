@@ -12,7 +12,7 @@
 | `HAC-001` | 初代 Switch（Erista） | Icosa | **CI でビルドできる**（未実行） | GitHub Actions `build-all-drivers`（手動実行で `commit_build` を ON）→ `build/HAC-001/drivers/` |
 | `HAC-001-01` | 2019 年版（Mariko） | Iowa | **ドライバ一式が無い** | なし。Erista / Lite の流用はしない（基板・電源・I2C の一致が未証明） |
 | `HDH-001` | Switch Lite | Hoag | ソースあり、**CI 設定が未作成** | `drivers/t214-hoag/` を手元の WDK でビルド。CI 化は未着手 |
-| `HEG-001` | 有機EL | Aula | **上流のビルド済み（windows-switch v0.8.0）のみ** | `python tools/build/fill_heg001.py --zip windows-switch-arm64-drivers-v0_8_0.zip` |
+| `HEG-001` | 有機EL | Aula | **上流のビルド済み（windows-switch v0.8.0）のみ**。上流ソースは `drivers/t214-aula/drivers/<ドライバ名>/` と `drivers/t214-aula/upstream-src/`（未ビルド） | `python tools/build/fill_heg001.py --zip windows-switch-arm64-drivers-v0_8_0.zip` |
 
 機械可読な対応表は `models.json`。
 

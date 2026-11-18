@@ -1,6 +1,7 @@
 # HEG-001 — Switch 有機EL（Mariko / Tegra X1+、コードネーム Aula）
 
-**このリポジトリのソースからは、有機EL 向けをビルドしない。** 動作報告があるのは windows-switch v0.8.0 のビルド済み一式だけで、
+**ここに置くバイナリは上流のビルド済みで、このリポジトリでは有機EL 向けをビルドしていない。** 上流のソース(`swhid` / `swbatt` / `swagentsvc` / shim / UEFI パッチ)は
+`drivers/t214-aula/drivers/<ドライバ名>/`(swhid・swbatt・touchread・swagentsvc)と `drivers/t214-aula/upstream-src/` に置いてあるが、ビルドも検証もしていない(上流の Docker / mingw 環境が要る)。動作報告があるのは windows-switch v0.8.0 のビルド済み一式だけで、
 報告は**配布者 1 人・1 台**（上流のリリースノート）。こちらでは再確認していない。
 
 ## 埋め方

@@ -32,24 +32,36 @@ DefinitionBlock("DsdtTable.aml", "DSDT", 1, "NVIDIA", "TEGRA210", EFI_ACPI_ARM_O
         {
             Name(_HID, "ACPI0007")
             Name(_UID, 0)
+#ifdef SWITCH_LPI
+#include "t210/lpi.asl.inc"
+#endif
         }
 
         Device(CPU1) 
         {
             Name(_HID, "ACPI0007")
             Name(_UID, 1)
+#ifdef SWITCH_LPI
+#include "t210/lpi.asl.inc"
+#endif
         }
 
         Device(CPU2) 
         {
             Name(_HID, "ACPI0007")
             Name(_UID, 2)
+#ifdef SWITCH_LPI
+#include "t210/lpi.asl.inc"
+#endif
         }
 
         Device(CPU3) 
         {
             Name(_HID, "ACPI0007")
             Name(_UID, 3)
+#ifdef SWITCH_LPI
+#include "t210/lpi.asl.inc"
+#endif
         }
 
         // Helper functions
