@@ -1,0 +1,220 @@
+{
+ "schema": 1,
+ "about": "Inventory of windows-switch v0.8.0 (the release whose notes say it was tested on one Mariko Switch OLED, HEG-001). 'in_repo' files are copied under kit/ unchanged (text only). Binaries are NOT in this repository (policy: no prebuilt .sys/.exe; see COPYING.md); they stay in the upstream zips and are identified here by SHA-256 so tools/ and humans can verify a download.",
+ "release": "https://github.com/DanilKhmyrov/windows-switch/releases",
+ "tested_on": "Mariko Switch OLED (HEG-001), one console (upstream release note)",
+ "zips": {
+  "windows-switch-arm64-drivers-v0_8_0.zip": "5fa4f54db7c601838ba022db818966cc9ddc908ac3cec82fe904226f4a42029e",
+  "windows-switch-arm64-loader-v0_8_0.zip": "094552db63284ff48ac3a6636ffb80ca3b6f9dd1575ba3b3269170f626013961"
+ },
+ "files": [
+  {
+   "zip": "windows-switch-arm64-drivers-v0_8_0.zip",
+   "path": "agent/arm64/swbatt.sys",
+   "size": 50656,
+   "sha256": "d846e6e72d2bf1e8beff36ef0cf56745c872015beb699570a3ebec9a9aaf1bf6",
+   "in_repo": null,
+   "role": "battery + fan, ROOT\\SWBATT (windows-switch own driver; direct MMIO on I2C1/I2C5/PWM)"
+  },
+  {
+   "zip": "windows-switch-arm64-drivers-v0_8_0.zip",
+   "path": "agent/arm64/swhid.sys",
+   "size": 34272,
+   "sha256": "c28c8652c6e60fb23a07b3d462df689982bc921c48b51362d41339e19cd31be4",
+   "in_repo": null,
+   "role": "touch (FTS4) + volume + power button + RTC offset + OLED brightness, ACPI\\SWTS0001 (windows-switch own driver)"
+  },
+  {
+   "zip": "windows-switch-arm64-drivers-v0_8_0.zip",
+   "path": "agent/audio/switchaudio.inf",
+   "size": 2530,
+   "sha256": "b804a9322d81aa747774db790a61318942036799261fdc0be4e612f3e9d72627",
+   "in_repo": "kit/agent/audio/switchaudio.inf",
+   "role": ""
+  },
+  {
+   "zip": "windows-switch-arm64-drivers-v0_8_0.zip",
+   "path": "agent/audio/switchaudio.sys",
+   "size": 32032,
+   "sha256": "5c14e14190c8ece086b396778dbb64cc65cd73b32b19f8b3c8a5ea6a33f0d9c0",
+   "in_repo": null,
+   "role": "audio 1.0.0.9 (winx Lite family)"
+  },
+  {
+   "zip": "windows-switch-arm64-drivers-v0_8_0.zip",
+   "path": "agent/bt/ADD_THESE_FILES.txt",
+   "size": 604,
+   "sha256": "de3fd9c9a0e7ab53169cd012d34c066dddcce68a345f975b3a31921d6ab981ef",
+   "in_repo": "kit/agent/bt/ADD_THESE_FILES.txt",
+   "role": ""
+  },
+  {
+   "zip": "windows-switch-arm64-drivers-v0_8_0.zip",
+   "path": "agent/bt/switchbt.inf",
+   "size": 1295,
+   "sha256": "23ccd51c32eab5b22bec6799cea78d0c567ffd340cb242d54d10d86843152b53",
+   "in_repo": "kit/agent/bt/switchbt.inf",
+   "role": ""
+  },
+  {
+   "zip": "windows-switch-arm64-drivers-v0_8_0.zip",
+   "path": "agent/bt/switchbt.sys",
+   "size": 48416,
+   "sha256": "e23bf88d29f9127cd39e0ba3d4879b98b3c9e71199ffbd456da4f79bf56a9c3b",
+   "in_repo": null,
+   "role": "Bluetooth 1.0.0.19 (winx Lite family)"
+  },
+  {
+   "zip": "windows-switch-arm64-drivers-v0_8_0.zip",
+   "path": "agent/remove_win10.ps1",
+   "size": 2418,
+   "sha256": "11cda67e044c4032deb02a2a7c56ac89b1aca81a8457ea62dfcc31e42899d1cc",
+   "in_repo": "kit/agent/remove_win10.ps1",
+   "role": ""
+  },
+  {
+   "zip": "windows-switch-arm64-drivers-v0_8_0.zip",
+   "path": "agent/ssh_setup.ps1",
+   "size": 4997,
+   "sha256": "c8108da9918b17b47f3f878710bd233ebae3b91531c4c8bc1764e08156de6a81",
+   "in_repo": "kit/agent/ssh_setup.ps1",
+   "role": ""
+  },
+  {
+   "zip": "windows-switch-arm64-drivers-v0_8_0.zip",
+   "path": "agent/swagentsvc.exe",
+   "size": 10752,
+   "sha256": "50a685aa24cf3570eac15808ef828b09bb4af9ad8e9a4f25a574481a089734d9",
+   "in_repo": null,
+   "role": "boot agent service: runs w64.cmd on every boot"
+  },
+  {
+   "zip": "windows-switch-arm64-drivers-v0_8_0.zip",
+   "path": "agent/tune.ps1",
+   "size": 15213,
+   "sha256": "27381042023d8ff298916cfa6a93f2be2789856441288ddb6e90c14b7ff72e9c",
+   "in_repo": "kit/agent/tune.ps1",
+   "role": ""
+  },
+  {
+   "zip": "windows-switch-arm64-drivers-v0_8_0.zip",
+   "path": "agent/w64.cmd",
+   "size": 30055,
+   "sha256": "f6f897d40630b9c73bca92dc19448e38b57f95c55df44f5fae474d480a6ba298",
+   "in_repo": "kit/agent/w64.cmd",
+   "role": ""
+  },
+  {
+   "zip": "windows-switch-arm64-drivers-v0_8_0.zip",
+   "path": "agent/wifi/ADD_THESE_FILES.txt",
+   "size": 1110,
+   "sha256": "785eab2a7bc49a71d36729684fbbef355a3f1f5a7382b2c88613a61c0ea75d0e",
+   "in_repo": "kit/agent/wifi/ADD_THESE_FILES.txt",
+   "role": ""
+  },
+  {
+   "zip": "windows-switch-arm64-drivers-v0_8_0.zip",
+   "path": "agent/wifi/switchwifi.inf",
+   "size": 1777,
+   "sha256": "1322053143b1cf58db98b953b9b21176d01e4d01e55acb4719cddd48ad5e9482",
+   "in_repo": "kit/agent/wifi/switchwifi.inf",
+   "role": ""
+  },
+  {
+   "zip": "windows-switch-arm64-drivers-v0_8_0.zip",
+   "path": "agent/wifi/switchwifi.sys",
+   "size": 183584,
+   "sha256": "df499c351384aaf0cdd15b5bfb94f8262f6d11cb1eefa7e8ce2ee020af2c94de",
+   "in_repo": null,
+   "role": "Wi-Fi, same family as the winx Lite SwitchWifi (0.5.7.0 per docs/audit-2026-11-17-static.md)"
+  },
+  {
+   "zip": "windows-switch-arm64-drivers-v0_8_0.zip",
+   "path": "agent/wifi/wifi_clean.ps1",
+   "size": 1040,
+   "sha256": "04988842601bd3afa63a98f184efd54043018eb643df6f302dc58827d2850632",
+   "in_repo": "kit/agent/wifi/wifi_clean.ps1",
+   "role": ""
+  },
+  {
+   "zip": "windows-switch-arm64-drivers-v0_8_0.zip",
+   "path": "agent/wifi/wifi_sign.ps1",
+   "size": 3764,
+   "sha256": "bd5c5b6aa24b68ca4efd29272eec5265a8b5f1f526bd71edf38d7065aed6058d",
+   "in_repo": "kit/agent/wifi/wifi_sign.ps1",
+   "role": ""
+  },
+  {
+   "zip": "windows-switch-arm64-loader-v0_8_0.zip",
+   "path": "PUT_tegra210b01_xusb_firmware_HERE.txt",
+   "size": 364,
+   "sha256": "e1be024660fd781f61c31615fa6d2cee96b713a283d2a494b45b7b97c53c992c",
+   "in_repo": null,
+   "role": ""
+  },
+  {
+   "zip": "windows-switch-arm64-loader-v0_8_0.zip",
+   "path": "bootloader/ini/windows10-arm64.ini",
+   "size": 61,
+   "sha256": "0876ac4dee73add3613d444604b6a3e4d816328c6ccc2c9789812c8f95ffde3b",
+   "in_repo": "kit/loader/bootloader/ini/windows10-arm64.ini",
+   "role": ""
+  },
+  {
+   "zip": "windows-switch-arm64-loader-v0_8_0.zip",
+   "path": "bootloader/ini/windows11-arm64.ini",
+   "size": 61,
+   "sha256": "5981f0f87eda9a77bf69b295359339ad9989c3591ecaef1f62cb07305a072f82",
+   "in_repo": "kit/loader/bootloader/ini/windows11-arm64.ini",
+   "role": ""
+  },
+  {
+   "zip": "windows-switch-arm64-loader-v0_8_0.zip",
+   "path": "bootloader/res/Windows 10 ARM64.bmp",
+   "size": 147510,
+   "sha256": "95c3f01c9bb65d355c4cf1720041f9bf39c6220baf49c0942bbc11704d4b919d",
+   "in_repo": null,
+   "role": ""
+  },
+  {
+   "zip": "windows-switch-arm64-loader-v0_8_0.zip",
+   "path": "bootloader/res/Windows 11 ARM64.bmp",
+   "size": 147510,
+   "sha256": "95c3f01c9bb65d355c4cf1720041f9bf39c6220baf49c0942bbc11704d4b919d",
+   "in_repo": null,
+   "role": ""
+  },
+  {
+   "zip": "windows-switch-arm64-loader-v0_8_0.zip",
+   "path": "wp11/PUT_bl31.bin_HERE.txt",
+   "size": 196,
+   "sha256": "939f0010978bcad01633179487b90819196c336a4d8746aecf37fe36547f356e",
+   "in_repo": null,
+   "role": ""
+  },
+  {
+   "zip": "windows-switch-arm64-loader-v0_8_0.zip",
+   "path": "wp11/bl33.bin",
+   "size": 925352,
+   "sha256": "081e620ca950c1d3d9bc4285265477de8a12f6b8373453fa054e02abff6318d2",
+   "in_repo": null,
+   "role": "UEFI for Windows 11 ARM64 (loader)"
+  },
+  {
+   "zip": "windows-switch-arm64-loader-v0_8_0.zip",
+   "path": "wp64/PUT_bl31.bin_HERE.txt",
+   "size": 196,
+   "sha256": "939f0010978bcad01633179487b90819196c336a4d8746aecf37fe36547f356e",
+   "in_repo": null,
+   "role": ""
+  },
+  {
+   "zip": "windows-switch-arm64-loader-v0_8_0.zip",
+   "path": "wp64/bl33.bin",
+   "size": 923304,
+   "sha256": "f02f50bebdb166e200ba385d4bc6e6d222af4aae8858490e20c4ac36b867f9ee",
+   "in_repo": null,
+   "role": "UEFI for Windows 10 ARM64 (loader)"
+  }
+ ]
+}
