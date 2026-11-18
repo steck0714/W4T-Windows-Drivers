@@ -1,0 +1,64 @@
+# --- 鍵・証明書の秘密情報は絶対にコミットしない(.cer は公開用なので除外しない) ---
+*.pfx
+*.p12
+*.pvk
+*.key
+*.pem
+*.snk
+*.keys
+prod.keys
+title.keys
+**/cert/*.pfx
+.env
+# --- ビルド生成物 ---
+bin/
+obj/
+# build/ は完成品の置き場: 作業ディレクトリ・ログ・CI の中間物だけ無視する
+build/*/work/
+build/*/logs/
+build/t210/
+build/t214/
+out/
+kit/
+# 例外: Aula の kit/ は生成物ではなくソース(windows-switch v0.8.0 のテキスト部分)
+!drivers/t214-aula/kit/
+target/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.sys
+*.cat
+# 例外: build/ に置く完成品(作者の許可: ビルド済みバイナリは可。ファームウェアと鍵は不可)
+!build/*/drivers/**/*.sys
+!build/*/drivers/**/*.cat
+!build/HEG-001/agent/**/*.sys
+!build/HEG-001/agent/**/*.exe
+*.user
+.vs/
+# --- ファームウェア等の再配布できないもの ---
+*.hcd
+*.clm_blob
+brcmfmac*.bin
+# 例外: ローダーのビルド済み EFI は kits に置いてよい
+!**/kits/**/*.EFI
+# --- 実機から取り出した再配布不可ファイル(tools/fwfetch の出力。リポジトリ内には置かない) ---
+fw-cache/
+fw-lock.json
+bl31.bin
+tegra210b01_xusb_firmware
+tegra21x_xusb_firmware
+*.ihex
+NETB_img.bin
+fecs.bin
+gpccs.bin
+fecs_sig.bin
+pmu_sig.bin
+pmu_bl.bin
+nv_acr_ucode_prod.bin
+gpmu_ucode_image.bin
+gpmu_ucode_desc.bin
+brcmfmac4356*.bin
+brcmfmac4356*.txt
+BCM4356A3.hcd
