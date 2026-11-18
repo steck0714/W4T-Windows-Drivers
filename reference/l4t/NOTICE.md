@@ -17,7 +17,14 @@
 - `linux-mainline/tegra-fuse/speedo-tegra210.c` は SPDX 表記（`GPL-2.0-only`）で示される。Linux の `COPYING` / `LICENSES/` は同梱せず、GPL-2.0 全文は `LICENSES/GPL-2.0.txt` を参照。
 
 ## 含めないもの
-- NVIDIA の GPU ファームウェア（`NETB_img.bin` ほか）と L4T の配布バイナリ。これらは上記のソースライセンスとは別の条件で、再配布可否を確認していないため。
+- NVIDIA の GPU ファームウェア（`NETB_img.bin` ほか）と L4T の配布バイナリ。ソースのライセンス(GPL-2.0 / MIT)とは別の条件で、**確認した結果、Windows 向けには再配布できない**:
+  linux-firmware の `LICENCE.nvidia`（NVIDIA Software License）2.1.2「Open Source Exception」は、ファームウェアの再配布を
+  *「OSI 承認のオープンソースライセンスで配布されるオペレーティングシステム上での使用に限り」*、バイナリを改変せず、このライセンスの写しを添えることを条件に認めている。
+  Windows はこれに当たらない。2.1.3 も、NVIDIA 設計のプロセッサ以外での使用・翻訳・逆コンパイルを禁じる。
+  → 利用者が自分の Switchroot の SD から `tools/fwfetch/` で取り出して使う(出力先は git の外)。このリポジトリ・リリースには入れない。CI に渡す場合は非公開の `NVIDIA_FW_URL` のみ。
+  （確認したのは linux-firmware 版の `LICENCE.nvidia` の本文。Jetson/L4T の BSP 付属の別文面は未確認。）
+- Broadcom の BCM4356 ファームウェア / Bluetooth パッチ(`brcmfmac4356A3-pcie.bin`、`BCM4356A3.hcd`)。windows-switch v0.8.0 の同梱ドライバ自身が
+  「ここでは再配布できない」として利用者に Switchroot から取得させている（同梱 `ADD_THESE_FILES.txt`）。
 - 上流リポジトリ全体。参照した範囲のみ同梱（全体は `SOURCES.md` の URL）。
 
 ## このリポジトリ側のコードとの関係
