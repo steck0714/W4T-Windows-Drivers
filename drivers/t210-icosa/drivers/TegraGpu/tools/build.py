@@ -8,6 +8,7 @@ probe packages with LLVM, the pinned mesa-switch checkout and the WDK/SDK
 Include roots (the NuGet header packages are enough; see the GitHub workflow).
 """
 import argparse
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -164,13 +165,25 @@ includes = [args.wdk_include / "km/crt", args.wdk_include / "km",
             args.wdk_include / "shared", args.sdk_include / "shared",
             args.sdk_include / "ucrt",
             args.wdk_include / "km/spb/1.0"]
+def d3dgpu_pa_has_padding():
+    """True when the WDK's D3DGPU_PHYSICAL_ADDRESS declares a Padding member (newer headers)."""
+    for inc in (args.wdk_include, args.sdk_include):
+        header = inc / "shared" / "d3dukmdt.h"
+        if header.is_file():
+            m = re.search(r"typedef\s+struct\s+_D3DGPU_PHYSICAL_ADDRESS\s*\{(.*?)\}",
+                          header.read_text(errors="ignore"), re.S)
+            if m:
+                return "Padding" in m.group(1)
+    return False
+pa_defs = ["/DTG_D3DGPU_PA_HAS_PADDING=1"] if d3dgpu_pa_has_padding() else []
+print("D3DGPU_PHYSICAL_ADDRESS.Padding:", "present" if pa_defs else "absent (check skipped)")
 flags = ["--target=aarch64-pc-windows-msvc", "/nologo", "/c", "/kernel",
          "/GS-", "/Gy", "/Zl", "/O2", "/W4", "/WX", "/std:c11",
          "/clang:-ffreestanding", "-Wno-microsoft-anon-tag", "-Wno-pragma-pack",
          "-Wno-ignored-pragma-intrinsic", "-Wno-nonportable-include-path",
          "/D_ARM64_", "/DARM64", "/D_WIN64", "/D_WIN32_WINNT=0x0A00",
          "/DNTDDI_VERSION=0x0A00000C", "/DNDEBUG",
-         "/DDXGKDDI_INTERFACE_VERSION=DXGKDDI_INTERFACE_VERSION_WDDM2_6",
+         "/DDXGKDDI_INTERFACE_VERSION=DXGKDDI_INTERFACE_VERSION_WDDM2_6", *pa_defs,
          *[f"/I{p}" for p in mesa_includes], *[f"/imsvc{p}" for p in includes]]
 objects = []
 for source in [*core, power, clock, root / "windows/resources.c",
