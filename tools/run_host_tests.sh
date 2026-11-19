@@ -32,6 +32,8 @@ if [ $rc -eq 0 ]; then pass=$((pass+1)); echo "PASS tools/fwfetch/tests/run_test
 python3 -I tools/check_dsdt_compile.py >"$tmp/o" 2>&1; rc=$?
 if [ $rc -eq 0 ]; then pass=$((pass+1)); echo "PASS tools/check_dsdt_compile.py"; elif [ $rc -eq 77 ]; then echo "SKIP tools/check_dsdt_compile.py (need iasl: set IASL or put it on PATH)"; else fail=$((fail+1)); echo "FAIL tools/check_dsdt_compile.py"; tail -8 "$tmp/o"; fi
 python3 -I tools/build/tests/test_build_tools.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/build/tests/test_build_tools.py"; } || { fail=$((fail+1)); echo "FAIL tools/build/tests/test_build_tools.py"; grep FAIL "$tmp/o" | head -8; }
+python3 -I tools/ci/tests/test_fw_bundle.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/ci/tests/test_fw_bundle.py"; } || { fail=$((fail+1)); echo "FAIL tools/ci/tests/test_fw_bundle.py"; grep FAIL "$tmp/o" | head -8; }
+python3 -I tools/ci/tests/test_verify_build.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/ci/tests/test_verify_build.py"; } || { fail=$((fail+1)); echo "FAIL tools/ci/tests/test_verify_build.py"; grep -E "FAIL|Error" "$tmp/o" | head -8; }
 if [ -n "${MESA_DIR:-}" ]; then
   python3 -I drivers/t210-icosa/drivers/TegraGpu/tools/build.py --mesa "$MESA_DIR" --out "$tmp/gpu" --host-only >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS TegraGpu build.py --host-only"; } || { fail=$((fail+1)); echo "FAIL TegraGpu build.py"; tail -8 "$tmp/o"; }
 else echo "SKIP TegraGpu model tests (set MESA_DIR to a mesa-switch checkout)"; fi

@@ -11,10 +11,25 @@
 |---|---|---|---|---|
 | `HAC-001` | 初代 Switch（Erista） | Icosa | **CI でビルドできる**（未実行） | GitHub Actions `build-all-drivers`（手動実行で `commit_build` を ON）→ `build/HAC-001/drivers/` |
 | `HAC-001-01` | 2019 年版（Mariko） | Iowa | **ドライバ一式が無い** | なし。Erista / Lite の流用はしない（基板・電源・I2C の一致が未証明） |
-| `HDH-001` | Switch Lite | Hoag | ソースあり、**CI 設定が未作成** | `drivers/t214-hoag/` を手元の WDK でビルド。CI 化は未着手 |
-| `HEG-001` | 有機EL | Aula | **上流のビルド済み（windows-switch v0.8.0）のみ**。上流ソースは `drivers/t214-aula/drivers/<ドライバ名>/` と `drivers/t214-aula/upstream-src/`（未ビルド） | `python tools/build/fill_heg001.py --zip windows-switch-arm64-drivers-v0_8_0.zip` |
+| `HDH-001` | Switch Lite | Hoag | **CI でビルドできる**（未実行）。設定は `tools/ci/drivers-t214-hoag.json`（16 ドライバ、うち 4 つは任意） | `build-all-drivers`（`models` に `HDH-001`）→ `build/HDH-001/drivers/` |
+| `HEG-001` | 有機EL | Aula | **上流のビルド済み（windows-switch v0.8.0）のみ**。上流ソースは `drivers/t214-aula/drivers/<ドライバ名>/` と `drivers/t214-aula/upstream-src/`（未ビルド） | `build-all-drivers` が上流のリリースを取得して `fill_heg001.py` で照合（手元なら `python tools/build/fill_heg001.py --zip windows-switch-arm64-drivers-v0_8_0.zip`） |
 
 機械可読な対応表は `models.json`。
+
+## Actions で型番ごとに作る
+
+`build-all-drivers`（Actions → Run workflow）の `models` に型番（`HAC-001,HDH-001` のようにカンマ区切り、または `all`）を入れる。型番ごとに別のジョブが走り、
+`build-<型番>` というアーティファクトができる。`commit_build` を ON にすると `build/<型番>/` にコミットされる。`HAC-001-01` は一式が無いので「スキップ」と表示される。
+
+## 再配布できないファームは外から自動で読み込む
+
+NVIDIA / Broadcom / Switchroot のファームは、**自分で用意した非公開の zip**（SD の `switchroot/…` や `lib/firmware/…` をコピーした形。GPU の 9 ファイルだけを zip 直下に置いた形も可）を
+URL に置き、リポジトリのシークレット `FW_BUNDLE_URL` に入れる（任意で `FW_BUNDLE_SHA256`、`FW_BUNDLE_AUTH_HEADER`。実行時の入力 `firmware_url` でも可）。
+**各ジョブの最初に自動で**取り込まれ（`.github/actions/fwfetch-import`）、fwfetch が照合・配置する。必要とするビルド（Erista の GPU プローブ）はそれを使い、無ければその部分だけ飛ばす。
+ファームはランナーの一時領域にだけ置かれ、アーティファクトにもコミットにも入らない（`check_no_proprietary.py` が毎回確認）。
+
+実機では、各 `build/<型番>/fwfetch/` の `Install-FwFetchStartup.ps1` を管理者 PowerShell で 1 回実行すると、**Windows の起動のたびに** fwfetch が自分の SD から不足分を読み込む
+（全部見つかったら止まる。ログは `C:\ProgramData\W4T\logs\fwfetch-startup.log`）。
 
 ## 各フォルダの中身（埋まったあと）
 
@@ -33,3 +48,13 @@ build/HAC-001/
 - GPL-2.0 の部分（`TegraGpu` の電源実装など）を含む `.sys` は、**対応するソース（このリポジトリの該当コミット）と一緒に配る**。
 - NVIDIA の GPU ファーム、Broadcom の Wi-Fi/BT ファーム、`bl31.bin` は入れない。自分の SD から `tools/fwfetch` で取り出す。
 - `tools/check_no_proprietary.py` が、`build/` に秘密鍵とファームが紛れていないかも検査する。
+
+## 出来上がりの検査と、アプリ・Lite の GPU（2026-11-19 追加）
+
+`build-all-drivers` は型番ごとに次も行う。**どれもビルドが通る・形式が正しいことの検査で、実機で動く証明ではない。**
+
+- `tools/ci/verify_build.py`: 全 `.sys` が有効な PE で **ARM64・ネイティブ・署名済み**か、INF に `DriverVer` / `NTarm64` / 対応する `.cat` / `[SourceDisksFiles]` のファイルがそろっているか。1 件でも外れるとジョブが失敗する。
+- InfVerif（参考表示。失敗しても止めない）。
+- `apps` ジョブ: SwitchCenter / SwitchPatcher を win-arm64 で発行し、`.exe` が ARM64 か、鍵ファイルが無いかを検査 → `apps-<型番>` アーティファクト（`commit_build` で `build/<型番>/apps/`）。
+- `gpu-lite` ジョブ（`build-lite-gpu.yml`）: HDH-001 の TegraGpu。ファームを取り込めた場合は probe と SwitchFan ブリッジを署名・カタログ化し、取り込めない場合は `TegraGpuCore.lib` だけ。表示ドライバや Vulkan ではなく、動作確認用の probe。
+- HEG-001（OLED）は上流のビルド済み（ハッシュ照合）のまま。上流ソースのビルドは、Windows のイメージから取り出した ARM64 バイナリ（ntoskrnl 等）と EWDK 入りの Docker が要るため、CI では行っていない。

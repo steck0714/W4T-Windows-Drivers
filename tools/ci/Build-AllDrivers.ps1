@@ -1,25 +1,54 @@
 <#
 .SYNOPSIS
-  Build every Erista (t210-icosa) driver listed in drivers-t210.json with tools\Build-Driver.ps1, test-sign them all
-  with ONE certificate, and assemble the kits. Runs the same on a GitHub windows-2022 runner and on your PC.
+  Build every driver of one Switch model listed in its drivers-*.json with that family's tools\Build-Driver.ps1,
+  test-sign them all with ONE certificate, and assemble the kits. Runs the same on a GitHub windows-2022 runner and on your PC.
+
+  The model comes from build\models.json (-Model HAC-001 | HDH-001): that file names the driver list, the folder the
+  sources are in, the family's tools folder (Build-Driver.ps1, kmdf_support.c, test certificate) and the kit sources.
+  Without -Model the script behaves as before: Erista (t210-icosa), output build\t210.
 
   Per driver: first strict (/W4 /WX like the local build); if only a newer clang's warnings fail it, retry with
   -NoWarnAsError and mark it WARN. A hard failure is FAIL (the script exits 1 at the end, after trying everything).
+  Drivers marked "optional" in the list never make the run fail.
 
 .EXAMPLE
-  .\tools\ci\Build-AllDrivers.ps1                       # everything -> build\t210
-  .\tools\ci\Build-AllDrivers.ps1 -Only switchfan,switchbattery
+  .\tools\ci\Build-AllDrivers.ps1 -Model HDH-001                 # Switch Lite -> build\_work\HDH-001
+  .\tools\ci\Build-AllDrivers.ps1 -Model HAC-001 -Only switchfan,switchbattery
+  .\tools\ci\Build-AllDrivers.ps1                                # Erista, as before -> build\t210
 #>
 param(
-  [string]$Config = "$PSScriptRoot\drivers-t210.json",
-  [string]$OutRoot = (Join-Path (Get-Location) 'build\t210'),
+  [string]$Model = '',
+  [string]$Config = '',
+  [string]$OutRoot = '',
   [string[]]$Only = @(),
   [switch]$NoSign
 )
 $ErrorActionPreference = 'Stop'
-$Root  = (Resolve-Path "$PSScriptRoot\..\..").Path
-$T210  = Join-Path $Root 'drivers\t210-icosa'
-$Build = Join-Path $T210 'tools\Build-Driver.ps1'
+$Root = (Resolve-Path "$PSScriptRoot\..\..").Path
+function Resolve-Rel([string]$p) { Join-Path $Root ($p -replace '/', '\') }
+
+if ($Model) {
+  $all = (Get-Content (Join-Path $Root 'build\models.json') -Raw | ConvertFrom-Json).models
+  $prop = $all.PSObject.Properties[$Model]
+  if (-not $prop) { throw "unknown model '$Model' (have: $(($all.PSObject.Properties.Name) -join ', '))" }
+  $m = $prop.Value
+  if ($m.build -ne 'ci') { throw "model $Model is not built here (build=$($m.build), status=$($m.status)): $($m.note)" }
+  if (-not $Config)  { $Config  = Resolve-Rel $m.ci_config }
+  $DriverRoot = Resolve-Rel $m.driver_root
+  $ToolsDir   = Resolve-Rel $m.tools_dir
+  $KitsDir    = Resolve-Rel $m.kits_dir
+  if (-not $OutRoot) { $OutRoot = Join-Path $Root "build\_work\$Model" }
+} else {
+  $Model      = 'HAC-001'
+  if (-not $Config)  { $Config  = "$PSScriptRoot\drivers-t210.json" }
+  $DriverRoot = Join-Path $Root 'drivers\t210-icosa\drivers'
+  $ToolsDir   = Join-Path $Root 'drivers\t210-icosa\tools'
+  $KitsDir    = Join-Path $Root 'drivers\t210-icosa\kits'
+  if (-not $OutRoot) { $OutRoot = Join-Path (Get-Location) 'build\t210' }
+}
+$Build = Join-Path $ToolsDir 'Build-Driver.ps1'
+if (-not (Test-Path $Build))  { throw "missing $Build" }
+if (-not (Test-Path $Config)) { throw "missing $Config" }
 $Kits  = "${env:ProgramFiles(x86)}\Windows Kits\10"
 $Default = if ($env:SWOA_FALLBACK_WDK) { '10.0.26100.0' } else { '10.0.19041.0' }
 $list = @(Get-Content $Config -Raw | ConvertFrom-Json)
@@ -34,7 +63,7 @@ function Invoke-One($d, [bool]$relaxed, [string]$log) {
   $wdk = if ($d.wdk) { $d.wdk } else { $Default }
   $kmlib = "$Kits\Lib\$wdk\km\arm64"
   $inc = "$Kits\Include\$wdk"
-  $dir = Join-Path $T210 "drivers\$($d.dir)"
+  $dir = Join-Path $DriverRoot $d.dir
   $p = @{
     Name = $d.name; Wdk = $wdk
     OutDir = (Join-Path $OutRoot "work\$($d.name)")
@@ -76,12 +105,12 @@ foreach ($d in $list) {
 # --- assemble the kits: built files + the kit's own scripts/README -----------------------------------------------
 foreach ($r in ($results | Where-Object { $_.Status -ne 'FAIL' })) {
   $k = Join-Path $KitRoot $r.Kit; New-Item -ItemType Directory -Force $k | Out-Null
-  $srcKit = Join-Path $T210 "kits\$($r.Kit)"
+  $srcKit = Join-Path $KitsDir $r.Kit
   if (Test-Path $srcKit) { Copy-Item "$srcKit\*" $k -Recurse -Force }
   Get-ChildItem (Join-Path $OutRoot "work\$($r.Name)") -File | Where-Object { $_.Extension -in '.sys', '.inf', '.cat' } |
     ForEach-Object { Copy-Item $_.FullName $k -Force }
 }
-$cer = Join-Path $T210 'tools\cert\SwitchWOA-Test.cer'
+$cer = Join-Path $ToolsDir 'cert\SwitchWOA-Test.cer'
 if (Test-Path $cer) { Copy-Item $cer $KitRoot -Force }
 $cerNote = if ($env:SWOA_CERT_THUMBPRINT) { "the certificate from the SWOA_PFX_BASE64 secret (thumbprint $($env:SWOA_CERT_THUMBPRINT))" } else { 'a new self-signed certificate made by this run' }
 
@@ -91,7 +120,7 @@ $sums = Get-ChildItem $KitRoot -Recurse -File | Where-Object { $_.Extension -in 
 Set-Content (Join-Path $KitRoot 'SHA256SUMS.txt') $sums -Encoding ascii
 
 $sha = if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { (git -C $Root rev-parse HEAD 2>$null) }
-$md = @("# Build info", "", "- commit: $sha", "- built: $((Get-Date).ToUniversalTime().ToString('u'))", "- WDK for most drivers: $Default (Wi-Fi: 10.0.26100.0)",
+$md = @("# Build info: $Model", "", "- model: $Model", "- commit: $sha", "- built: $((Get-Date).ToUniversalTime().ToString('u'))", "- WDK for most drivers: $Default (a driver with its own wdk entry, e.g. Wi-Fi, uses that one)",
         "- signed with: $cerNote", "", "| driver | kit | result | note |", "|---|---|---|---|")
 foreach ($r in $results) { $md += "| $($r.Name) | $($r.Kit) | $($r.Status)$(if ($r.Optional) { ' (optional)' }) | $($r.Note -replace '\|', '/') |" }
 $md += @("", "OK = built strict (/W4 /WX). WARN = built only with warnings allowed (newer clang). FAIL = no driver; see logs/.",
@@ -99,6 +128,7 @@ $md += @("", "OK = built strict (/W4 /WX). WARN = built only with warnings allow
 Set-Content (Join-Path $OutRoot 'BUILD-INFO.md') $md -Encoding utf8
 Copy-Item (Join-Path $OutRoot 'BUILD-INFO.md') $KitRoot -Force
 
+ConvertTo-Json -InputObject @($results) | Set-Content (Join-Path $OutRoot 'results.json') -Encoding utf8
 $results | Format-Table Name, Status, Optional, Note -AutoSize | Out-String | Write-Host
 $hard = @($results | Where-Object { $_.Status -eq 'FAIL' -and -not $_.Optional })
 if ($hard.Count) { Write-Host "FAILED: $($hard.Name -join ', ')"; exit 1 }

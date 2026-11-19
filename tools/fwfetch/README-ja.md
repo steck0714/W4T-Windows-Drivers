@@ -41,7 +41,7 @@ fwfetch.exe --profile erista --auto --deploy-gpu C:\Windows\System32\drivers\Teg
 | リポジトリに置かない | `--out-dir`・`--deploy`・`--deploy-gpu` が git 作業ツリー内（シンボリックリンク経由も）なら拒否 |
 | 書き込み | 一時ファイル → リネーム。出力先がシンボリックリンク・ディレクトリなら書かない |
 | 配置前の再検証 | `--deploy` の前に、ステージ済みファイルの SHA-256 を `fw-lock.json` と照合。食い違えば配置しない |
-| ネットワーク | 使わない（ダウンロードも通信も無い） |
+| ネットワーク | 使わない（ダウンロードも通信も無い。CI の取得は `tools/ci/fw_bundle.py` が別に行う） |
 
 ## 任天堂の著作物について
 
@@ -68,6 +68,38 @@ fwfetch.exe --profile erista --auto --deploy-gpu C:\Windows\System32\drivers\Teg
   Wi-Fi/BT/GPU 側は取れない（FAT32 側の bl31/XUSB は可）。その場合は PC にカードを挿して実行する。OLED で同じかは未確認。
 - 走査は、最初に採用できたファイルで止まる（採用後に見つけた別候補の「未対応圧縮」警告は出ない）。
 
+## 起動時に自動で読み込む / CI で外から読み込む
+
+**実機（Windows 起動時）**: `startup/Install-FwFetchStartup.ps1` を、`fwfetch.exe`（ARM64 版）と同じフォルダで、管理者 PowerShell から 1 回実行する。
+
+```
+.\Install-FwFetchStartup.ps1 -Profile lite -GpuDir C:\Windows\System32\drivers\TegraGpu
+.\Install-FwFetchStartup.ps1 -Remove
+```
+
+SYSTEM で動くスケジュールタスクが、Windows の起動 1 分後に `fwfetch --profile <p> --auto --out-dir C:\ProgramData\W4T\fw-cache` を実行する。
+全部見つかる（終了コード 0）と印を付けて以後は何もしない。足りない（2）・エラー（1）なら次の起動でまた試す。SD には書かない。通信もしない。
+ログ: `C:\ProgramData\W4T\logs\fwfetch-startup.log`。
+
+**CI（Actions）**: `.github/actions/fwfetch-import` が、非公開 zip（シークレット `FW_BUNDLE_URL`）をジョブの最初に自動で取得・展開し（`tools/ci/fw_bundle.py`。
+`..`・絶対パス・シンボリックリンク・巨大展開は拒否）、`fwfetch --search-root` で照合する。ダウンロードはこの action 側で行い、fwfetch は今までどおりオフライン。
+ファームはランナー上にだけ残り、アーティファクトにもコミットにもならない。
+
 ## 旧版
 
 `legacy/` の `Get-SwitchFirmware.ps1` と `FwFetch.cs` は旧版（PowerShell 5.1 / 7 用）。もう更新しない。不要なら削除してよい。
+
+### 壊れたら自動で入れ直す（2026-11-19 追加）
+
+`FwFetchStartup.ps1` は起動のたび（と毎日 03:30）、まず SD なしで次を検査する。
+
+1. キャッシュ（`C:\ProgramData\W4T\fw-cache`）の各ファイルの SHA-256 を `fw-lock.json` と照合
+2. `-GpuDir` を渡していれば、ドライバフォルダの GPU ファイル 9 個も照合
+
+結果に応じて、
+
+- 配置先だけ壊れた/消えた → キャッシュの正しいコピー（ロックと再照合）から書き戻す。SD は不要
+- キャッシュが壊れた/消えた、`fw-lock.json` が読めない、完了印が無い → fwfetch を再実行し、SD から取り直して再配置・再固定
+- 最後にもう一度検査し、全部そろったときだけ完了印（`done.<profile>`）を書く。残りがあれば終了コード 2 で、次回また試す
+
+`fw-lock.json` はパスを検査してから使う（`..`・絶対パス・`:`・`\` を含むものは壊れた項目として扱う）。**このスクリプトは Windows で未実行**（PowerShell が無い環境で書いたため構文確認もしていない）。

@@ -38,7 +38,7 @@
 
 ## 2026-11-18 追加分（3 回目）
 - **ビルド済みバイナリを置いてよい方針に変更**（作者の許可）。置く場所は `build/<型番>/`。再配布できないファームウェアと秘密鍵は引き続き不可。`.gitignore`・`COPYING.md`・`tools/check_no_proprietary.py` を合わせた。
-- **`build/` を型番別に新設**: `HAC-001`（Erista）は CI でビルドして置く設定まで。`HAC-001-01`（Iowa）はドライバ一式が無いので空。`HDH-001`（Lite）は CI 設定が未作成。`HEG-001`（OLED）は上流のビルド済みをハッシュ照合して置く。**このリポジトリを作った環境には WDK も Windows も無く、`.sys` は 1 つも作れていない。**
+- **`build/` を型番別に新設**: `HAC-001`（Erista）は CI でビルドして置く設定まで。`HAC-001-01`（Iowa）はドライバ一式が無いので空。`HDH-001`（Lite）は `tools/ci/drivers-t214-hoag.json` で CI 化（未実行）。`HEG-001`（OLED）は上流のビルド済みをハッシュ照合して置く。**このリポジトリを作った環境には WDK も Windows も無く、`.sys` は 1 つも作れていない。**
 - **`build-all-drivers.yml`**: 全 Erista ドライバのビルド後に `build/HAC-001` を組み立てて成果物にする。手動実行で `commit_build` を ON にすると、そのブランチへコミットする。
 - **fwfetch を Rust で作り直し**（`tools/fwfetch/`、旧 PowerShell/C# 版は `legacy/`）。実行ファイル 1 つ、マニフェスト埋め込み、`unsafe` 禁止、全オフセットの範囲検査、伸長量の上限、出力先の検証、配置前のハッシュ再検証。合成データのテスト 30 件（破損イメージ 210 件を含む）は Linux で通過。**Windows では未ビルド・未実行**。`build-fwfetch.yml` が x86_64 / ARM64 の `.exe` を作る。
 

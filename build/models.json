@@ -1,33 +1,45 @@
 {
-  "schema": 1,
-  "about": "Switch model number -> SoC / board codename -> where its drivers come from. 'status' says whether this repository can produce a driver set for the model. Nothing here claims a driver works on hardware.",
+  "schema": 2,
+  "about": "Switch model number -> SoC / board codename -> where its drivers come from and how the GitHub Actions workflow produces them. 'build' says HOW: ci = compiled and test-signed on a Windows runner (tools/ci/Build-AllDrivers.ps1 -Model <id>); upstream-binaries = taken from a published upstream release and checked against SHA-256 values in this repository; none = nothing to build. 'status' says whether this repository can produce a driver set for the model. Nothing here claims a driver works on hardware.",
   "models": {
     "HAC-001": {
       "name": "Nintendo Switch (original, Erista / Tegra X1)",
       "codename": "Icosa",
       "family": "t210-icosa",
       "source_dir": "drivers/t210-icosa",
+      "driver_root": "drivers/t210-icosa/drivers",
+      "tools_dir": "drivers/t210-icosa/tools",
+      "kits_dir": "drivers/t210-icosa/kits",
       "build": "ci",
       "ci_config": "tools/ci/drivers-t210.json",
+      "fw_profile": "erista",
+      "gpu_workflow": ".github/workflows/build-erista-gpu.yml",
       "status": "buildable-by-ci",
-      "note": "Built and test-signed by .github/workflows/build-all-drivers.yml (Windows runner with WDK); tools/build/assemble_build.py puts the result in build/HAC-001/drivers/. Not built in the authoring environment, no real-console test of the whole set."
+      "note": "Built and test-signed by .github/workflows/build-all-drivers.yml (Windows runner with WDK); tools/build/assemble_build.py puts the result in build/HAC-001/drivers/. TegraGpu is built by build-erista-gpu.yml (called from the same run); its probe driver needs NVIDIA firmware, which the run imports with fwfetch from a private bundle you supply. Not built in the authoring environment, no real-console test of the whole set. SwitchCenter / SwitchPatcher come from the apps job; tools/ci/verify_build.py checks every .sys (ARM64, native, signed, INF/CAT present)."
     },
     "HAC-001-01": {
       "name": "Nintendo Switch (2019 revision, Mariko / Tegra X1+)",
       "codename": "Iowa",
       "family": null,
       "build": "none",
+      "fw_profile": null,
       "status": "no-driver-set",
-      "note": "This repository has no driver set for Iowa (docs/DRIVER-INVENTORY.md: 'Iowa は専用の枠なし'). The Erista and Lite sets are NOT reused: board, power and I2C wiring are not shown to match."
+      "note": "This repository has no driver set for Iowa (docs/DRIVER-INVENTORY.md: 'Iowa は専用の枠なし'). The Erista and Lite sets are NOT reused: board, power and I2C wiring are not shown to match. The workflow lists this model as skipped."
     },
     "HDH-001": {
       "name": "Nintendo Switch Lite (Mariko / Tegra X1+)",
       "codename": "Hoag",
       "family": "t214-hoag",
       "source_dir": "drivers/t214-hoag",
-      "build": "not-wired",
-      "status": "sources-only",
-      "note": "Sources and INFs are present, but no CI build configuration exists yet (the Lite copy of Build-Driver.ps1 is older than the Erista one, and the per-driver build flags have not been written down)."
+      "driver_root": "drivers/t214-hoag",
+      "tools_dir": "drivers/t214-hoag/tools",
+      "kits_dir": "drivers/t214-hoag/kits",
+      "build": "ci",
+      "ci_config": "tools/ci/drivers-t214-hoag.json",
+      "fw_profile": "lite",
+      "status": "buildable-by-ci",
+      "note": "Built and test-signed by the same workflow with tools/ci/drivers-t214-hoag.json, written from drivers/t214-hoag/docs/hdh001/build-drivers.sh and the per-driver READMEs. The TegraGpu probe (and its SwitchFan bridge) is built by build-lite-gpu.yml, called from the same run; it needs NVIDIA firmware imported with fwfetch (profile lite), otherwise only TegraGpuCore.lib is built. SwitchCenter / SwitchPatcher are published for win-arm64 by the apps job. Every .sys is checked by tools/ci/verify_build.py (ARM64, native, signed, INF/CAT present). Not built in the authoring environment, no real-console test. Not in the set: the WINARM SD-miniport variant (needs a card-specific private header made with the target generator) and a display/Vulkan GPU driver (the GPU package is a bring-up probe, not a display driver).",
+      "gpu_workflow": ".github/workflows/build-lite-gpu.yml"
     },
     "HEG-001": {
       "name": "Nintendo Switch OLED (Mariko / Tegra X1+)",
@@ -35,8 +47,17 @@
       "family": "t214-aula",
       "source_dir": "drivers/t214-aula",
       "build": "upstream-binaries",
+      "fw_profile": "aula",
+      "fetch": {
+        "kind": "github-release",
+        "repo": "DanilKhmyrov/windows-switch",
+        "default_tag": "v0.8.0",
+        "asset": "windows-switch-arm64-drivers-v0_8_0.zip",
+        "asset_sha256": "5fa4f54db7c601838ba022db818966cc9ddc908ac3cec82fe904226f4a42029e",
+        "fill_tool": "tools/build/fill_heg001.py"
+      },
       "status": "upstream-prebuilt",
-      "note": "The only reported-working OLED set is windows-switch v0.8.0 (one console, per its release note). Its source (swhid, swbatt, swagentsvc, shim, UEFI patches, scripts) is kept under drivers/t214-aula/drivers/<Driver>/ (swhid, swbatt, touchread, swagentsvc) and drivers/t214-aula/upstream-src/ but has NOT been built in this repository (needs the upstream Docker/mingw toolchain); the prebuilt binaries are the upstream ones. tools/build/fill_heg001.py takes YOUR copy of that release zip, checks every file against the SHA-256 in drivers/t214-aula/manifest/, and fills build/HEG-001/."
+      "note": "The only reported-working OLED set is windows-switch v0.8.0 (one console, per its release note). The workflow downloads that release asset from the upstream repository and tools/build/fill_heg001.py writes only the files whose size and SHA-256 match drivers/t214-aula/manifest/, into build/HEG-001/. Its source (swhid, swbatt, swagentsvc, shim, UEFI patches, scripts) is kept under drivers/t214-aula/ but has NOT been built in this repository (needs the upstream Docker/mingw toolchain)."
     }
   }
 }
