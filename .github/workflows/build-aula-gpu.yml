@@ -3,6 +3,9 @@
 # Lite (drivers/t214-hoag/TegraGpu, ACPI\SWOA0F01). Only the Lite has a physical test of them; nothing says the OLED board, power
 # and ACPI wiring match (drivers/t214-aula/README.md, 'Lite との分離ルール'). The result is a packaging of the same code in the
 # windows-switch agent\gpu layout that w64.cmd (:gpu) installs - experimental, not verified on an OLED console. No host job: the Lite build.py has no --host-only mode here.
+# SwitchFan: NOT built. Its Lite GPU bridge includes t214/gpu_pmic.h, a one-line forward to integration/switch-lite/... of another
+# repository that is not in this tree or in mesa-switch (compile error: file not found), and drivers/t214-aula/README.md forbids
+# the Lite SwitchFan config on the OLED. So only tegragpuprobe + tegragpurender are built (build.py --keep-fan).
 # Jobs:
 #   driver (windows) clang-cl/lld-link against the WDK; builds TegraGpuCore.lib always,
 #                    and the signed KMDF probe ALWAYS (.sys + .inf + .cat, no firmware inside).
@@ -88,7 +91,7 @@ jobs:
         run: |
           $inc = "${env:ProgramFiles(x86)}\Windows Kits\10\Include\10.0.19041.0"
           $bargs = @('drivers\t214-hoag\TegraGpu\tools\build.py','--mesa','mesa-switch','--wdk-include',$inc,'--sdk-include',$inc,'--out','build\gpu')
-          $bargs += '--probe','--render'   # the package never contains firmware; it is placed afterwards by fwfetch
+          $bargs += '--probe','--keep-fan','--render'   # --keep-fan: no SwitchFan bridge here (see header note)   # the package never contains firmware; it is placed afterwards by fwfetch
           if ($env:HAVE_FW) { $bargs += @('--gr-firmware',$env:GPU_FW,'--acr-firmware',$env:GPU_FW) }  # only for host-side checks
           python @bargs
           if ($LASTEXITCODE -ne 0) { throw 'build failed' }
@@ -127,6 +130,19 @@ jobs:
           # never ship firmware or keys
           Get-ChildItem $dst -Recurse -File | Where-Object { $_.Extension -in '.bin','.pfx','.key' } | ForEach-Object { throw "forbidden file in agent-gpu: $($_.Name)" }
           Get-ChildItem $dst -File | Select-Object Name,Length | Format-Table | Out-String | Write-Host
+      - name: Nothing missing - both GPU packages complete, and the fan / GPU power bridge (swbatt) is in the OLED set
+        shell: pwsh
+        run: |
+          foreach ($n in 'tegragpuprobe','tegragpurender') {
+            foreach ($e in 'sys','inf','cat') {
+              if (-not (Test-Path "build\gpu\kit\$n\$n.$e")) { throw "missing build\gpu\kit\$n\$n.$e" }
+            }
+          }
+          # swbatt.sys (ROOT\SWBATT) gives the OLED its fan and the \Device\SwitchBacklight GPU power bridge; SwitchFan is not used.
+          $cfg = Get-Content tools/ci/drivers-t214-aula.json -Raw | ConvertFrom-Json
+          $sw = @($cfg | Where-Object { $_.name -eq 'swbatt' -and -not $_.optional })
+          if ($sw.Count -ne 1) { throw 'swbatt (fan + GPU power bridge) is not a required driver of drivers-t214-aula.json' }
+          Write-Host 'OK: probe + render complete; swbatt is built by the HEG-001 driver set'
       - name: Verify the signed kit (ARM64 native images, INF/CAT present; not a hardware test)
         shell: pwsh
         run: python tools/ci/verify_build.py build/gpu/kit
