@@ -3,8 +3,8 @@
 (Tegra X1) 上の Windows ARM64 で動いているドライバを集め、**WinX の ACPI(SWOA 系 ID)に合わせて**
 まとめたリポジトリ。Erista(T210/Icosa)、Lite(T214/Hoag)、**OLED(T214/Aula)を別枠**で扱う(Iowa は専用の枠なし)。
 
-> **未実機。** 確認したのはソース/INF/DSDT の突き合わせと、
-> ホストで動く単体テスト。あとビルドが出来るか、だけ。実機で動く証明ではない。
+> **未実機。** 確認したのはソース/INF/DSDT の突き合わせ、ホストで動く単体テスト、
+> そして **GitHub Actions 上でビルド・署名・キット化が通ること**（2026-11-19、`build-all-drivers` #21）。実機で動く証明ではない。
 
 ## 構成
 
@@ -13,7 +13,7 @@
 | `drivers/t210-icosa/` | Erista 用 WinX ドライバのソース・INF・kit（winx `usually` からの複製） |
 | `drivers/t214-hoag/` | Lite 用（Wi-Fi 共通コア、TegraGpu、TegraXusb を含む） |
 | `drivers/t214-aula/` | **OLED(HEG-001)用。windows-switch v0.8.0 の構成**（実機報告は配布者 1 台のみ）。テキストの kit、上流ソース一式（`upstream-src/`、未ビルド。ライセンスはファイルごとに `LICENSE-AUDIT.md`、帰属は `NOTICE.md`）、全ファイルの SHA-256 一覧。バイナリは `build/HEG-001/` に `tools/build/fill_heg001.py` で置く |
-| `build/` | **型番別のビルド済みドライバ置き場**（`HAC-001` / `HAC-001-01` / `HDH-001` / `HEG-001`）。いまは置き場と手順だけで `.sys` は未作成（`build/README.md`） |
+| `build/` | **型番別のビルド済みドライバ置き場**（`HAC-001` / `HAC-001-01` / `HDH-001` / `HEG-001`）。CI で `.sys` / `.inf` / `.cat` をビルド・テスト署名できる（Actions のアーティファクト）。リポジトリへ置くのは `commit_build` を ON にした手動実行のときだけで、いまはまだコミットしていない（`build/README.md`） |
 | `tools/fwfetch/` | **再配布できない NVIDIA / Broadcom / Switchroot ファイルを自分の SD から取り出して照合・配置するツール（Rust 製、`unsafe` 禁止、読み取り専用、リポジトリ外に出力）** |
 | `tools/build/` | `build/` を埋めるスクリプト（`assemble_build.py` = CI の成果物、`fill_heg001.py` = 上流 zip をハッシュ照合して配置）とそのテスト |
 | `acpi/Dsdt.winx-usually.asl` | INF の HWID と突き合わせる基準 DSDT |
@@ -32,11 +32,28 @@
 | `COPYING.md`, `LICENSES/` | ライセンスの案内と SPDX 別の全文 |
 | `CREDITS.md`, `reference/l4t/` | 出典・クレジットと、L4T/hekate/Switchroot の参照ソース |
 
+## 2026-11-20 追加分: GitHub Actions のビルドが通った
+- `build-all-drivers`（`test` ブランチ、コミット `2217398`、#21）が**失敗なしで完了**。WDK での clang-cl / lld-link ビルド、テスト署名、INF / CAT 作成、`tools/ci/verify_build.py` の検査（`.sys` が署名済み ARM64 ネイティブ、INF に `.sys` / `.cat` がある）まで通っている。以前は #1〜#20 がすべて失敗だった。
+- そのため下の履歴にある「CI 未実行」「`.sys` は 1 つも作れていない」は、**この日以降は当てはまらない**（履歴は当時の記述のまま残してある）。
+- **まだ確認していないこと**: 実機での起動・動作、ファームウェア込みの GPU 動作、ビルド結果と上流 v0.8.0 バイナリのバイト一致（OLED）。`.sys` は実機で動くことの証明ではない。
+- **成果物の取り方**: Actions の実行画面の Artifacts に `build-<型番>`（ドライバ一式）、`kit-<型番>`（配布用 kit・BUILD-INFO.md・ログ）、`apps-<型番>`（SwitchCenter / SwitchPatcher）、Lite の GPU は `Lite-GPU`。
+- **リリースとコミットは自動では動かない**（仕様）。`test` ブランチへ push しただけでは `release` / `commit-build` / `heg001` はスキップされる:
+
+| やりたいこと | 方法 |
+|---|---|
+| pre-release を作る（タグ） | `git tag v0.0.1 && git push origin v0.0.1`（`v*`） |
+| pre-release を作る（ブランチから） | Actions → `build-all-drivers` → Run workflow → `release_tag` に `v0.0.1-test` など |
+| Lite の GPU だけ pre-release | Actions → `build-lite-gpu` → Run workflow → `release_tag` |
+| 成果物を `build/<型番>/` にコミット | `build-all-drivers` を手動実行し `commit_build` を ON |
+| OLED を上流バイナリから作る | 手動実行で `heg001_upstream` を ON |
+
+  同じタグ名のリリースが既にあると失敗する。タグは実行したコミットに付く（`--target $GITHUB_SHA`）。`build-lite-gpu.yml` の release は単体の手動実行のときだけ動き、`build-all-drivers` から呼ばれたときは動かない（二重リリース防止）。
+
 ## 2026-11-19 追加分: HEG-001(OLED)を他の型番と同じ CI 方式に
 - `build/models.json` の HEG-001 を `ci` に変更。`tools/ci/drivers-t214-aula.json` で swhid / swbatt / switchbt / switchaudio / switchwifi をビルド・署名し、`build-all-drivers.yml` が `swagentsvc.exe`(ARM64)と windows-switch の `agent\` スクリプトを足して `build/HEG-001/drivers/agent/` を作る。上流バイナリの照合は `heg001_upstream = true` で従来どおり。
 - `tools/ci/verify_build.py` に `--no-inf-dir` / `--no-cat-dir`(INF なしの swhid / swbatt、カタログを Switch 上で作る Wi-Fi/BT/音声用)を追加。
 - fwfetch: HEG-001 は起動タスクでは配置されない(GPU 以外)ので、成果物の README に `--deploy <起動パーティション>` の手順を入れた。
-- **どれも CI 未実行・WDK 未確認・実機未確認。** v0.8.0 のバイナリとはバイト一致しない。
+- **どれも CI 未実行・WDK 未確認・実機未確認。** v0.8.0 のバイナリとはバイト一致しない。（2026-11-20 追記: CI ビルドは通った。実機は未確認のまま）
 - **テスト署名キット**: 全型番の `build/<型番>/test-signing/` に、その実行の `SwitchWOA-Test.cer` と `Install-TestSigning.cmd` ほかを同梱（`tools/testsign/`、`tools/build/make_testsign_kit.py`）。Lite の Stage0 に残っていた古い `.cer` も実行ごとの証明書で上書き。GPU の確認は `docs/ERISTA-GPU-CHECK-ja.md`、ビルドの確認は `docs/FULL-BUILD-CHECK-ja.md`。
 
 ## 2026-11-18 追加分（4 回目: スリープ→HDMI）
@@ -64,7 +81,7 @@
 - **TegraGpu(Erista)の ABI ヘッダ 3 本を ruje0504-2/mesa-switch-woa(80dfad4)に同期**（`adapter_abi.h` / `allocation_abi.h` / `submit_abi.h`）。T214 側は据え置き。
 - **電源コールバック検査** `tools/check_power_callbacks.py` と、スリープ・HDMI・不足ドライバの現状 → `docs/SLEEP-AND-MISSING-DRIVERS-ja.md`。
 - 静的監査メモ: `docs/audit-2026-11-17-static.md`（Tegra210I2c の長い stall を修正）。
-- `build-switchaudio.yml` は、全ドライバを 1 つの証明書でビルドする **`build-all-drivers.yml`** に統合（Audio を含む。未実行）。
+- `build-switchaudio.yml` は、全ドライバを 1 つの証明書でビルドする **`build-all-drivers.yml`** に統合（Audio を含む。2026-11-19 に実行して成功）。
 
 ## 2026-11-17 追加分（2 回目）
 - **スリープ(Dx)対応(T210)**: Fan / Battery / Sensor / CpuClock / PowerButton / Touch に `EvtDeviceSelfManagedIoSuspend/Restart` を追加。ポーリング用タイマーを止めて I2C を叩かないようにし、復帰時に再開。PowerButton は「起こした電源ボタン押下」をもう一度押下として扱わない（即スリープに戻るのを防ぐ）。Sensor は ALS/IMU を停止・再初期化、CpuClock は停止時に既定クロックへ戻し復帰時に要求プロファイルを再適用、Fan は停止時に UEFI 既定の 76 へ。
@@ -83,6 +100,7 @@
     tools/ci/Build-AllDrivers.ps1     # Windows で全ドライバをビルド（GitHub Actions も同じものを実行）
     python tools/build/assemble_build.py --model HAC-001 --kit-dir build/t210/kit   # 成果物を build/HAC-001 へ
     cargo build --release --manifest-path tools/fwfetch/Cargo.toml                  # fwfetch
+    git tag v0.0.1 && git push origin v0.0.1                                        # pre-release を作る（build-all-drivers の release ジョブ）
 
 ビルドと署名の手順は各 `kits/` と `drivers/*/README.md`（WDK 10.0.19041 以降、Wi-Fi は 10.0.26100、テスト署名 + `testsigning on`）。
 
