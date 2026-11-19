@@ -24,7 +24,7 @@ NTSTATUS TgGpuResolveRootTable(const TG_GPU_TABLE_SEGMENT *Segment,
     NTSTATUS status;
     if (!Root) return STATUS_INVALID_PARAMETER;
     Root->Valid = FALSE;
-    if (!Args || !Args->NumEntries || Args->Address.Padding)
+    if (!Args || !Args->NumEntries || TG_PA_PADDING(Args->Address))
         return STATUS_INVALID_PARAMETER;
     size.NumberOfPte = Args->NumEntries;
     next.Bytes = TgGpuRootTableSize(&size);
@@ -67,7 +67,7 @@ NTSTATUS TgGpuFlushRootTable(const TG_GPU_ROOT_TABLE *Root,
     const struct tg_gpu_power_io *Io, const struct tg_gpu_power *Power)
 {
     enum tg_gpu_tlb_result result;
-    if (!Root || !Root->Valid || !Args || Args->RootPageTableAddress.Padding ||
+    if (!Root || !Root->Valid || !Args || TG_PA_PADDING(Args->RootPageTableAddress) ||
         Args->RootPageTableAddress.SegmentId != Root->Address.SegmentId ||
         Args->RootPageTableAddress.SegmentOffset != Root->Address.SegmentOffset ||
         ((Args->StartVirtualAddress || Args->EndVirtualAddress) &&
