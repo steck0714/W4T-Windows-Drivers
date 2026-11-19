@@ -29,7 +29,7 @@ windows-switch は Mariko(OLED) で（ここでは `drivers/t214-aula/` に分�
 | 電池/USB-C | switchbattery | SWOA0301 (+0314 Lite) | 1.0.0.8 | 1.0.0.11 | R371 | demand | battc。BM92T/BQ24193 の USB-C ホスト電源（v4〜）。t210 1.0.0.7 は IRP 所有権修正を hayato 監査で取り込み。1.0.0.8(11/17)で Dx 停止/再開と I/O ターゲットの解放・二重オープン防止を追加（未ビルド） |
 | ファン/バックライト | switchfan | SWOA0401 (+0402 Lite) | 1.0.0.3 | 1.0.0.13 | R372 | demand | `\Device\SwitchBacklight` を公開（GPU 電源ブリッジの入口） |
 | タッチ | switchtouch | SWOA0501 / 0502(Lite) | 1.0.0.5 | 1.0.0.4 / Lite 1.0.1.2 | R373 | demand | FTS4/FTM4、I2C3 0x49。HID（VHF 系） |
-| 電源ボタン | switchpwrbtn | SWOA0601 | 1.0.0.3 | 1.0.0.5 | R374 | demand | MAX77620 EN0 を 50ms ポーリング、VHF の System Power Down |
+| 電源ボタン | switchpwrbtn | SWOA0601 | 1.0.0.3 | 1.0.0.8 | R374 | demand | MAX77620 EN0 を 50ms ポーリング、VHF の System Power Down。Lite 1.0.0.8 は `\Device\SwitchCoreVoltage` で SwitchFan のコア電圧要求(VDD_CORE)も受ける |
 | CPU クロック | switchcpu | SWOA0701 | 1.0.0.4 | 1.0.0.3 | R375 | demand | |
 | RTC | switchrtc | SWOA0801 | 1.0.0.2 | 1.0.0.2 | R377 | demand | MAX77620 RTC |
 | センサー | switchsensor | SWOA0901 | 1.0.0.2 | 1.0.0.1 | R379 | demand | 明るさ・傾き。Lite は SIO(`switchsio`, SWOA0902, 0.2.5.0) も |

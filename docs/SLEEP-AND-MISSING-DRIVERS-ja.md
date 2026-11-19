@@ -24,7 +24,7 @@
 | T214 の新しい実装を T210 へ移す | **未実施**。Erista と Lite は PMIC・電源接続が違う項目（Fan・Sensor・Battery）があり、ボードごとの検証なしに丸ごとコピーできない |
 
 ### 推奨する順序（小さく確実なものから）
-1. T210 SwitchPowerButton を T214 1.0.0.5 の構造（button_state / irq_route / D0 コールバック）へ寄せ、`HoldSasMs`（長押し Ctrl+Alt+Del）を載せる。IRQ 経路は**押下のみ**で、長押し判定はポーリング経路でしか成立しない点に注意。
+1. T210 SwitchPowerButton を T214 1.0.0.5 の構造（button_state / irq_route / D0 コールバック）へ寄せ、`HoldSasMs`（長押し Ctrl+Alt+Del）を載せる。IRQ 経路は**押下のみ**で、長押し判定はポーリング経路でしか成立しない点に注意。(2026-11-19: T214 の switchpwrbtn は上流 `c5ae935`(1.0.0.8)に更新し、`irq_route.h` と D0 コールバックはビルド対象から外れた(`irq_route.h` などのファイルは `LEGACY.md` のとおり残してある)。ポーリング方式なので、この寄せ先は 1.0.0.8 の構造に読み替える。`CREDITS.md` 参照。)
 2. D0Exit/D0Entry の無いドライバに、(a)I2C/レジスタ状態の保存復元、(b)進行中リクエストの完了、(c)ポーリングタイマーの停止/再開、を足す。`check_power_callbacks.py` の表を埋めていく。
 3. S0 アイドル(`WdfDeviceAssignS0IdleSettings`)は Sdhc / I2c / Gpio など下位から。
 4. ハイバネート(S4)は Windows 側ではストレージ(SDHC ミニポート)のダンプ経路とファームウェア(UEFI)の再開が前提。先に SD ミニポートの休止対応を確認する。

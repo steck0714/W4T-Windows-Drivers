@@ -18,6 +18,7 @@
 | `tools/build/` | `build/` を埋めるスクリプト（`assemble_build.py` = CI の成果物、`fill_heg001.py` = 上流 zip をハッシュ照合して配置）とそのテスト |
 | `acpi/Dsdt.winx-usually.asl` | INF の HWID と突き合わせる基準 DSDT |
 | `reference/windows-switch/` | windows-switch の swbatt / swhid / touchread / tune.ps1（参考、GPL-2.0）。移植元 |
+| `reference/windows-for-switch-drivers/` | ruje0504-2/Windows-for-Switch-Drivers `c5ae935` の `core_voltage.h` 1 ファイル（MIT）。SwitchFan の `emc_windows.h` が使う IOCTL 契約ヘッダの上流コピー |
 | `reference/switchdrivers-*` | SwitchDrivers の manifest・段階0スクリプト |
 | `docs/DRIVER-INVENTORY.md` | **全ドライバ一覧**（HWID・版・minUefi・系統・注意点） |
 | `docs/WINDOWS-SWITCH-COMPAT.md` | windows-switch との互換性、併用禁止の組み合わせ |
