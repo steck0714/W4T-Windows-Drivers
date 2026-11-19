@@ -5,8 +5,13 @@
 #   plan     (ubuntu)   reads build/models.json: which models build here (ci), which are fetched (upstream-binaries), which are skipped.
 #   drivers  (windows)  one job per CI model (HAC-001 Erista, HDH-001 Lite): tools/ci/Build-AllDrivers.ps1 -Model <id>, ONE signing
 #                       certificate per run, kits assembled into build/<id>/, BUILD-INFO.md with OK / WARN / FAIL per driver.
-#   heg001   (ubuntu)   HEG-001 (OLED): downloads the upstream windows-switch release and keeps only files whose size and SHA-256 match
-#                       drivers/t214-aula/manifest/ (tools/build/fill_heg001.py). Nothing is compiled for it.
+#                       HEG-001 (OLED) is built here too, from source: swhid / swbatt / swagentsvc (windows-switch sources) and
+#                       switchbt / switchaudio / switchwifi, with tools/ci/drivers-t214-aula.json. Result: build/HEG-001/drivers/agent/
+#                       in the windows-switch layout (agent/arm64, agent/wifi, agent/bt, agent/audio, w64.cmd, swagentsvc.exe).
+#   heg001   (ubuntu)   only when heg001_upstream = true: the old path for HEG-001 (download the upstream windows-switch release and
+#                       keep only files whose size and SHA-256 match drivers/t214-aula/manifest/, tools/build/fill_heg001.py).
+#   testsign every model: build/<id>/test-signing/ (SwitchWOA-Test.cer of THIS run + Install-TestSigning.cmd + Stage0/Set-SwitchTestSigning scripts);
+#                       models without a driver set get the scripts only (job testsign-skipped).
 #   gpu      (windows)  HAC-001 only: build-erista-gpu.yml (TegraGpu core, and the probe driver when NVIDIA firmware was imported).
 #   commit-build        manual run with commit_build = true: puts the finished sets into build/<id>/ on this branch.
 #   release  (tag v*)   attaches one kit zip per model + SHA256SUMS + the public .cer to a GitHub *pre-release*.
@@ -40,8 +45,12 @@ on:
         description: 'Optional https URL of your private firmware zip (otherwise the secret FW_BUNDLE_URL is used if it exists)'
         type: string
         default: ''
+      heg001_upstream:
+        description: 'HEG-001 (OLED): take the upstream windows-switch release binaries (hash-checked) instead of building from source'
+        type: boolean
+        default: false
       heg001_tag:
-        description: 'Release tag of DanilKhmyrov/windows-switch to take the OLED binaries from (empty = the tag in build/models.json)'
+        description: 'Only with heg001_upstream: release tag of DanilKhmyrov/windows-switch (empty = the tag in build/models.json)'
         type: string
         default: ''
   push:
@@ -61,6 +70,7 @@ on:
     paths:
       - 'drivers/t210-icosa/**'
       - 'drivers/t214-hoag/**'
+      - 'drivers/t214-aula/**'
       - 'tools/**'
       - 'acpi/**'
 
@@ -98,6 +108,7 @@ jobs:
       heg: ${{ steps.p.outputs.heg }}
       gpu: ${{ steps.p.outputs.gpu }}
       gpu_lite: ${{ steps.p.outputs.gpu_lite }}
+      skipped: ${{ steps.p.outputs.skipped }}
       heg_tag: ${{ steps.p.outputs.heg_tag }}
     steps:
       - uses: actions/checkout@v4
@@ -105,6 +116,7 @@ jobs:
         env:
           MODELS: ${{ inputs.models }}
           HEG_TAG: ${{ inputs.heg001_tag }}
+          HEG_UPSTREAM: ${{ inputs.heg001_upstream }}
         run: |
           python3 - <<'PY'
           import json, os
@@ -115,8 +127,10 @@ jobs:
           unknown = [w for w in want if w not in models]
           if unknown:
               raise SystemExit("unknown model(s): %s (have: %s)" % (", ".join(unknown), ", ".join(models)))
-          ci = [{"model": m, "fw_profile": models[m].get("fw_profile") or "all"} for m in want if models[m]["build"] == "ci"]
-          heg = [m for m in want if models[m]["build"] == "upstream-binaries"]
+          upstream = os.environ.get("HEG_UPSTREAM") == "true"   # HEG-001 from the upstream release instead of source
+          ci = [{"model": m, "fw_profile": models[m].get("fw_profile") or "all"} for m in want
+                if models[m]["build"] == "ci" and not (m == "HEG-001" and upstream)]
+          heg = [m for m in want if models[m]["build"] == "upstream-binaries" or (m == "HEG-001" and upstream)]
           skipped = [m for m in want if models[m]["build"] == "none"]
           tag = os.environ.get("HEG_TAG") or (models[heg[0]]["fetch"]["default_tag"] if heg else "")
           out = {
@@ -126,6 +140,7 @@ jobs:
               "gpu": "true" if any(c["model"] == "HAC-001" for c in ci) else "false",
               "gpu_lite": "true" if any(c["model"] == "HDH-001" for c in ci) else "false",
               "heg_tag": tag,
+              "skipped": " ".join(skipped),
           }
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               for k, v in out.items():
@@ -133,7 +148,8 @@ jobs:
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
               f.write("### Models\n\n| model | how | status |\n|---|---|---|\n")
               for m in want:
-                  f.write("| %s (%s) | %s | %s |\n" % (m, models[m]["codename"], models[m]["build"], models[m]["status"]))
+                  how = "upstream-binaries" if m in heg else models[m]["build"]
+                  f.write("| %s (%s) | %s | %s |\n" % (m, models[m]["codename"], how, models[m]["status"]))
               for m in skipped:
                   f.write("\n**%s skipped**: %s\n" % (m, models[m]["note"]))
           PY
@@ -205,8 +221,46 @@ jobs:
       - name: Assemble build/${{ matrix.model }} (drivers, INF, CAT, public .cer, SHA256SUMS, licences; refuses private keys)
         run: python tools/build/assemble_build.py --model '${{ matrix.model }}' --kit-dir 'build/_work/${{ matrix.model }}/kit' --build-info 'build/_work/${{ matrix.model }}/BUILD-INFO.md'
 
+      - name: Test-signing kit (same for every model) - build/${{ matrix.model }}/test-signing and in the release kit
+        run: |
+          $cer = 'build/_work/${{ matrix.model }}/kit/SwitchWOA-Test.cer'
+          if (-not (Test-Path $cer)) { throw "the run's public certificate is missing: $cer" }
+          python tools/build/make_testsign_kit.py --model '${{ matrix.model }}' --cer $cer
+          python tools/build/make_testsign_kit.py --model '${{ matrix.model }}' --cer $cer --dest 'build/_work/${{ matrix.model }}/kit/test-signing'
+
+      - name: HEG-001 - boot agent service host (swagentsvc.exe, ARM64) - MSVC ARM64 environment
+        if: matrix.model == 'HEG-001'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64_arm64
+
+      - name: HEG-001 - swagentsvc.exe + the windows-switch agent scripts (agent/ layout of v0.8.0)
+        if: matrix.model == 'HEG-001'
+        run: |
+          $agent = 'build/HEG-001/drivers/agent'
+          New-Item -ItemType Directory -Force $agent | Out-Null
+          # the scripts, INFs and helper files of the kit are copied unchanged (w64.cmd, tune.ps1, wifi_sign.ps1, the INFs ...)
+          Copy-Item 'drivers/t214-aula/kit/agent/*' $agent -Recurse -Force
+          # the service host: only Windows service APIs, static CRT so no VC runtime is needed on the Switch
+          $obj = Join-Path $env:RUNNER_TEMP 'swagentsvc'
+          New-Item -ItemType Directory -Force $obj | Out-Null
+          & 'C:\Program Files\LLVM\bin\clang-cl.exe' --target=aarch64-pc-windows-msvc /O2 /MT /GS- /DUNICODE /D_UNICODE /W3 `
+            drivers/t214-aula/drivers/SwitchAgent/src/swagentsvc.c "/Fo$obj\swagentsvc.obj" "/Fe$agent\swagentsvc.exe" `
+            /link /subsystem:console advapi32.lib
+          if ($LASTEXITCODE -ne 0) { throw 'swagentsvc.exe failed to build' }
+          python -c "import sys; sys.path.insert(0,'tools/ci'); import verify_build as v; pe=v.read_pe(sys.argv[1]); assert pe['machine']==v.IMAGE_FILE_MACHINE_ARM64, pe; print('swagentsvc.exe is ARM64')" "$agent/swagentsvc.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'swagentsvc.exe is not an ARM64 image' }
+          Get-ChildItem $agent -Recurse -File | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.FullName.Substring((Resolve-Path 'build/HEG-001/drivers').Path.Length + 1).Replace('\', '/') } |
+            Set-Content 'build/HEG-001/drivers/agent/SHA256SUMS-agent.txt' -Encoding ascii
+
       - name: "Verify the output (every .sys is a signed ARM64 native image, every INF has its .sys / .cat - not a hardware test)"
-        run: python tools/ci/verify_build.py 'build/${{ matrix.model }}/drivers'
+        run: |
+          $extra = @()
+          if ('${{ matrix.model }}' -eq 'HEG-001') {
+            # windows-switch layout: swhid/swbatt are registered by w64.cmd (no INF); the Wi-Fi/BT/audio catalogs are made on the console
+            $extra = @('--no-inf-dir', 'agent/arm64', '--no-cat-dir', 'agent/wifi', '--no-cat-dir', 'agent/bt', '--no-cat-dir', 'agent/audio')
+          }
+          python tools/ci/verify_build.py 'build/${{ matrix.model }}/drivers' @extra
 
       - name: "InfVerif on every INF (informational - the WDK checker; findings are listed in the log)"
         continue-on-error: true
@@ -230,12 +284,24 @@ jobs:
           New-Item -ItemType Directory -Force $d | Out-Null
           Copy-Item tools/fwfetch/target/aarch64-pc-windows-msvc/release/fwfetch.exe $d
           Copy-Item tools/fwfetch/startup/*.ps1 $d
-          Set-Content "$d/README.txt" @(
-            'fwfetch reads firmware that must not be redistributed from YOUR OWN SD card (read-only, no network).',
-            'On the Switch, in an administrator PowerShell, in this folder:',
-            '  .\Install-FwFetchStartup.ps1 -Profile ${{ matrix.fw_profile }}   (add -GpuDir <driver folder> when the GPU driver is used)',
-            'From then on fwfetch runs 1 minute after every Windows start until it has found everything. Log: C:\ProgramData\W4T\logs\fwfetch-startup.log',
-            'Remove: .\Install-FwFetchStartup.ps1 -Remove') -Encoding ascii
+          if ('${{ matrix.model }}' -eq 'HEG-001') {
+            # windows-switch reads the Wi-Fi / Bluetooth firmware from the BOOT partition (agent\wifi, agent\bt) in w64.cmd, so for the
+            # OLED the firmware must be DEPLOYED there; the start-up task alone only fills the cache (it deploys nothing but the GPU files).
+            Set-Content "$d/README.txt" @(
+              'fwfetch reads firmware that must not be redistributed from YOUR OWN SD card (read-only, no network).',
+              'HEG-001 (windows-switch layout): put the built agent\ folder (drivers\agent) on the boot partition, then run once, in an administrator',
+              'PowerShell on a PC with the SD card, or on the Switch with the boot partition mounted (E: = boot partition):',
+              '  .\fwfetch.exe --profile aula --auto --deploy E:\',
+              'This puts bl31.bin / the XUSB firmware into wp11\ and wp64\ and the BCM4356 firmware / patch into agent\wifi\ and agent\bt\.',
+              'Install-FwFetchStartup.ps1 -Profile aula only keeps a verified copy in C:\ProgramData\W4T\fw-cache (optional).') -Encoding ascii
+          } else {
+            Set-Content "$d/README.txt" @(
+              'fwfetch reads firmware that must not be redistributed from YOUR OWN SD card (read-only, no network).',
+              'On the Switch, in an administrator PowerShell, in this folder:',
+              '  .\Install-FwFetchStartup.ps1 -Profile ${{ matrix.fw_profile }}   (add -GpuDir <driver folder> when the GPU driver is used)',
+              'From then on fwfetch runs 1 minute after every Windows start until it has found everything. Log: C:\ProgramData\W4T\logs\fwfetch-startup.log',
+              'Remove: .\Install-FwFetchStartup.ps1 -Remove') -Encoding ascii
+          }
           Get-ChildItem $d -File | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } | Set-Content "$d/SHA256SUMS.txt" -Encoding ascii
 
       - name: No firmware or key material in what is uploaded
@@ -270,6 +336,24 @@ jobs:
             build/_work/${{ matrix.model }}/logs
           if-no-files-found: warn
 
+  testsign-skipped:
+    # Models with build = none (HAC-001-01 / Iowa): no drivers, but the test-signing scripts are still produced (no .cer: there is no signing here).
+    name: test-signing scripts (models without a driver set)
+    needs: plan
+    if: needs.plan.outputs.skipped != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          SKIPPED: ${{ needs.plan.outputs.skipped }}
+        run: |
+          for m in $SKIPPED; do python3 tools/build/make_testsign_kit.py --model "$m"; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: testsign-skipped
+          path: build/*/test-signing
+          if-no-files-found: error
+
   heg001:
     name: drivers HEG-001 (upstream release, hash-checked)
     needs: plan
@@ -303,6 +387,8 @@ jobs:
           mkdir -p build/HEG-001/fwfetch
           cp tools/fwfetch/startup/*.ps1 build/HEG-001/fwfetch/
           echo 'Put fwfetch-aarch64-pc-windows-msvc.exe (from the build-fwfetch workflow) here as fwfetch.exe, then run .\Install-FwFetchStartup.ps1 -Profile aula in an administrator PowerShell on the Switch.' > build/HEG-001/fwfetch/README.txt
+      - name: Test-signing scripts (no .cer: the upstream binaries are signed by the upstream author)
+        run: python3 tools/build/make_testsign_kit.py --model HEG-001
       - uses: actions/upload-artifact@v4
         with:
           name: build-HEG-001
@@ -366,7 +452,7 @@ jobs:
         with:
           name: apps-${{ matrix.model }}
           path: build/_apps/${{ matrix.model }}
-          if-no-files-found: error
+          if-no-files-found: ignore   # HEG-001 has no SwitchCenter / SwitchPatcher
 
   commit-build:
     # Only on a manual run with commit_build = true. Puts the finished sets into build/<model>/ of THIS branch.
@@ -390,7 +476,7 @@ jobs:
           set -e
           for d in dl/build-*; do
             m="${d#dl/build-}"
-            rm -rf "build/$m/drivers" "build/$m/agent" "build/$m/fwfetch"
+            rm -rf "build/$m/drivers" "build/$m/agent" "build/$m/fwfetch" "build/$m/test-signing"
             mkdir -p "build/$m"
             cp -r "$d/." "build/$m/"
           done
