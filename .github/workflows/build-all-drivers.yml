@@ -12,6 +12,7 @@
 #                       keep only files whose size and SHA-256 match drivers/t214-aula/manifest/, tools/build/fill_heg001.py).
 #   testsign every model: build/<id>/test-signing/ (SwitchWOA-Test.cer of THIS run + Install-TestSigning.cmd + Stage0/Set-SwitchTestSigning scripts);
 #                       models without a driver set get the scripts only (job testsign-skipped).
+#   gpu-aula (windows)  HEG-001 (OLED): build-aula-gpu.yml - the same TegraGpu sources as the Lite, packed as agent\gpu (experimental).
 #   gpu      (windows)  HAC-001 only: build-erista-gpu.yml (TegraGpu core + signed probe driver; no firmware inside, fwfetch loads it afterwards).
 #   commit-build        manual run with commit_build = true: puts the finished sets into build/<id>/ on this branch.
 #   release  (tag v*)   attaches one kit zip per model + SHA256SUMS + the public .cer to a GitHub *pre-release*.
@@ -108,6 +109,7 @@ jobs:
       heg: ${{ steps.p.outputs.heg }}
       gpu: ${{ steps.p.outputs.gpu }}
       gpu_lite: ${{ steps.p.outputs.gpu_lite }}
+      gpu_aula: ${{ steps.p.outputs.gpu_aula }}
       skipped: ${{ steps.p.outputs.skipped }}
       heg_tag: ${{ steps.p.outputs.heg_tag }}
     steps:
@@ -139,6 +141,7 @@ jobs:
               "heg": "true" if heg else "false",
               "gpu": "true" if any(c["model"] == "HAC-001" for c in ci) else "false",
               "gpu_lite": "true" if any(c["model"] == "HDH-001" for c in ci) else "false",
+              "gpu_aula": "true" if ("HEG-001" in want and not upstream and models["HEG-001"]["build"] == "ci") else "false",
               "heg_tag": tag,
               "skipped": " ".join(skipped),
           }
@@ -410,6 +413,15 @@ jobs:
     needs: [host, plan]
     if: needs.plan.outputs.gpu_lite == 'true'
     uses: ./.github/workflows/build-lite-gpu.yml
+    with:
+      firmware_url: ${{ inputs.firmware_url }}
+    secrets: inherit
+
+  gpu-aula:
+    name: gpu HEG-001 (TegraGpu, Switch OLED, experimental)
+    needs: [host, plan]
+    if: needs.plan.outputs.gpu_aula == 'true'
+    uses: ./.github/workflows/build-aula-gpu.yml
     with:
       firmware_url: ${{ inputs.firmware_url }}
     secrets: inherit

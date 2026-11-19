@@ -1,0 +1,139 @@
+# Switch OLED (HEG-001, T214/Aula) TegraGpu bring-up driver. UNTESTED workflow: written without running it.
+# Derived from build-lite-gpu.yml. NOTE: there is NO Aula-specific GPU design in this repo. This builds the SAME TegraGpu sources as the
+# Lite (drivers/t214-hoag/TegraGpu, ACPI\SWOA0F01). Only the Lite has a physical test of them; nothing says the OLED board, power
+# and ACPI wiring match (drivers/t214-aula/README.md, 'Lite との分離ルール'). The result is a packaging of the same code in the
+# windows-switch agent\gpu layout that w64.cmd (:gpu) installs - experimental, not verified on an OLED console. No host job: the Lite build.py has no --host-only mode here.
+# Jobs:
+#   driver (windows) clang-cl/lld-link against the WDK; builds TegraGpuCore.lib always,
+#                    and the signed KMDF probe ALWAYS (.sys + .inf + .cat, no firmware inside).
+# NVIDIA firmware is NOT in the repo. It is loaded from OUTSIDE, automatically, at the start of the driver job by
+# .github/actions/fwfetch-import: your private zip (a copy of the tree fwfetch searches on your Switchroot SD, e.g.
+# lib/firmware/tegra21x/*.bin - or just the 9 files at the zip root) behind the secret FW_BUNDLE_URL (older name:
+# NVIDIA_FW_URL), or the workflow input firmware_url. fwfetch stages the 9 files on the runner:
+#   NETB_img.bin fecs.bin gpccs.bin nv_acr_ucode_prod.bin pmu_bl.bin
+#   gpmu_ucode_image.bin gpmu_ucode_desc.bin pmu_sig.bin fecs_sig.bin
+# They are never uploaded or packaged: the drivers read them at run time from System32\drivers\TegraGpu, where fwfetch
+# (--deploy-gpu / --deploy-drivers / start-up task) puts them AFTER installation. A bundle here is optional. This workflow is also called by
+# build-all-drivers.yml for HAC-001.
+# Signing: optional secrets SWOA_PFX_BASE64 / SWOA_PFX_PASSWORD, else a self-signed cert per run.
+name: build-aula-gpu
+on:
+  workflow_call:
+    inputs:
+      firmware_url: { description: "URL of the firmware zip (optional)", required: false, default: "", type: string }
+  workflow_dispatch:
+    inputs:
+      firmware_url: { description: "URL of the firmware zip (optional)", required: false, default: "" }
+  push:
+    paths: ['drivers/t214-hoag/TegraGpu/**', 'drivers/t214-hoag/SwitchFan/**', '.github/workflows/build-aula-gpu.yml']
+
+env:
+  MESA_REV: 0ff52079ca9e9e837ed27eb95a8d239f439a1864
+
+jobs:
+  driver:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: LLVM
+        shell: pwsh
+        run: |
+          choco install llvm --no-progress -y
+          'C:\Program Files\LLVM\bin' | Out-File -Append -Encoding ascii $env:GITHUB_PATH
+      - name: WDK 10.0.19041 (SDK 10.0.19041 is on the image)
+        shell: pwsh
+        run: |
+          $k = "${env:ProgramFiles(x86)}\Windows Kits\10"
+          $inc = "$k\Include\10.0.19041.0"
+          # Install only when missing (same as build-all-drivers.yml); show the exit code.
+          if (-not (Test-Path "$inc\km\wdm.h")) {
+            Invoke-WebRequest 'https://go.microsoft.com/fwlink/?linkid=2128854' -OutFile "$env:RUNNER_TEMP\wdksetup.exe"
+            $p = Start-Process "$env:RUNNER_TEMP\wdksetup.exe" -ArgumentList '/quiet','/norestart' -Wait -PassThru
+            Write-Host "wdksetup exit code: $($p.ExitCode)"
+          }
+          # Required files. spb.h / spbcx.h are located by search, not by a fixed path:
+          # spb.h is not under km\spb\1.0 (that was the failure); build.py passes both shared\ and km\spb\1.0 to /imsvc.
+          foreach ($p in "Include\10.0.19041.0\km\wdm.h","Include\wdf\kmdf\1.15\wdf.h","Lib\wdf\kmdf\arm64\1.15\wdfldr.lib") {
+            if (-not (Test-Path "$k\$p")) { throw "missing $p" } }
+          foreach ($h in 'spb.h','spbcx.h') {
+            $f = Get-ChildItem $inc -Recurse -Filter $h -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $f) { throw "missing $h under $inc" }
+            Write-Host "found $h -> $($f.FullName.Substring($k.Length + 1))"
+          }
+          Get-ChildItem "$k\Include\wdf\kmdf" -Name | ForEach-Object { Write-Host "kmdf include: $_" }
+      - name: Firmware from outside the repository (automatic; skipped when no bundle is configured)
+        id: fw
+        uses: ./.github/actions/fwfetch-import
+        with:
+          profile: aula
+          deploy-gpu: 'true'
+          bundle-url: ${{ inputs.firmware_url || secrets.FW_BUNDLE_URL || secrets.NVIDIA_FW_URL }}
+          bundle-sha256: ${{ secrets.FW_BUNDLE_SHA256 }}
+          auth-header: ${{ secrets.FW_BUNDLE_AUTH_HEADER }}
+      - name: mesa-switch + the nine GPU files
+        shell: pwsh
+        env:
+          GPU_DIR: ${{ steps.fw.outputs.gpu-dir }}
+        run: |
+          git clone https://github.com/danfromtico/mesa-switch.git mesa-switch
+          git -C mesa-switch checkout $env:MESA_REV
+          if ($env:GPU_DIR) {
+            $need = 'NETB_img.bin','fecs.bin','gpccs.bin','nv_acr_ucode_prod.bin','pmu_bl.bin','gpmu_ucode_image.bin','gpmu_ucode_desc.bin','pmu_sig.bin','fecs_sig.bin'
+            $miss = @($need | Where-Object { -not (Test-Path (Join-Path $env:GPU_DIR $_)) })
+            if ($miss.Count -eq 0) { "HAVE_FW=1" | Out-File -Append -Encoding ascii $env:GITHUB_ENV; "GPU_FW=$env:GPU_DIR" | Out-File -Append -Encoding ascii $env:GITHUB_ENV }
+            else { Write-Host "::warning::the imported bundle lacks $($miss -join ', '): continuing (the build does not need firmware)" }
+          }
+      - name: Build
+        shell: pwsh
+        run: |
+          $inc = "${env:ProgramFiles(x86)}\Windows Kits\10\Include\10.0.19041.0"
+          $bargs = @('drivers\t214-hoag\TegraGpu\tools\build.py','--mesa','mesa-switch','--wdk-include',$inc,'--sdk-include',$inc,'--out','build\gpu')
+          $bargs += '--probe','--render'   # the package never contains firmware; it is placed afterwards by fwfetch
+          if ($env:HAVE_FW) { $bargs += @('--gr-firmware',$env:GPU_FW,'--acr-firmware',$env:GPU_FW) }  # only for host-side checks
+          python @bargs
+          if ($LASTEXITCODE -ne 0) { throw 'build failed' }
+      - name: Sign probe and make catalog
+        shell: pwsh
+        env: { PFX_B64: "${{ secrets.SWOA_PFX_BASE64 }}", PFX_PASS: "${{ secrets.SWOA_PFX_PASSWORD }}" }
+        run: |
+          $bin = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+          $v = Get-ChildItem $bin -Directory | ? { $_.Name -match '^10\.' -and (Test-Path "$($_.FullName)\x64\signtool.exe") -and (Test-Path "$($_.FullName)\x86\Inf2Cat.exe") } | sort Name -Desc | select -First 1
+          $sign = "$($v.FullName)\x64\signtool.exe"; $cat = "$($v.FullName)\x86\Inf2Cat.exe"
+          if ($env:PFX_B64) {
+            [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\s.pfx",[Convert]::FromBase64String($env:PFX_B64))
+            $c = Import-PfxCertificate -FilePath "$env:RUNNER_TEMP\s.pfx" -CertStoreLocation Cert:\CurrentUser\My -Password (ConvertTo-SecureString $env:PFX_PASS -AsPlainText -Force)
+          } else {
+            $c = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=SwitchWOA Test Driver Signing' -CertStoreLocation Cert:\CurrentUser\My -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -NotAfter (Get-Date).AddYears(5)
+          }
+          Export-Certificate -Cert $c -FilePath 'build\gpu\kit\SwitchWOA-Test.cer' | Out-Null
+          # probe, render and the SwitchFan bridge package (all in build\gpu\kit\<name>): every .sys / .dll signed
+          foreach ($dir in Get-ChildItem 'build\gpu\kit' -Directory) {
+            $d = $dir.FullName
+            Get-ChildItem $d -File | Where-Object { $_.Extension -in '.sys', '.dll' } | ForEach-Object { & $sign sign /q /fd sha256 /sha1 $c.Thumbprint /s My $_.FullName; if ($LASTEXITCODE) { throw "sign $($_.Name)" } }
+            & $cat "/driver:$d" /os:10_VB_ARM64 /uselocaltime | Out-Null; if ($LASTEXITCODE) { throw "Inf2Cat $($dir.Name)" }
+            Get-ChildItem $d -Filter *.cat | ForEach-Object { & $sign sign /q /fd sha256 /sha1 $c.Thumbprint /s My $_.FullName; if ($LASTEXITCODE) { throw "sign cat $($_.Name)" } }
+          }
+      - name: Lay out build/gpu/agent-gpu (what w64.cmd :gpu copies from agent\gpu; no firmware inside)
+        shell: pwsh
+        run: |
+          $src = 'build\gpu\kit\tegragpurender'
+          $dst = 'build\gpu\agent-gpu'
+          if (-not (Test-Path "$src\tegragpurender.inf")) { throw "no tegragpurender package in $src" }
+          New-Item -ItemType Directory -Force $dst | Out-Null
+          Copy-Item "$src\*" $dst -Recurse -Force
+          foreach ($f in 'tegragpurender.sys','tegragpurender.inf','tegragpurender.cat','tegragpuno3d.dll') {
+            if (-not (Test-Path "$dst\$f")) { throw "agent-gpu is missing $f" }
+          }
+          # never ship firmware or keys
+          Get-ChildItem $dst -Recurse -File | Where-Object { $_.Extension -in '.bin','.pfx','.key' } | ForEach-Object { throw "forbidden file in agent-gpu: $($_.Name)" }
+          Get-ChildItem $dst -File | Select-Object Name,Length | Format-Table | Out-String | Write-Host
+      - name: Verify the signed kit (ARM64 native images, INF/CAT present; not a hardware test)
+        shell: pwsh
+        run: python tools/ci/verify_build.py build/gpu/kit
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Aula-GPU
+          path: |
+            build/gpu/kit
+            build/gpu/agent-gpu
+            build/gpu/TegraGpuCore.lib
