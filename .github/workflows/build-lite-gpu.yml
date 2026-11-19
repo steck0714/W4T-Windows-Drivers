@@ -84,6 +84,7 @@ jobs:
         shell: pwsh
         run: |
           $rev = (Get-Content tools/ci/mesa-switch-woa.rev -Raw).Trim()
+          if (Test-Path external/mesa-switch-woa) { Remove-Item -Recurse -Force external/mesa-switch-woa }   # a copied-in subset must not block the checkout
           git init -q external/mesa-switch-woa
           git -C external/mesa-switch-woa remote add origin https://github.com/ruje0504-2/mesa-switch-woa.git
           git -C external/mesa-switch-woa fetch -q --depth 1 origin $rev
