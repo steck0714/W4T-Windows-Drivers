@@ -1,6 +1,8 @@
 # fwfetch: the Rust tool that reads firmware you may not redistribute from YOUR OWN SD card (read-only).
 #   test     (ubuntu)   clippy with -D warnings, the synthetic-image tests (incl. 210 corrupted-input runs), the proprietary-file guard.
 #   windows  (windows)  fwfetch.exe for x86_64 and ARM64 Windows (a Switch running Windows ARM64 can run the arm64 one).
+#   arm64-run (windows-11-arm) runs the ARM64 fwfetch.exe for real: file-based scan of a synthetic SD image (random data, no NVIDIA
+#              files) + --deploy-gpu with SHA-256 checks, then a read-only physical-disk smoke test (informational).
 #   release  (tag fwfetch-v*)  attaches the .exe files and SHA256SUMS to a GitHub release.
 # UNTESTED on GitHub when written; the code was tested on Linux only. The Windows-specific part is raw-disk opening
 # (\\.\PhysicalDriveN), which no test here exercised.
@@ -26,6 +28,13 @@ jobs:
       - run: cargo clippy --locked --release --manifest-path tools/fwfetch/Cargo.toml -- -D warnings
       - run: python3 tools/fwfetch/tests/run_tests.py
       - run: python3 tools/check_no_proprietary.py
+      - name: Dump the synthetic SD image for the ARM64 run test
+        run: FWFETCH_DUMP_FIXTURE="$RUNNER_TEMP/fixture" python3 tools/fwfetch/tests/run_tests.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fwfetch-fixture
+          path: ${{ runner.temp }}/fixture
+          retention-days: 3
 
   windows:
     needs: test
@@ -47,6 +56,56 @@ jobs:
         with:
           name: fwfetch-${{ matrix.target }}
           path: dist
+
+  arm64-run:
+    needs: [test, windows]
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: fwfetch-aarch64-pc-windows-msvc
+          path: ${{ runner.temp }}\bin
+      - uses: actions/download-artifact@v4
+        with:
+          name: fwfetch-fixture
+          path: ${{ runner.temp }}\fx
+      - name: The exe is ARM64 and starts
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:RUNNER_TEMP 'bin\fwfetch-aarch64-pc-windows-msvc.exe'
+          $b = [IO.File]::ReadAllBytes($exe)
+          $machine = '{0:X4}' -f [BitConverter]::ToUInt16($b, [BitConverter]::ToInt32($b, 0x3C) + 4)
+          Write-Host "PE machine 0x$machine (AA64 = ARM64); runner PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE"
+          if ($machine -ne 'AA64') { throw "not an ARM64 binary (0x$machine)" }
+          & $exe --help 2>&1 | Out-String | Write-Host
+      - name: Scan the synthetic SD image and deploy the GPU files (SHA-256 checked)
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:RUNNER_TEMP 'bin\fwfetch-aarch64-pc-windows-msvc.exe'
+          $fx = Join-Path $env:RUNNER_TEMP 'fx'; $out = Join-Path $env:RUNNER_TEMP 'out'; $gpu = Join-Path $env:RUNNER_TEMP 'gpu'
+          $log = & $exe --manifest "$fx\manifest.json" --profile lite --search-root "$fx\sd" --disk "$fx\disk-gpt.img" --out-dir $out --deploy-gpu $gpu 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $log
+          if ($code -ne 0) { throw "fwfetch exit code $code (expected 0)" }
+          $exp = Get-Content "$fx\expected.json" -Raw | ConvertFrom-Json
+          $bad = 0
+          foreach ($p in $exp.gpu.PSObject.Properties) {
+            $f = Join-Path $gpu $p.Name
+            $h = if (Test-Path $f) { (Get-FileHash $f -Algorithm SHA256).Hash.ToLower() } else { 'missing' }
+            Write-Host ('{0,-5} {1}' -f $(if ($h -eq $p.Value) { 'ok' } else { 'DIFF' }), $p.Name)
+            if ($h -ne $p.Value) { $bad++ }
+          }
+          if ($bad) { throw "$bad of 9 deployed GPU files differ" }
+      - name: Physical-disk smoke test (read-only, informational)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          # The runner is a VM: nothing to find. This only checks that opening \\.\PhysicalDriveN and scanning does not crash.
+          $exe = Join-Path $env:RUNNER_TEMP 'bin\fwfetch-aarch64-pc-windows-msvc.exe'
+          $log = & $exe --profile erista --auto --out-dir (Join-Path $env:RUNNER_TEMP 'auto') 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $log; Write-Host "exit code: $code (0 = all found, 2 = some missing, 1 = error)"
+          if ($log -match 'panicked' -or @(0,1,2) -notcontains $code) { throw 'fwfetch crashed' }
 
   release:
     if: startsWith(github.ref, 'refs/tags/fwfetch-v')
