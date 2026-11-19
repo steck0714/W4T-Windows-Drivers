@@ -22,7 +22,7 @@ on:
     inputs:
       firmware_url: { description: "URL of the firmware zip (optional)", required: false, default: "" }
   push:
-    paths: ['drivers/t214-hoag/TegraGpu/**', 'drivers/t214-hoag/SwitchFan/**', '.github/workflows/build-lite-gpu.yml']
+    paths: ['drivers/t214-hoag/TegraGpu/**', 'drivers/t214-hoag/SwitchFan/**', 'tools/ci/mesa-switch-woa.rev', '.github/workflows/build-lite-gpu.yml']
 
 env:
   MESA_REV: 0ff52079ca9e9e837ed27eb95a8d239f439a1864
@@ -80,21 +80,26 @@ jobs:
             if ($miss.Count -eq 0) { "HAVE_FW=1" | Out-File -Append -Encoding ascii $env:GITHUB_ENV; "GPU_FW=$env:GPU_DIR" | Out-File -Append -Encoding ascii $env:GITHUB_ENV }
             else { Write-Host "::warning::the imported bundle lacks $($miss -join ', '): continuing (the build does not need firmware)" }
           }
+      - name: mesa-switch-woa (pinned by tools/ci/mesa-switch-woa.rev; SwitchFan GPU bridge headers)
+        shell: pwsh
+        run: |
+          $rev = (Get-Content tools/ci/mesa-switch-woa.rev -Raw).Trim()
+          git init -q external/mesa-switch-woa
+          git -C external/mesa-switch-woa remote add origin https://github.com/ruje0504-2/mesa-switch-woa.git
+          git -C external/mesa-switch-woa fetch -q --depth 1 origin $rev
+          git -C external/mesa-switch-woa checkout -q FETCH_HEAD
+          $got = (git -C external/mesa-switch-woa rev-parse HEAD).Trim()
+          if ($got -ne $rev) { throw "mesa-switch-woa is at '$got', expected $rev" }
+          Write-Host "mesa-switch-woa $got"
       - name: Build
         shell: pwsh
         run: |
           $inc = "${env:ProgramFiles(x86)}\Windows Kits\10\Include\10.0.19041.0"
           $bargs = @('drivers\t214-hoag\TegraGpu\tools\build.py','--mesa','mesa-switch','--wdk-include',$inc,'--sdk-include',$inc,'--out','build\gpu')
           $bargs += '--probe','--render'   # the package never contains firmware; it is placed afterwards by fwfetch
-          # SwitchFan's GPU bridge includes t214/gpu_pmic.h, a forward to integration/switch-lite/... of ANOTHER repository.
-          # When that header is not reachable (it is in neither this tree nor mesa-switch) building SwitchFan with SWITCH_LITE_GPU
-          # cannot succeed, so build only the probe + render (--keep-fan). The regular SwitchFan of the HDH-001 driver set is unaffected.
-          $hdr = 'integration/switch-lite/windows/SwitchFan/src/t214/gpu_pmic.h'
-          $dirs = @('mesa-switch/src','mesa-switch/src/nouveau/headers','mesa-switch/src/nouveau/headers/nvidia/classes','drivers/t214-hoag/SwitchFan/src/t214')
-          if (-not ($dirs | Where-Object { Test-Path (Join-Path $_ $hdr) })) {
-            Write-Host "::warning::$hdr is not available: SwitchFan GPU power bridge NOT built (probe + render only, --keep-fan)"
-            $bargs += '--keep-fan'
-          }
+          # SwitchFan (Fan33+) includes its GPU bridge headers by their path in mesa-switch-woa
+          # (integration/switch-lite/windows/SwitchFan/src/t214/*.h); build.py checks the pinned revision and adds the include root.
+          $bargs += '--woa','external/mesa-switch-woa'
           if ($env:HAVE_FW) { $bargs += @('--gr-firmware',$env:GPU_FW,'--acr-firmware',$env:GPU_FW) }  # only for host-side checks
           python @bargs
           if ($LASTEXITCODE -ne 0) { throw 'build failed' }

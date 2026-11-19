@@ -171,6 +171,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: mesa-switch-woa (HDH-001 only; pinned by tools/ci/mesa-switch-woa.rev; SwitchFan GPU bridge headers)
+        if: matrix.model == 'HDH-001'
+        run: |
+          $rev = (Get-Content tools/ci/mesa-switch-woa.rev -Raw).Trim()
+          git init -q external/mesa-switch-woa
+          git -C external/mesa-switch-woa remote add origin https://github.com/ruje0504-2/mesa-switch-woa.git
+          git -C external/mesa-switch-woa fetch -q --depth 1 origin $rev
+          git -C external/mesa-switch-woa checkout -q FETCH_HEAD
+          $got = (git -C external/mesa-switch-woa rev-parse HEAD).Trim()
+          if ($got -ne $rev) { throw "mesa-switch-woa is at '$got', expected $rev" }
+          Write-Host "mesa-switch-woa $got"
+
       - name: Firmware from outside the repository (automatic; skipped when no bundle is configured)
         id: fw
         uses: ./.github/actions/fwfetch-import
