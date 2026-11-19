@@ -13,6 +13,7 @@
 # (--deploy-gpu / --deploy-drivers / start-up task) puts them AFTER installation. A bundle here is optional. This workflow is also called by
 # build-all-drivers.yml for HAC-001.
 # Signing: optional secrets SWOA_PFX_BASE64 / SWOA_PFX_PASSWORD, else a self-signed cert per run.
+# release (ubuntu): only on a manual run of THIS workflow with release_tag set (never when called from build-all-drivers.yml, which has its own release).
 name: build-lite-gpu
 on:
   workflow_call:
@@ -21,6 +22,7 @@ on:
   workflow_dispatch:
     inputs:
       firmware_url: { description: "URL of the firmware zip (optional)", required: false, default: "" }
+      release_tag: { description: "Create a GitHub pre-release with this tag name (e.g. v0.0.1-lite-test) from this run. Empty = no release", required: false, default: "" }
   push:
     paths: ['drivers/t214-hoag/TegraGpu/**', 'drivers/t214-hoag/SwitchFan/**', 'tools/ci/mesa-switch-woa.rev', '.github/workflows/build-lite-gpu.yml']
 
@@ -134,3 +136,33 @@ jobs:
           path: |
             build/gpu/kit
             build/gpu/TegraGpuCore.lib
+
+  release:
+    # Manual run with release_tag only. When this workflow is called from build-all-drivers.yml, inputs.release_tag does not exist (empty),
+    # so this job is skipped there and the all-drivers release stays the only one.
+    if: ${{ !cancelled() && needs.driver.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.release_tag != '' }}
+    needs: driver
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Lite-GPU
+          path: dl
+      - name: "Pre-release with the signed kit zip (no firmware, no .pfx)"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          ZIP="SwitchDrivers-HDH-001-gpu-${TAG}.zip"
+          (cd dl && zip -qr "../$ZIP" kit)
+          sha256sum "$ZIP" > SHA256SUMS.txt
+          FILES=("$ZIP" SHA256SUMS.txt)
+          [ -f dl/kit/SwitchWOA-Test.cer ] && FILES+=(dl/kit/SwitchWOA-Test.cer)
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "$TAG (Switch Lite GPU, test-signed, not verified on a real Switch)" \
+            --notes "TegraGpu probe/render kit for HDH-001, test-signed. No firmware inside: fwfetch loads it afterwards." \
+            "${FILES[@]}"
