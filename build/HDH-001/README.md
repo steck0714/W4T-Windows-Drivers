@@ -1,7 +1,7 @@
 # HDH-001 — Switch Lite（Mariko / Tegra X1+、コードネーム Hoag）
 
 ソース: `drivers/t214-hoag/`。ビルド設定: `tools/ci/drivers-t214-hoag.json`（16 ドライバ）。`build-all-drivers` を `models=HDH-001` で動かすと、
-Windows ランナーでビルド・テスト署名され、`drivers/` に置かれる。**いまは空**（`.sys` 未作成。このリポジトリを作った環境には WDK も Windows も無い）。
+Windows ランナーでビルド・テスト署名され、`drivers/` に置かれる。**リポジトリ内はいまは空**（CI ではビルドできている: 2026-11-19、`build-all-drivers` #21。手動実行で `commit_build` を ON にすると置かれる）。実機は未確認。
 
 ## 設定の根拠
 
