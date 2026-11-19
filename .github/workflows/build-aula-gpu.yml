@@ -3,9 +3,13 @@
 # Lite (drivers/t214-hoag/TegraGpu, ACPI\SWOA0F01). Only the Lite has a physical test of them; nothing says the OLED board, power
 # and ACPI wiring match (drivers/t214-aula/README.md, 'Lite との分離ルール'). The result is a packaging of the same code in the
 # windows-switch agent\gpu layout that w64.cmd (:gpu) installs - experimental, not verified on an OLED console. No host job: the Lite build.py has no --host-only mode here.
-# SwitchFan: NOT built. Its Lite GPU bridge includes t214/gpu_pmic.h, a one-line forward to integration/switch-lite/... of another
-# repository that is not in this tree or in mesa-switch (compile error: file not found), and drivers/t214-aula/README.md forbids
-# the Lite SwitchFan config on the OLED. So only tegragpuprobe + tegragpurender are built (build.py --keep-fan).
+# SwitchFan: NOT built for the OLED, on purpose. drivers/t214-aula/README.md ('Lite との分離ルール') forbids the Lite SwitchFan
+# config (SWOA0402) on the Aula, and the OLED's fan and \Device\SwitchBacklight GPU power bridge are provided by swbatt.sys
+# (drivers/t214-aula/drivers/SwitchBattery, a required driver of tools/ci/drivers-t214-aula.json, built by the HEG-001 driver set).
+# (The Lite SwitchFan itself needs ruje0504-2/mesa-switch-woa headers; build-lite-gpu.yml fetches them, pinned by
+# tools/ci/mesa-switch-woa.rev.) So only tegragpuprobe + tegragpurender are built here (build.py --keep-fan).
+# swbatt implements bridge codes 0x100-0x108 of that ABI, not the EMC-vote / rail-claim codes 0x109-0x10f; tools/check_swbatt_bridge.py
+# checks the values against the pin.
 # Jobs:
 #   driver (windows) clang-cl/lld-link against the WDK; builds TegraGpuCore.lib always,
 #                    and the signed KMDF probe ALWAYS (.sys + .inf + .cat, no firmware inside).

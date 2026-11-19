@@ -95,6 +95,15 @@ jobs:
           git -C mesa-switch checkout -q FETCH_HEAD
       - name: Host tests
         run: MESA_DIR="$PWD/mesa-switch" bash tools/run_host_tests.sh
+      - name: OLED swbatt bridge codes vs the pinned mesa-switch-woa ABI (fails on a value mismatch; unimplemented codes are only listed)
+        run: |
+          rev=$(tr -d '[:space:]' < tools/ci/mesa-switch-woa.rev)
+          git init -q external/mesa-switch-woa
+          git -C external/mesa-switch-woa remote add origin https://github.com/ruje0504-2/mesa-switch-woa.git
+          git -C external/mesa-switch-woa fetch -q --depth 1 origin "$rev"
+          git -C external/mesa-switch-woa checkout -q FETCH_HEAD
+          test "$(git -C external/mesa-switch-woa rev-parse HEAD)" = "$rev"
+          python3 tools/check_swbatt_bridge.py --woa external/mesa-switch-woa
       - name: ABI headers vs ruje's current mesa-switch-woa (informational)
         continue-on-error: true
         run: |
