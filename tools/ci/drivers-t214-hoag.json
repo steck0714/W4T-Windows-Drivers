@@ -4,7 +4,7 @@
   { "name": "tegra210i2c",   "kit": "Switch-Stage3",      "dir": "Tegra210I2c",       "sources": ["src/tegra210i2c.c"],         "inf": "tegra210i2c.inf",  "libs": ["spbcxstubs.lib"],    "defines": ["SWITCH_LITE_TOUCH=1"] },
   { "name": "switchtouch",   "kit": "Switch-Touch",       "dir": "SwitchLiteTouch",   "sources": ["src/switchtouch.c"],         "inf": "switchtouch.inf",  "libs": ["vhfkm.lib", "libcntpr.lib"], "defines": ["SWITCH_LITE_TOUCH=1"] },
   { "name": "switchpwrbtn",  "kit": "Switch-PowerButton", "dir": "SwitchPowerButton", "sources": ["src/switchpwrbtn.c"],        "inf": "switchpwrbtn.inf", "libs": ["vhfkm.lib", "libcntpr.lib"], "defines": ["SWITCH_LITE_TOUCH=1"] },
-  { "name": "switchfan",     "kit": "Switch-Fan",         "dir": "SwitchFan",         "sources": ["src/switchfan.c"],           "inf": "switchfan.inf",    "defines": ["SWITCH_LITE_TOUCH=1"] },
+  { "name": "switchfan",     "kit": "Switch-Fan",         "dir": "SwitchFan",         "sources": ["src/switchfan.c"],           "inf": "switchfan.inf",    "defines": ["SWITCH_LITE_TOUCH=1"], "repo_includes": ["external/mesa-switch-woa/tegra-x1-wddm"] },
   { "name": "switchbattery", "kit": "Switch-Battery",     "dir": "SwitchBattery",     "sources": ["src/switchbattery.c"],       "inf": "switchbattery.inf", "libs": ["battc.lib"],        "defines": ["SWITCH_LITE_TOUCH=1"] },
   { "name": "switchrtc",     "kit": "Switch-Rtc",         "dir": "SwitchRtc",         "sources": ["src/switchrtc.c"],           "inf": "switchrtc.inf",    "defines": ["SWITCH_LITE_TOUCH=1"] },
   { "name": "switchbt",      "kit": "Switch-Bluetooth",   "dir": "SwitchBluetooth",   "sources": ["src/switchbt.c"],            "inf": "switchbt.inf",     "defines": ["SWITCH_LITE_TOUCH=1"] },

@@ -34,6 +34,7 @@
 | GM20B と GM20B_B が同じ HAL であること（Lite 由来の共通コアをそのまま使える根拠）、GR / FIFO / MMU / PMU / ACR の手順 | `nvgpu/gm20b/hal_gm20b.c`、`gr_gm20b.c`、`fifo_gm20b.c`、`mm_gm20b.c`、`pmu_gm20b.c`、`acr_gm20b.c` | 同上 | 同上 |
 | GPU コマンドエンコーダ（ホストテストの検証元） | `src/nouveau/horizon/`（本リポジトリには含めず、CI で取得） | danfromtico/mesa-switch `0ff52079ca9e9e837ed27eb95a8d239f439a1864` | danfromtico、Mesa・NVK 開発者 / MIT |
 | Lite 版 TegraGpu の構造（電源・クロック・計数・巻き戻しのロジック、Windows 側シェル、ACPI リソース構成） | `drivers/t214-hoag/TegraGpu/` | ruje0504-2/Windows-for-Switch-Drivers、ruje0504-2/mesa-switch-woa | ruje0504-2 / ファイルごとの SPDX（電源実装と KMDF probe は GPL-2.0-only） |
+| Lite 版 SwitchFan（ファン・CPU・メモリ(EMC)制御、GPU の PMIC ブリッジ。Fan33 = `DriverVersion` 33） | `drivers/t214-hoag/SwitchFan/`（`drivers/SwitchFan` のコミット `c5ae935`） | ruje0504-2/Windows-for-Switch-Drivers `c5ae935b59c6229db4be23c561d31088503f40e4`。GPU ブリッジの実体 `t214/gpu_pmic.h`・`t214/emc_gpu_vote.h`・`t214/host1x_clock.h` は ruje0504-2/mesa-switch-woa `c77f8a61fd4b627b218fee1db34b654b4e7233a2` の `tegra-x1-wddm/integration/switch-lite/windows/SwitchFan/`（本リポジトリには含めず、CI で取得） | ruje0504-2 ほか / ファイルごとの SPDX（無いファイルは `drivers/t214-hoag/LICENSE` の GPL-2.0。`switchfan.c` は先頭に W4T-CREDIT ブロック） |
 
 **電圧**: 速度別（CVB）の表を上記の出典から取り入れ、チップごとの speedo で計算する（固定値は廃止）。下限 950mV は nouveau の `speedo_to_vmin` の最大値、上限 1150mV は dtsi の `regulator-max-microvolt`。speedo の換算（fuse リビジョン別）は不確定なため、3 通りのうち最小値を使う安全側の扱い。
 
@@ -54,6 +55,7 @@
 - 2026-11-18: OLED(Aula)枠の `swhid` / `swbatt` / `touchread` / `swagentsvc` と INF 3 本を、t210-icosa / t214-hoag と同じ「ドライバごとのフォルダ」(`drivers/t214-aula/drivers/`)へ移動。`.c` の先頭に出典・作者(DanilKhmyrov)のクレジットブロックを追加(`layout.json`・`tools/aula_layout.py` で上流とのバイト一致を検証)（Claude による作業）。
 - OLED(Aula)枠 `drivers/t214-aula/` の新設（windows-switch v0.8.0 のテキスト部分と SHA-256 一覧、`main` のソース一式 `upstream-src/`）、`tools/fwfetch/`（実機からの取り出し・照合ツール。2026-11-18 に Rust で作り直し）と混入検査 `tools/check_no_proprietary.py`（Claude による作業）。
 - `build/`（型番別のビルド済み置き場）、`tools/build/`、`build-fwfetch.yml`、`build-all-drivers.yml` の組み立て・コミット段（Claude による作業。2026-11-18、ユーザー steck0714 の指示）。fwfetch の Rust 依存は `tools/fwfetch/THIRD-PARTY.md`。
+- 2026-11-19: `drivers/t214-hoag/SwitchFan` を、旧版(DriverVersion 13)から ruje0504-2/Windows-for-Switch-Drivers `c5ae935`(DriverVersion 33)へ差し替え。`switchfan.c` の先頭クレジットブロックは新しい出典に更新(旧版にあった CPU 目標 1497.6 MHz の `CPU_TARGET_KHZ` は上流の v33 にも含まれている)。GPU ブリッジ用ヘッダは mesa-switch-woa のコミット固定で CI が取得する（Claude による作業。ユーザー steck0714 の指示）。
 - 統合・整理、HWID/DSDT 静的検査、windows-switch 互換メモ、電源ボタン長押し(HoldSasMs)の移植、Erista GPU の取り込みと GPCPLL ロック検出修正、電源コールバック検査（Claude による作業。ユーザー steck0714 の指示と所有物に基づく）。
 
 - 2026-11-19: ファームウェアを「ビルドに入れず、あとから読み込む」方式に変更。`tools/fwfetch/`(利用者自身の SD からファームウェアを取り出して照合・配置するツール)は、Switchroot(L4T / Android 系)のファームウェア取得の仕組みが元(Switchroot: https://gitlab.com/switchroot 、ミラー https://github.com/switchroot 。単体のリポジトリは無く、どのリポジトリのどのスクリプトかは未特定。ユーザーの申告に基づく)。このリポジトリの Rust 版への書き直しと拡張は steck0714 ([steck0714/W4T-Windows-Drivers](https://github.com/steck0714/W4T-Windows-Drivers))。`fwfetch --deploy-drivers`、GPU プローブ/レンダー INF からのファームウェア同梱の除去、Erista/Lite の GPU ワークフローで `.sys` を常にビルド・署名する変更、起動時タスクの `-DriverDir` 対応を追加(Claude による作業、ユーザー steck0714 の指示)。

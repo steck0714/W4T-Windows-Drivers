@@ -28,10 +28,14 @@ parser.add_argument("--render", action="store_true", help="build the opt-in WDDM
 parser.add_argument("--gr-firmware", type=Path, help="external NVIDIA tegra21x NETB_img.bin/fecs.bin/gpccs.bin directory")
 parser.add_argument("--acr-firmware", type=Path, help="external NVIDIA 32.7.6 ACR/PMU/FECS files")
 parser.add_argument("--keep-fan", action="store_true", help="with --probe, preserve the existing signed SwitchFan package")
+parser.add_argument("--woa", type=Path, help="checkout of ruje0504-2/mesa-switch-woa at WOA_REVISION; the SwitchFan GPU bridge "
+                    "(t214/gpu_pmic.h, emc_gpu_vote.h, host1x_clock.h) is included from its tegra-x1-wddm/ directory")
 parser.add_argument("--windows-tests", action="store_true", help="build the real-WDK paging test executable for ARM64 Windows")
 args = parser.parse_args()
 if args.keep_fan and not args.probe:
     parser.error("--keep-fan requires --probe")
+if args.probe and not args.keep_fan and args.woa is None:
+    parser.error("building SwitchFan with --probe requires --woa (mesa-switch-woa checkout); use --keep-fan to skip SwitchFan")
 gr_names=("NETB_img.bin", "fecs.bin", "gpccs.bin")
 acr_names=("nv_acr_ucode_prod.bin", "pmu_bl.bin", "gpmu_ucode_image.bin",
            "gpmu_ucode_desc.bin", "pmu_sig.bin", "fecs_sig.bin")
@@ -47,6 +51,18 @@ revision = subprocess.check_output(
     ["git", "-C", str(args.mesa), "rev-parse", "HEAD"], text=True).strip()
 if revision != MESA_REVISION:
     parser.error(f"mesa-switch must be at {MESA_REVISION}; got {revision}")
+# mesa-switch-woa holds the SwitchFan GPU bridge headers that drivers/t214-hoag/SwitchFan includes by their repository path
+# (integration/switch-lite/windows/SwitchFan/src/t214/*.h, windows/pmic.h, windows/host1x_clock_abi.h, platform/...). Pinned.
+WOA_REVISION = (root.parents[2] / "tools/ci/mesa-switch-woa.rev").read_text().strip()   # single pin, shared with the workflows
+woa_root = None
+if args.woa is not None:
+    woa_revision = subprocess.check_output(["git", "-C", str(args.woa), "rev-parse", "HEAD"], text=True).strip()
+    if woa_revision != WOA_REVISION:
+        parser.error(f"mesa-switch-woa must be at {WOA_REVISION}; got {woa_revision}")
+    woa_root = args.woa / "tegra-x1-wddm"
+    gate = woa_root / "integration/switch-lite/windows/SwitchFan/src/t214/gpu_pmic.h"
+    if not gate.is_file():
+        parser.error(f"{gate} not found in --woa")
 args.out.mkdir(parents=True, exist_ok=True)
 mesa_src = args.mesa / "src"
 mesa_includes = [mesa_src, mesa_src / "nouveau/headers",
@@ -320,7 +336,8 @@ if args.probe:
         dest = kit / name
         dest.mkdir(parents=True, exist_ok=True)
         obj = args.out / (name + ".obj")
-        subprocess.run([args.clang_cl, *kflags, f"/Fo{obj}", "--", str(source)], check=True)
+        extra_inc = [f"/I{woa_root}"] if name == "switchfan" else []   # first, so its windows/pmic.h is the one SwitchFan sees
+        subprocess.run([args.clang_cl, *extra_inc, *kflags, f"/Fo{obj}", "--", str(source)], check=True)
         libs = [wdf_lib / "wdfdriverentry.lib", wdf_lib / "wdfldr.lib",
                 km_lib / "ntoskrnl.lib", km_lib / "hal.lib", km_lib / "ntstrsafe.lib",
                 km_lib / "bufferoverflowfastfailk.lib"]

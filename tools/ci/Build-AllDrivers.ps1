@@ -79,6 +79,14 @@ function Invoke-One($d, [bool]$relaxed, [string]$log) {
   # the SPB headers live under km\spb\1.0 (harmless for drivers that do not need them); WiFiCx adds its own
   $extra = @('km\spb\1.0') + @($d.includes)
   $p.ExtraIncludes = @($extra | ForEach-Object { Join-Path $inc $_ } | Where-Object { Test-Path $_ })
+  # Include roots inside THIS checkout that CI fills from another repository (e.g. external/mesa-switch-woa, pinned by
+  # tools/ci/mesa-switch-woa.rev). Unlike the WDK paths above, a missing one is an error, never silently skipped.
+  foreach ($r in @($d.repo_includes)) {
+    if (-not $r) { continue }
+    $rp = Join-Path $Root ($r -replace '/', '\')
+    if (-not (Test-Path $rp)) { throw "$($d.name): include path '$r' is missing (the workflow step that fetches mesa-switch-woa did not run)" }
+    $p.ExtraIncludes += $rp
+  }
   if ($NoSign)     { $p.NoSign = $true }
   if ($relaxed)    { $p.NoWarnAsError = $true }
   Start-Transcript -Path $log -Force | Out-Null

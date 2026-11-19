@@ -27,10 +27,12 @@ prefix = r'''
 #include <stdio.h>
 #include <string.h>
 #include <wchar.h>
+#include "fan_profile.h"
 typedef uint32_t ULONG; typedef uint8_t UCHAR; typedef int32_t LONG;
 typedef int32_t NTSTATUS; typedef bool BOOLEAN; typedef void VOID;
 typedef ULONG *PULONG; typedef void *WDFDEVICE; typedef void *WDFTIMER;
 typedef unsigned WDF_POWER_DEVICE_STATE;
+typedef unsigned KIRQL;
 typedef void *PVOID; typedef const int *LPCGUID;
 static const int SwFanDisplayStateGuid=1;
 #define IsEqualGUID(a,b) ((a)==(b))
@@ -54,8 +56,12 @@ typedef enum {PowerActionNone,PowerActionSleep,PowerActionHibernate,
 #define WDF_REL_TIMEOUT_IN_MS(n) (n)
 typedef struct {
  UCHAR *Pwm,*Car,*BacklightPwm; ULONG FanOffset,Duty,DisplayState,LastTemp,BootCpuKhz,Brightness;
- void *Sensor,*Timer,*BacklightLock,*Device;
- BOOLEAN IsLite,Stopping,BacklightReady,CpuConfigured,CpuApplied,TempValid,CpuOverclockEnabled;
+ void *Sensor,*Timer,*BacklightLock,*FanLock,*Device;
+ BOOLEAN IsLite,Stopping,TimerStopping,BacklightReady,CpuConfigured,CpuApplied,TempValid,CpuOverclockEnabled;
+ unsigned TimerLock;
+ ULONG FanProfile,FanTargetPwm,FanProfileFlags;
+ uint64_t FanSampleTime;
+ struct sw_fan_filter FanFilter;
  struct {ULONG CpuKhz;} Config;
  ULONG Failures; LONG Runs;
 } SWFAN_DEVICE,*PSWFAN_DEVICE;
@@ -63,11 +69,24 @@ static PSWFAN_DEVICE SwFanGetDevice(void *d){return d;}
 static PSWFAN_DEVICE SwFanGetTimer(void *d){return d;}
 static ULONG temp=32,sleep_off; static bool sensor_fail,clock_fail;
 static POWER_ACTION action; static char order[64];static unsigned next;
-static bool backlight_locked;static unsigned registry_writes;
+static bool cpu_locked;
+static void SwFanCpuLock(PSWFAN_DEVICE d){(void)d;assert(!cpu_locked);cpu_locked=true;}
+static void SwFanCpuUnlock(PSWFAN_DEVICE d){(void)d;assert(cpu_locked);cpu_locked=false;}
+static bool backlight_locked,fan_locked,timer_locked;static unsigned registry_writes;
+static int backlight_id,fan_id;
+static uint64_t KeQueryInterruptTime(void){return 20000000;}
+static void KeAcquireSpinLock(unsigned *l,KIRQL *i){(void)l;*i=0;assert(!timer_locked);timer_locked=true;}
+static void KeReleaseSpinLock(unsigned *l,KIRQL i){(void)l;(void)i;assert(timer_locked);timer_locked=false;}
 static void event(char c){assert(next<sizeof(order));order[next++]=c;}
 static void SwFanTrace(const wchar_t *n,ULONG v){assert(!backlight_locked);registry_writes++;if(!wcscmp(n,L"SleepFanOff"))sleep_off=v;}
-static void WdfWaitLockAcquire(void *l,void *t){(void)l;(void)t;assert(!backlight_locked);backlight_locked=true;}
-static void WdfWaitLockRelease(void *l){(void)l;assert(backlight_locked);backlight_locked=false;}
+static void WdfWaitLockAcquire(void *l,void *t){
+ (void)t;bool *held=l==&backlight_id?&backlight_locked:&fan_locked;
+ assert(l==&backlight_id||l==&fan_id);assert(!*held);*held=true;
+}
+static void WdfWaitLockRelease(void *l){
+ bool *held=l==&backlight_id?&backlight_locked:&fan_locked;
+ assert(l==&backlight_id||l==&fan_id);assert(*held);*held=false;
+}
 static NTSTATUS SwFanReadReg(void *s,UCHAR reg,UCHAR *v){
  (void)s;assert(reg==0||reg==1);if(sensor_fail)return -1;*v=(UCHAR)temp;return 0;
 }
@@ -89,6 +108,8 @@ tests = r'''
 static ULONG pwm;
 static void init(PSWFAN_DEVICE d){
  memset(d,0,sizeof(*d));d->Pwm=(UCHAR*)&pwm;d->Device=d;
+ d->BacklightLock=&backlight_id;d->FanLock=&fan_id;d->FanProfile=SwFanProfileHandheld;
+ assert(!backlight_locked&&!fan_locked&&!timer_locked&&!cpu_locked);
  d->IsLite=d->BacklightReady=d->CpuConfigured=d->CpuOverclockEnabled=true;d->CpuApplied=true;
  d->Config.CpuKhz=LITE_CPU_KHZ;d->BootCpuKhz=998400;d->DisplayState=1;d->Duty=51;
  temp=32;sensor_fail=clock_fail=false;action=PowerActionNone;sleep_off=0;next=0;
@@ -97,7 +118,7 @@ int main(void){
  SWFAN_DEVICE d;
  /* Earlier active cooling, reaching full PWM at 45 C. Exercise both
     threshold edges and hysteresis through the actual timer callback. */
- init(&d);d.CpuOverclockEnabled=false;d.CpuApplied=false;d.Duty=0;
+ init(&d);d.IsLite=false;d.CpuOverclockEnabled=false;d.CpuApplied=false;d.Duty=0;
  temp=34;SwFanEvtTimer(&d);assert(d.Duty==0);
  next=0;temp=35;SwFanEvtTimer(&d);assert(d.Duty==76);
  next=0;temp=33;SwFanEvtTimer(&d);assert(d.Duty==76);
@@ -109,6 +130,16 @@ int main(void){
   assert(pwm==(PWM_CSR_EN|((PWM_DUTY_MAX-duties[i])<<16)));
   if(i){next=0;temp=thresholds[i]-1;SwFanEvtTimer(&d);assert(d.Duty==duties[i-1]);}
  }
+ /* Lite uses the captured profiles, while the earlier Erista curve above
+    stays independent. Use known table knots through the real timer callback. */
+ const ULONG profile_temp[]={53,58,60},profile_duty[]={142,189,236};
+ for(unsigned i=0;i<3;i++){
+  init(&d);d.CpuOverclockEnabled=false;d.CpuApplied=false;temp=profile_temp[i];
+  SwFanEvtTimer(&d);assert(d.Duty==profile_duty[i]);
+  assert(d.FanProfileFlags==SWFAN_PROFILE_VALID&&!fan_locked);
+ }
+ init(&d);d.CpuOverclockEnabled=false;d.CpuApplied=false;temp=32;SwFanEvtTimer(&d);
+ next=0;temp=80;SwFanEvtTimer(&d);assert(d.Duty==236&&(d.FanProfileFlags&SWFAN_PROFILE_FAILSAFE));
  init(&d);SwFanEvtTimer(&d);assert(d.Duty==51&&d.CpuApplied&&order[0]=='F'&&order[1]=='O');
  /* Drop CPU overclock before a cool screen-off session stops the fan. */
  init(&d);d.DisplayState=0;SwFanEvtTimer(&d);
@@ -117,7 +148,7 @@ int main(void){
  d.DisplayState=1;next=0;SwFanEvtTimer(&d);
  assert(d.Duty==51&&d.CpuApplied&&order[0]=='F'&&order[1]=='O');
  /* Screen off is not proof that heat production stopped. */
- init(&d);d.DisplayState=0;temp=55;SwFanEvtTimer(&d);assert(d.Duty==236&&!d.CpuApplied);
+ init(&d);d.DisplayState=0;temp=60;SwFanEvtTimer(&d);assert(d.Duty==236&&!d.CpuApplied);
  init(&d);d.DisplayState=0;clock_fail=true;SwFanEvtTimer(&d);assert(d.Duty==51&&d.CpuApplied);
  init(&d);d.DisplayState=0;d.CpuConfigured=false;SwFanEvtTimer(&d);assert(d.Duty==51);
  init(&d);d.DisplayState=2;SwFanEvtTimer(&d);assert(d.Duty==51&&d.CpuApplied);
@@ -126,12 +157,13 @@ int main(void){
  init(&d);d.CpuOverclockEnabled=false;d.CpuApplied=false;
  SwFanEvtTimer(&d);assert(!d.CpuApplied&&d.Duty==0&&d.TempValid);
  d.DisplayState=0;next=0;SwFanEvtTimer(&d);assert(!d.CpuApplied&&d.Duty==0);
- d.DisplayState=1;next=0;temp=55;SwFanEvtTimer(&d);assert(!d.CpuApplied&&d.Duty==236);
+ d.DisplayState=1;next=0;temp=80;SwFanEvtTimer(&d);assert(!d.CpuApplied&&d.Duty==236);
  init(&d);d.CpuOverclockEnabled=false;d.CpuApplied=false;d.CpuConfigured=false;
  SwFanEvtTimer(&d);assert(d.Duty==51); /* Unconfirmed clock retains cooling. */
  /* A failed sensor immediately restarts an already stopped fan. */
  init(&d);d.DisplayState=0;d.Duty=0;sensor_fail=true;SwFanEvtTimer(&d);
- assert(d.Duty==153&&!d.TempValid&&!d.CpuApplied&&d.Failures==1);
+ assert(d.Duty==236&&!d.TempValid&&!d.CpuApplied&&d.Failures==1);
+ assert(d.FanProfileFlags==SWFAN_PROFILE_FAILSAFE&&!d.FanFilter.initialized);
  /* Existing Erista behavior and shutdown/removal cooling stay intact. */
  init(&d);d.IsLite=false;d.DisplayState=0;SwFanEvtTimer(&d);assert(d.CpuApplied);
  for(action=PowerActionNone;action<=PowerActionShutdownReset;action++){
@@ -164,5 +196,6 @@ with tempfile.TemporaryDirectory(prefix='switchfan-test-') as tmp:
     backlight = (Path(__file__).resolve().parents[1] / 'src/backlight.h').read_text()
     c.write_text(prefix + backlight + '\n'.join(function(n) for n in names) + tests)
     subprocess.run([os.environ.get('CC', 'clang'), '-std=c11', '-Wall', '-Wextra', '-Werror',
+                    '-I', str(Path(__file__).resolve().parents[1] / 'src'),
                     '-fsanitize=address,undefined', str(c), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True)

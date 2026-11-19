@@ -1,6 +1,28 @@
-# Switch Lite fan control
+# Switch Lite fan, CPU and memory control
 
-Current version **1.0.0.13** lowers the Lite runtime CPU target to **1497600 kHz**
+**Fan33/Core7/Battery14 is installed and accepted by the owner after manual testing.**
+Fan33 adds Noble ACTMON watermark interrupts and the actual Lite CPU→EMC
+bandwidth-floor table. Native readiness confirmed handled IRQs, completed EMC
+transitions and zero EMC/ACTMON/QoS errors. Workload duration and exhaustive
+frequency coverage were not reported; no such stress acceptance is claimed.
+[Current profiles, tool behavior and acceptance table](../../docs/hdh001/dvfs-tray.md).
+
+| Function | Current behavior |
+|---|---|
+| CPU/GPU modes | Seven captured Noble profiles; real DFLL/GPCCLK readbacks, thermal bounds and failed-transition handling |
+| RAM | Installed Fan33: IRQ demand + CPU/display floors,204MHz minimum, BPMP-trained204/1331.2/1600/2500MHz points |
+| Fan | Independent Console / Handheld / Cool; first-use default Handheld; app restores last confirmed selection |
+| Thermal input | Maximum TMP451 SoC/board temperature; continuous smoothing; retained CPU cooling floor and full PWM on sensor loss / raw80°C emergency |
+| Persistence | Power and fan selections are independently saved after confirmation; normal reboot/logon restores them |
+
+The new curve data is from the same-machine Noble DT, with Linux continuous
+thermal-governor math adapted under its original GPL notices. Linux's skin
+estimator is not ported; Windows temperature input and protection floors differ.
+PWM is not measured fan RPM. Existing version13 evidence below is historical.
+
+## Historical version13 evidence
+
+Historical version **1.0.0.13** lowers the Lite runtime CPU target to **1497600 kHz**
 (**1497.6 MHz**), as requested by the owner. `CpuRequestedKhz` reports
 that target; the new `CpuHandoffKhz` retains the firmware's original 1996800-kHz
 request. The firmware handoff format and RAM settings are unchanged. The driver
@@ -43,7 +65,7 @@ Host controls covering actual fan callbacks and T214 clock ordering pass; a
 physical temperature sweep across every threshold has not been performed.
 
 The optional GPU PMIC bridge is maintained only in
-[mesa-switch-woa](https://github.com/ruje0504-2/mesa-switch-woa/tree/main/tegra-x1-wddm/integration/switch-lite/windows/SwitchFan).
+[mesa-switch-woa](https://github.com/ruje0504-2/mesa-switch-woa/tree/tgd3d-vulkan/tegra-x1-wddm/integration/switch-lite/windows/SwitchFan).
 The local `src/t214/gpu_pmic.h` forwards to that implementation. Builds defining
 `SWITCH_LITE_GPU` must add `mesa-switch-woa/tegra-x1-wddm` to the include path;
 GPU driver implementation and test records belong in that main repository.
