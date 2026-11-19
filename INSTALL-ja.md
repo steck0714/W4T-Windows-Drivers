@@ -18,7 +18,7 @@
 ## 3. external/ の扱い
 - `.gitignore` に `external/` を足したので、そのままでは git に入りません。コミットに含めたいときは `git add -f external/`。
 - CI(build-all-drivers.yml / build-lite-gpu.yml)は、同じ場所 `external/mesa-switch-woa` に、`tools/ci/mesa-switch-woa.rev` のコミットを自分で取得します。
-  CI だけで使うなら、この `external/` は入れなくて大丈夫です(入れても CI が作り直します)。
+  CI だけで使うなら、この `external/` は入れなくて大丈夫です。入れてあっても、CI は取得の前にこのフォルダを削除して、固定コミットの全体を取り直します(このため、中身は CI の結果に影響しません)。
 - 手元(オフライン)で作るとき:
   - `python drivers/t214-hoag/TegraGpu/tools/build.py ... --probe --woa external/mesa-switch-woa`
     (`--woa` は git のチェックアウトで、コミットの一致を確認します。抜き出し版では通りません。フルの取得を使ってください)
