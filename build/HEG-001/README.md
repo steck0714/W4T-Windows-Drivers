@@ -1,8 +1,8 @@
 # HEG-001 — Switch 有機EL（Mariko / Tegra X1+、コードネーム Aula）
 
 **既定では、他の型番(HAC-001 / HDH-001)と同じ CI 方式でソースからビルドする**(`.github/workflows/build-all-drivers.yml`、Windows ランナー + WDK + clang-cl、
-`tools/ci/drivers-t214-aula.json`)。出力は `drivers/agent/`(windows-switch v0.8.0 の `agent\` と同じ並び)。**このリポジトリを作った環境では WDK も Windows も実機も無く、
-CI は未実行。v0.8.0 のバイナリとバイト一致もしない。** 動作報告があるのは windows-switch v0.8.0 のビルド済み一式だけで、報告は**配布者 1 人・1 台**(上流のリリースノート)。こちらでは再確認していない。
+`tools/ci/drivers-t214-aula.json`)。出力は `drivers/agent/`(windows-switch v0.8.0 の `agent\` と同じ並び)。**CI のビルドは成功している（2026-11-19、`build-all-drivers` #21）。実機では未確認で、
+v0.8.0 のバイナリとバイト一致もしない。** 動作報告があるのは windows-switch v0.8.0 のビルド済み一式だけで、報告は**配布者 1 人・1 台**(上流のリリースノート)。こちらでは再確認していない。
 
 | 出力 | 元 | 備考 |
 |---|---|---|
