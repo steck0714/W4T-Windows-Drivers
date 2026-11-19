@@ -3,12 +3,19 @@
 #   windows  (windows)  fwfetch.exe for x86_64 and ARM64 Windows (a Switch running Windows ARM64 can run the arm64 one).
 #   arm64-run (windows-11-arm) runs the ARM64 fwfetch.exe for real: file-based scan of a synthetic SD image (random data, no NVIDIA
 #              files) + --deploy-gpu with SHA-256 checks, then a read-only physical-disk smoke test (informational).
-#   release  (tag fwfetch-v*)  attaches the .exe files and SHA256SUMS to a GitHub release.
+#   release  (tag fwfetch-v* pushed, OR a manual run with release_tag filled in)  attaches the .exe files and SHA256SUMS to a
+#              GitHub release. Plain branch pushes (main/master/test) never release: the job is skipped on purpose.
 # UNTESTED on GitHub when written; the code was tested on Linux only. The Windows-specific part is raw-disk opening
 # (\\.\PhysicalDriveN), which no test here exercised.
 name: build-fwfetch
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional. A tag like fwfetch-v1.0.0 - also publishes a pre-release from the selected branch (created if the tag does not exist)'
+        required: false
+        default: ''
+        type: string
   push:
     branches: [main, master, test]
     tags: ['fwfetch-v*']
@@ -109,7 +116,7 @@ jobs:
           exit 0  # informational step: do not let fwfetch's exit code 2 (nothing found on a VM) become the step result
 
   release:
-    if: startsWith(github.ref, 'refs/tags/fwfetch-v')
+    if: startsWith(github.ref, 'refs/tags/fwfetch-v') || startsWith(github.event.inputs.release_tag, 'fwfetch-v')
     needs: windows
     runs-on: ubuntu-24.04
     permissions:
@@ -121,10 +128,18 @@ jobs:
           merge-multiple: true
       - env:
           GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ github.event.inputs.release_tag }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
           set -e
+          if [ "$REF_TYPE" = "tag" ]; then TAG="$GITHUB_REF_NAME"; else TAG="$INPUT_TAG"; fi
+          case "$TAG" in fwfetch-v*) ;; *) echo "bad tag: $TAG" >&2; exit 1 ;; esac
           cat dl/SHA256SUMS-*.txt > dl/SHA256SUMS.txt
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --prerelease \
-            --title "$GITHUB_REF_NAME (not verified on a real console)" \
-            --notes "fwfetch: reads firmware from your own SD card, read-only. Contains no firmware. See tools/fwfetch/README-ja.md." \
-            dl/fwfetch-*.exe dl/SHA256SUMS.txt
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dl/fwfetch-*.exe dl/SHA256SUMS.txt
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+              --title "$TAG (not verified on a real console)" \
+              --notes "fwfetch: reads firmware from your own SD card, read-only. Contains no firmware. See tools/fwfetch/README-ja.md." \
+              dl/fwfetch-*.exe dl/SHA256SUMS.txt
+          fi
