@@ -1,0 +1,341 @@
+{
+ "schema": 1,
+ "about": "Files this project must NOT redistribute. They are taken from the user's own device/SD card (Switchroot install) and staged outside the repository. 'sha256' / 'size' are only filled in where a published value exists (windows-switch v0.8.0 ADD_THESE_FILES.txt / PUT_*_HERE.txt); everything else is trust-on-first-use and is marked unverified in the report. 'layout' says how sure we are about WHERE the file sits: documented = named by an upstream document, guess = a plausible path that has not been checked on a real image (the hash check rejects wrong guesses where a hash exists).",
+ "profiles": {
+  "aula": [
+   "bl31",
+   "xusb_t210b01",
+   "bcm4356a3_fw",
+   "bcm4356a3_txt",
+   "bcm4356a3_hcd"
+  ],
+  "lite": [
+   "bl31",
+   "xusb_t210b01",
+   "bcm4356a3_fw",
+   "bcm4356a3_txt",
+   "bcm4356a3_hcd",
+   "gpu_NETB_img",
+   "gpu_fecs",
+   "gpu_gpccs",
+   "gpu_nv_acr_ucode_prod",
+   "gpu_pmu_bl",
+   "gpu_gpmu_ucode_image",
+   "gpu_gpmu_ucode_desc",
+   "gpu_pmu_sig",
+   "gpu_fecs_sig"
+  ],
+  "erista": [
+   "bl31",
+   "xusb_t210",
+   "sc7entry",
+   "sc7exit",
+   "bcm4356a3_fw",
+   "bcm4356a3_txt",
+   "bcm4356a3_hcd",
+   "gpu_NETB_img",
+   "gpu_fecs",
+   "gpu_gpccs",
+   "gpu_nv_acr_ucode_prod",
+   "gpu_pmu_bl",
+   "gpu_gpmu_ucode_image",
+   "gpu_gpmu_ucode_desc",
+   "gpu_pmu_sig",
+   "gpu_fecs_sig"
+  ]
+ },
+ "files": [
+  {
+   "id": "bl31",
+   "what": "ARM Trusted Firmware build that Hekate L4T entries use (Switchroot)",
+   "owner": "Switchroot build of ARM Trusted Firmware; not redistributed by windows-switch",
+   "layout": "documented",
+   "deploy": {
+    "windows-switch": [
+     "wp11/bl31.bin",
+     "wp64/bl31.bin"
+    ]
+   },
+   "sources": [
+    {
+     "type": "fs",
+     "paths": [
+      "switchroot/ubuntu/bl31.bin",
+      "switchroot/*/bl31.bin"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "xusb_t210b01",
+   "what": "NVIDIA XUSB Falcon firmware for Tegra X1+ (T210B01)",
+   "owner": "NVIDIA CORPORATION (NVIDIA Software License; Windows use not granted)",
+   "layout": "documented",
+   "expect": {
+    "size": 122368
+   },
+   "deploy": {
+    "windows-switch": [
+     "tegra210b01_xusb_firmware"
+    ]
+   },
+   "sources": [
+    {
+     "type": "initramfs",
+     "scan": [
+      "switchroot/*/*"
+     ],
+     "member": "lib/firmware/tegra210b01_xusb_firmware"
+    },
+    {
+     "type": "ext4",
+     "paths": [
+      "lib/firmware/tegra210b01_xusb_firmware"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "bcm4356a3_fw",
+   "what": "Broadcom BCM4356 A3 Wi-Fi firmware (Switchroot)",
+   "owner": "Broadcom",
+   "layout": "documented (as .ihex in the kernel tree); guess (installed name)",
+   "expect": {
+    "size": 583641,
+    "sha256": "32a16e7b4391ccd248d3677c17cde940f398aaaaa6163571fcbff2bbee026ade"
+   },
+   "deploy": {
+    "windows-switch": [
+     "agent/wifi/brcmfmac4356A3-pcie.bin"
+    ],
+    "drivers": [
+     "SwitchWOA/brcmfmac4356A3-pcie.bin",
+     "switchwifi/brcmfmac4356-pcie.bin"
+    ]
+   },
+   "sources": [
+    {
+     "type": "ext4",
+     "paths": [
+      "lib/firmware/brcm/brcmfmac4356A3-pcie.bin",
+      "lib/firmware/brcm/brcmfmac4356-pcie.bin"
+     ],
+     "search_dir": "lib/firmware/brcm"
+    },
+    {
+     "type": "fs",
+     "paths": [
+      "lib/firmware/brcm/brcmfmac4356A3-pcie.bin",
+      "lib/firmware/brcm/brcmfmac4356-pcie.bin",
+      "brcm/brcmfmac4356A3-pcie.bin"
+     ]
+    },
+    {
+     "type": "ihex",
+     "paths": [
+      "firmware/brcm/brcmfmac4356A3-pcie.bin.ihex",
+      "brcm/brcmfmac4356A3-pcie.bin.ihex"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "bcm4356a3_txt",
+   "what": "Board (NVRAM) file for the Switch's BCM4356; the macaddr= line is replaced with a random locally administered address",
+   "owner": "Broadcom / board data from Switchroot nx-firmware (exact owner not verified)",
+   "layout": "guess",
+   "postprocess": "random_macaddr",
+   "deploy": {
+    "windows-switch": [
+     "agent/wifi/brcmfmac4356A3-pcie.txt"
+    ],
+    "drivers": [
+     "SwitchWOA/brcmfmac4356A3-pcie.txt",
+     "switchwifi/brcmfmac4356-pcie.txt"
+    ]
+   },
+   "sources": [
+    {
+     "type": "ext4",
+     "paths": [
+      "lib/firmware/brcm/brcmfmac4356A3-pcie.txt",
+      "lib/firmware/brcm/brcmfmac4356-pcie.txt"
+     ]
+    },
+    {
+     "type": "fs",
+     "paths": [
+      "lib/firmware/brcm/brcmfmac4356A3-pcie.txt",
+      "lib/firmware/brcm/brcmfmac4356-pcie.txt",
+      "brcm/brcmfmac4356A3-pcie.txt"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "bcm4356a3_hcd",
+   "what": "Broadcom BCM4356 A3 Bluetooth patch (Switchroot)",
+   "owner": "Broadcom",
+   "layout": "documented (as .ihex in the kernel tree; kernel asks for lib/firmware/brcm/BCM4356A3.hcd)",
+   "expect": {
+    "size": 39008,
+    "sha256": "761a2c26f2bce5b0c4ed6efa8a3dc07e0ccea1dcd284e82cbfdb421907d27cab"
+   },
+   "deploy": {
+    "windows-switch": [
+     "agent/bt/BCM4356A3.hcd"
+    ],
+    "drivers": [
+     "SwitchWOA/BCM4356A3.hcd"
+    ]
+   },
+   "sources": [
+    {
+     "type": "ext4",
+     "paths": [
+      "lib/firmware/brcm/BCM4356A3.hcd"
+     ],
+     "search_dir": "lib/firmware/brcm"
+    },
+    {
+     "type": "fs",
+     "paths": [
+      "lib/firmware/brcm/BCM4356A3.hcd",
+      "brcm/BCM4356A3.hcd"
+     ]
+    },
+    {
+     "type": "ihex",
+     "paths": [
+      "firmware/brcm/BCM4356A3.hcd.ihex",
+      "brcm/BCM4356A3.hcd.ihex"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "gpu_NETB_img",
+   "gpu": "NETB_img.bin"
+  },
+  {
+   "id": "gpu_fecs",
+   "gpu": "fecs.bin"
+  },
+  {
+   "id": "gpu_gpccs",
+   "gpu": "gpccs.bin"
+  },
+  {
+   "id": "gpu_nv_acr_ucode_prod",
+   "gpu": "nv_acr_ucode_prod.bin"
+  },
+  {
+   "id": "gpu_pmu_bl",
+   "gpu": "pmu_bl.bin"
+  },
+  {
+   "id": "gpu_gpmu_ucode_image",
+   "gpu": "gpmu_ucode_image.bin"
+  },
+  {
+   "id": "gpu_gpmu_ucode_desc",
+   "gpu": "gpmu_ucode_desc.bin"
+  },
+  {
+   "id": "gpu_pmu_sig",
+   "gpu": "pmu_sig.bin"
+  },
+  {
+   "id": "gpu_fecs_sig",
+   "gpu": "fecs_sig.bin"
+  },
+  {
+   "id": "xusb_t210",
+   "what": "NVIDIA XUSB Falcon firmware for Tegra X1 (T210 / Erista)",
+   "owner": "NVIDIA CORPORATION (NVIDIA Software License; Windows use not granted)",
+   "layout": "guess (L4T 4.9 name tegra21x_xusb_firmware; mainline name nvidia/tegra210/xusb.bin)",
+   "deploy": {
+    "windows-switch": [
+     "tegra21x_xusb_firmware"
+    ]
+   },
+   "sources": [
+    {
+     "type": "initramfs",
+     "scan": [
+      "switchroot/*/*"
+     ],
+     "member": "lib/firmware/tegra21x_xusb_firmware"
+    },
+    {
+     "type": "ext4",
+     "paths": [
+      "lib/firmware/tegra21x_xusb_firmware",
+      "lib/firmware/nvidia/tegra210/xusb.bin"
+     ]
+    },
+    {
+     "type": "fs",
+     "paths": [
+      "lib/firmware/tegra21x_xusb_firmware",
+      "tegra21x_xusb_firmware"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "sc7entry",
+   "what": "SC7 (system suspend) entry firmware that hekate loads and hands to bl31 (sc7entry_fw_base)",
+   "owner": "NVIDIA CORPORATION (shipped in the hekate release package under bootloader/sys/l4t/; not redistributed here)",
+   "layout": "documented (hekate bootloader/l4t/l4t.c: sd_path=\"bootloader/sys/l4t/\")",
+   "deploy": {
+    "windows-switch": [
+     "bootloader/sys/l4t/sc7entry.bin"
+    ]
+   },
+   "sources": [
+    {
+     "type": "fs",
+     "paths": [
+      "bootloader/sys/l4t/sc7entry.bin"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "sc7exit",
+   "what": "SC7 (system suspend) exit / warmboot firmware; on Erista hekate patches the console RSA modulus into it at boot (pkg1_warmboot_rsa_mod)",
+   "owner": "NVIDIA CORPORATION (shipped in the hekate release package under bootloader/sys/l4t/; not redistributed here)",
+   "layout": "documented (hekate bootloader/l4t/l4t.c: sd_path=\"bootloader/sys/l4t/\")",
+   "deploy": {
+    "windows-switch": [
+     "bootloader/sys/l4t/sc7exit.bin"
+    ]
+   },
+   "sources": [
+    {
+     "type": "fs",
+     "paths": [
+      "bootloader/sys/l4t/sc7exit.bin"
+     ]
+    }
+   ]
+  }
+ ],
+ "gpu_template": {
+  "what": "NVIDIA GM20B (tegra21x) GPU firmware, L4T 32.7.6 set expected by TegraGpu",
+  "owner": "NVIDIA CORPORATION (NVIDIA Software License; Windows use not granted)",
+  "layout": "guess",
+  "dirs": [
+   "lib/firmware/tegra21x",
+   "lib/firmware/gm20b",
+   "lib/firmware/nvidia/gm20b",
+   "lib/firmware/nvidia/tegra210"
+  ],
+  "deploy_gpu": true
+ },
+ "not_needed": [
+  "No Nintendo-owned file (Horizon system firmware, keys, game data) is read by this tool. Nothing in the current driver set was found to require one. Per-console data such as Joy-Con pairing is not handled here.",
+  "bpmpfw.bin / bpmpfw_b01.bin / mtc_tbl_b01.bin: hekate l4t.c says BPMP-FW is not used on T210 (Erista) and sc7entry is used instead; the b01 files are Mariko-only."
+ ]
+}
