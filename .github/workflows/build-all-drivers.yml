@@ -12,7 +12,7 @@
 #                       keep only files whose size and SHA-256 match drivers/t214-aula/manifest/, tools/build/fill_heg001.py).
 #   testsign every model: build/<id>/test-signing/ (SwitchWOA-Test.cer of THIS run + Install-TestSigning.cmd + Stage0/Set-SwitchTestSigning scripts);
 #                       models without a driver set get the scripts only (job testsign-skipped).
-#   gpu      (windows)  HAC-001 only: build-erista-gpu.yml (TegraGpu core, and the probe driver when NVIDIA firmware was imported).
+#   gpu      (windows)  HAC-001 only: build-erista-gpu.yml (TegraGpu core + signed probe driver; no firmware inside, fwfetch loads it afterwards).
 #   commit-build        manual run with commit_build = true: puts the finished sets into build/<id>/ on this branch.
 #   release  (tag v*)   attaches one kit zip per model + SHA256SUMS + the public .cer to a GitHub *pre-release*.
 #
@@ -298,7 +298,7 @@ jobs:
             Set-Content "$d/README.txt" @(
               'fwfetch reads firmware that must not be redistributed from YOUR OWN SD card (read-only, no network).',
               'On the Switch, in an administrator PowerShell, in this folder:',
-              '  .\Install-FwFetchStartup.ps1 -Profile ${{ matrix.fw_profile }}   (add -GpuDir <driver folder> when the GPU driver is used)',
+              '  .\Install-FwFetchStartup.ps1 -Profile ${{ matrix.fw_profile }}   -GpuDir C:\Windows\System32\drivers\TegraGpu -DriverDir C:\Windows\System32\drivers   (the drivers contain NO firmware: this loads it afterwards from your SD card)',
               'From then on fwfetch runs 1 minute after every Windows start until it has found everything. Log: C:\ProgramData\W4T\logs\fwfetch-startup.log',
               'Remove: .\Install-FwFetchStartup.ps1 -Remove') -Encoding ascii
           }
@@ -387,7 +387,7 @@ jobs:
           mkdir -p build/HEG-001/fwfetch
           cp tools/fwfetch/startup/*.ps1 build/HEG-001/fwfetch/
           echo 'Put fwfetch-aarch64-pc-windows-msvc.exe (from the build-fwfetch workflow) here as fwfetch.exe, then run .\Install-FwFetchStartup.ps1 -Profile aula in an administrator PowerShell on the Switch.' > build/HEG-001/fwfetch/README.txt
-      - name: Test-signing scripts (no .cer: the upstream binaries are signed by the upstream author)
+      - name: "Test-signing scripts (no .cer, the upstream binaries are signed by the upstream author)"
         run: python3 tools/build/make_testsign_kit.py --model HEG-001
       - uses: actions/upload-artifact@v4
         with:

@@ -2,14 +2,15 @@
 # Derived from build-erista-gpu.yml. No host job: the Lite build.py has no --host-only mode here.
 # Jobs:
 #   driver (windows) clang-cl/lld-link against the WDK; builds TegraGpuCore.lib always,
-#                    and the signed KMDF probe when NVIDIA firmware is supplied.
+#                    and the signed KMDF probe ALWAYS (.sys + .inf + .cat, no firmware inside).
 # NVIDIA firmware is NOT in the repo. It is loaded from OUTSIDE, automatically, at the start of the driver job by
 # .github/actions/fwfetch-import: your private zip (a copy of the tree fwfetch searches on your Switchroot SD, e.g.
 # lib/firmware/tegra21x/*.bin - or just the 9 files at the zip root) behind the secret FW_BUNDLE_URL (older name:
 # NVIDIA_FW_URL), or the workflow input firmware_url. fwfetch stages the 9 files on the runner:
 #   NETB_img.bin fecs.bin gpccs.bin nv_acr_ucode_prod.bin pmu_bl.bin
 #   gpmu_ucode_image.bin gpmu_ucode_desc.bin pmu_sig.bin fecs_sig.bin
-# They are never uploaded. Without a bundle only TegraGpuCore.lib is built. This workflow is also called by
+# They are never uploaded or packaged: the drivers read them at run time from System32\drivers\TegraGpu, where fwfetch
+# (--deploy-gpu / --deploy-drivers / start-up task) puts them AFTER installation. A bundle here is optional. This workflow is also called by
 # build-all-drivers.yml for HAC-001.
 # Signing: optional secrets SWOA_PFX_BASE64 / SWOA_PFX_PASSWORD, else a self-signed cert per run.
 name: build-lite-gpu
@@ -77,18 +78,18 @@ jobs:
             $need = 'NETB_img.bin','fecs.bin','gpccs.bin','nv_acr_ucode_prod.bin','pmu_bl.bin','gpmu_ucode_image.bin','gpmu_ucode_desc.bin','pmu_sig.bin','fecs_sig.bin'
             $miss = @($need | Where-Object { -not (Test-Path (Join-Path $env:GPU_DIR $_)) })
             if ($miss.Count -eq 0) { "HAVE_FW=1" | Out-File -Append -Encoding ascii $env:GITHUB_ENV; "GPU_FW=$env:GPU_DIR" | Out-File -Append -Encoding ascii $env:GITHUB_ENV }
-            else { Write-Host "::warning::the imported bundle lacks $($miss -join ', '): building without the probe driver" }
+            else { Write-Host "::warning::the imported bundle lacks $($miss -join ', '): continuing (the build does not need firmware)" }
           }
       - name: Build
         shell: pwsh
         run: |
           $inc = "${env:ProgramFiles(x86)}\Windows Kits\10\Include\10.0.19041.0"
           $bargs = @('drivers\t214-hoag\TegraGpu\tools\build.py','--mesa','mesa-switch','--wdk-include',$inc,'--sdk-include',$inc,'--out','build\gpu')
-          if ($env:HAVE_FW) { $bargs += @('--probe','--gr-firmware',$env:GPU_FW,'--acr-firmware',$env:GPU_FW) }
+          $bargs += '--probe','--render'   # the package never contains firmware; it is placed afterwards by fwfetch
+          if ($env:HAVE_FW) { $bargs += @('--gr-firmware',$env:GPU_FW,'--acr-firmware',$env:GPU_FW) }  # only for host-side checks
           python @bargs
           if ($LASTEXITCODE -ne 0) { throw 'build failed' }
       - name: Sign probe and make catalog
-        if: env.HAVE_FW == '1'
         shell: pwsh
         env: { PFX_B64: "${{ secrets.SWOA_PFX_BASE64 }}", PFX_PASS: "${{ secrets.SWOA_PFX_PASSWORD }}" }
         run: |
@@ -102,15 +103,14 @@ jobs:
             $c = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=SwitchWOA Test Driver Signing' -CertStoreLocation Cert:\CurrentUser\My -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -NotAfter (Get-Date).AddYears(5)
           }
           Export-Certificate -Cert $c -FilePath 'build\gpu\kit\SwitchWOA-Test.cer' | Out-Null
-          # the probe AND the SwitchFan bridge package it brings (both are in build\gpu\kit\<name>)
+          # probe, render and the SwitchFan bridge package (all in build\gpu\kit\<name>): every .sys / .dll signed
           foreach ($dir in Get-ChildItem 'build\gpu\kit' -Directory) {
             $d = $dir.FullName
-            Get-ChildItem $d -Filter *.sys | ForEach-Object { & $sign sign /q /fd sha256 /sha1 $c.Thumbprint /s My $_.FullName; if ($LASTEXITCODE) { throw "sign $($_.Name)" } }
+            Get-ChildItem $d -File | Where-Object { $_.Extension -in '.sys', '.dll' } | ForEach-Object { & $sign sign /q /fd sha256 /sha1 $c.Thumbprint /s My $_.FullName; if ($LASTEXITCODE) { throw "sign $($_.Name)" } }
             & $cat "/driver:$d" /os:10_VB_ARM64 /uselocaltime | Out-Null; if ($LASTEXITCODE) { throw "Inf2Cat $($dir.Name)" }
             Get-ChildItem $d -Filter *.cat | ForEach-Object { & $sign sign /q /fd sha256 /sha1 $c.Thumbprint /s My $_.FullName; if ($LASTEXITCODE) { throw "sign cat $($_.Name)" } }
           }
       - name: Verify the signed kit (ARM64 native images, INF/CAT present; not a hardware test)
-        if: env.HAVE_FW == '1'
         shell: pwsh
         run: python tools/ci/verify_build.py build/gpu/kit
       - uses: actions/upload-artifact@v4
