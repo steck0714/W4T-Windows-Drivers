@@ -3,15 +3,20 @@
 #   host   (ubuntu)  all host-side model tests + ACPI node check; no WDK, no firmware.
 #   driver (windows) clang-cl/lld-link against the WDK; builds TegraGpuCore.lib always,
 #                    and the signed KMDF probe when NVIDIA firmware is supplied.
-# NVIDIA firmware is NOT in the repo. Provide a zip with these 9 files at the root:
+# NVIDIA firmware is NOT in the repo. It is loaded from OUTSIDE, automatically, at the start of the driver job by
+# .github/actions/fwfetch-import: your private zip (a copy of the tree fwfetch searches on your Switchroot SD, e.g.
+# lib/firmware/tegra21x/*.bin - or just the 9 files at the zip root) behind the secret FW_BUNDLE_URL (older name:
+# NVIDIA_FW_URL), or the workflow input firmware_url. fwfetch stages the 9 files on the runner:
 #   NETB_img.bin fecs.bin gpccs.bin nv_acr_ucode_prod.bin pmu_bl.bin
 #   gpmu_ucode_image.bin gpmu_ucode_desc.bin pmu_sig.bin fecs_sig.bin
-# (collect them from your own Switchroot SD with tools/fwfetch (fwfetch.exe --profile erista --auto), zip the 9 files from gpu\,
-# keep the zip PRIVATE) via the secret NVIDIA_FW_URL (any URL `curl` can fetch, e.g. a private release asset
-# link with a token) or the workflow input firmware_url.
+# They are never uploaded. Without a bundle only TegraGpuCore.lib is built. This workflow is also called by
+# build-all-drivers.yml for HAC-001.
 # Signing: optional secrets SWOA_PFX_BASE64 / SWOA_PFX_PASSWORD, else a self-signed cert per run.
 name: build-erista-gpu
 on:
+  workflow_call:
+    inputs:
+      firmware_url: { description: "URL of the firmware zip (optional)", required: false, default: "", type: string }
   workflow_dispatch:
     inputs:
       firmware_url: { description: "URL of the firmware zip (optional)", required: false, default: "" }
@@ -71,24 +76,34 @@ jobs:
             Write-Host "found $h -> $($f.FullName.Substring($k.Length + 1))"
           }
           Get-ChildItem "$k\Include\wdf\kmdf" -Name | ForEach-Object { Write-Host "kmdf include: $_" }
-      - name: mesa-switch + firmware
+      - name: Firmware from outside the repository (automatic; skipped when no bundle is configured)
+        id: fw
+        uses: ./.github/actions/fwfetch-import
+        with:
+          profile: erista
+          deploy-gpu: 'true'
+          bundle-url: ${{ inputs.firmware_url || secrets.FW_BUNDLE_URL || secrets.NVIDIA_FW_URL }}
+          bundle-sha256: ${{ secrets.FW_BUNDLE_SHA256 }}
+          auth-header: ${{ secrets.FW_BUNDLE_AUTH_HEADER }}
+      - name: mesa-switch + the nine GPU files
         shell: pwsh
         env:
-          FW_URL: ${{ inputs.firmware_url || secrets.NVIDIA_FW_URL }}
+          GPU_DIR: ${{ steps.fw.outputs.gpu-dir }}
         run: |
           git clone https://github.com/danfromtico/mesa-switch.git mesa-switch
           git -C mesa-switch checkout $env:MESA_REV
-          if ($env:FW_URL) {
-            curl.exe -L --fail -o fw.zip "$env:FW_URL"
-            Expand-Archive fw.zip -DestinationPath fw -Force
-            "HAVE_FW=1" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+          if ($env:GPU_DIR) {
+            $need = 'NETB_img.bin','fecs.bin','gpccs.bin','nv_acr_ucode_prod.bin','pmu_bl.bin','gpmu_ucode_image.bin','gpmu_ucode_desc.bin','pmu_sig.bin','fecs_sig.bin'
+            $miss = @($need | Where-Object { -not (Test-Path (Join-Path $env:GPU_DIR $_)) })
+            if ($miss.Count -eq 0) { "HAVE_FW=1" | Out-File -Append -Encoding ascii $env:GITHUB_ENV; "GPU_FW=$env:GPU_DIR" | Out-File -Append -Encoding ascii $env:GITHUB_ENV }
+            else { Write-Host "::warning::the imported bundle lacks $($miss -join ', '): building without the probe driver" }
           }
       - name: Build
         shell: pwsh
         run: |
           $inc = "${env:ProgramFiles(x86)}\Windows Kits\10\Include\10.0.19041.0"
           $bargs = @('drivers\t210-icosa\drivers\TegraGpu\tools\build.py','--mesa','mesa-switch','--wdk-include',$inc,'--sdk-include',$inc,'--out','build\gpu')
-          if ($env:HAVE_FW) { $bargs += @('--probe','--gr-firmware','fw','--acr-firmware','fw') }
+          if ($env:HAVE_FW) { $bargs += @('--probe','--gr-firmware',$env:GPU_FW,'--acr-firmware',$env:GPU_FW) }
           python @bargs
           if ($LASTEXITCODE -ne 0) { throw 'build failed' }
       - name: Sign probe and make catalog

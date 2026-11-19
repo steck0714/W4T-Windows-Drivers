@@ -1,10 +1,21 @@
-# Build and test-sign ALL Erista (t210-icosa) drivers on GitHub, plus the host tests.
+# Build and test-sign the drivers of EVERY Switch model on GitHub, one build per model number (build/models.json), plus the host tests.
 #
 #   host     (ubuntu)   tools/run_host_tests.sh = HWID/ACPI checks, ABI-header check, battery/bluetooth/power-button
 #                       tests and the full TegraGpu model tests. No WDK needed.
-#   drivers  (windows)  tools/ci/Build-AllDrivers.ps1: every driver in tools/ci/drivers-t210.json, ONE signing
-#                       certificate for all of them, kits assembled, BUILD-INFO.md with OK / WARN / FAIL per driver.
-#   release  (tag v*)   attaches the kit zip + SHA256SUMS + the public .cer to a GitHub *pre-release*.
+#   plan     (ubuntu)   reads build/models.json: which models build here (ci), which are fetched (upstream-binaries), which are skipped.
+#   drivers  (windows)  one job per CI model (HAC-001 Erista, HDH-001 Lite): tools/ci/Build-AllDrivers.ps1 -Model <id>, ONE signing
+#                       certificate per run, kits assembled into build/<id>/, BUILD-INFO.md with OK / WARN / FAIL per driver.
+#   heg001   (ubuntu)   HEG-001 (OLED): downloads the upstream windows-switch release and keeps only files whose size and SHA-256 match
+#                       drivers/t214-aula/manifest/ (tools/build/fill_heg001.py). Nothing is compiled for it.
+#   gpu      (windows)  HAC-001 only: build-erista-gpu.yml (TegraGpu core, and the probe driver when NVIDIA firmware was imported).
+#   commit-build        manual run with commit_build = true: puts the finished sets into build/<id>/ on this branch.
+#   release  (tag v*)   attaches one kit zip per model + SHA256SUMS + the public .cer to a GitHub *pre-release*.
+#
+# Firmware that must not be redistributed (NVIDIA / Broadcom / Switchroot) is loaded from OUTSIDE the repository, automatically,
+# at the start of every driver job: .github/actions/fwfetch-import downloads your private bundle (repository secret FW_BUNDLE_URL,
+# or the firmware_url input), fwfetch checks and stages it on the runner, and builds that need it use it. The files are never
+# uploaded or committed. Without a bundle the job simply skips that part. A copy of fwfetch.exe (ARM64) and the start-up task that
+# does the same on the Switch itself at every Windows start is put into build/<id>/fwfetch/.
 #
 # UNTESTED on GitHub when written (no WDK / runner in the authoring environment). If a step fails, the log names the
 # missing path; the per-driver logs are in the artifact (logs/).
@@ -17,23 +28,39 @@ name: build-all-drivers
 on:
   workflow_dispatch:
     inputs:
+      models:
+        description: "Model numbers to build, comma separated, or 'all' (HAC-001, HAC-001-01, HDH-001, HEG-001)"
+        type: string
+        default: 'all'
       commit_build:
-        description: 'Also commit the finished driver set to build/HAC-001/ on this branch (test-signed .sys/.cat/.inf, public .cer, SHA256SUMS)'
+        description: 'Also commit the finished driver sets to build/<model>/ on this branch (test-signed .sys/.cat/.inf, public .cer, SHA256SUMS)'
         type: boolean
         default: false
+      firmware_url:
+        description: 'Optional https URL of your private firmware zip (otherwise the secret FW_BUNDLE_URL is used if it exists)'
+        type: string
+        default: ''
+      heg001_tag:
+        description: 'Release tag of DanilKhmyrov/windows-switch to take the OLED binaries from (empty = the tag in build/models.json)'
+        type: string
+        default: ''
   push:
-    branches: [main, master]
+    branches: [main, master, test]
     tags: ['v*']
     paths:
       - 'drivers/t210-icosa/**'
+      - 'drivers/t214-hoag/**'
+      - 'drivers/t214-aula/**'
       - 'tools/**'
       - '!tools/fwfetch/**'
       - 'acpi/**'
       - 'build/models.json'
+      - '.github/actions/**'
       - '.github/workflows/build-all-drivers.yml'
   pull_request:
     paths:
       - 'drivers/t210-icosa/**'
+      - 'drivers/t214-hoag/**'
       - 'tools/**'
       - 'acpi/**'
 
@@ -63,21 +90,83 @@ jobs:
           git clone -q --depth 1 https://github.com/ruje0504-2/mesa-switch-woa.git ruje
           python3 tools/check_abi_sync.py --upstream ruje/src/nouveau/vulkan/nvkmd/windows
 
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.p.outputs.matrix }}
+      has_ci: ${{ steps.p.outputs.has_ci }}
+      heg: ${{ steps.p.outputs.heg }}
+      gpu: ${{ steps.p.outputs.gpu }}
+      gpu_lite: ${{ steps.p.outputs.gpu_lite }}
+      heg_tag: ${{ steps.p.outputs.heg_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: p
+        env:
+          MODELS: ${{ inputs.models }}
+          HEG_TAG: ${{ inputs.heg001_tag }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          models = json.load(open("build/models.json"))["models"]
+          want = [m.strip() for m in (os.environ.get("MODELS") or "all").split(",") if m.strip()]
+          if "all" in [w.lower() for w in want]:
+              want = list(models)
+          unknown = [w for w in want if w not in models]
+          if unknown:
+              raise SystemExit("unknown model(s): %s (have: %s)" % (", ".join(unknown), ", ".join(models)))
+          ci = [{"model": m, "fw_profile": models[m].get("fw_profile") or "all"} for m in want if models[m]["build"] == "ci"]
+          heg = [m for m in want if models[m]["build"] == "upstream-binaries"]
+          skipped = [m for m in want if models[m]["build"] == "none"]
+          tag = os.environ.get("HEG_TAG") or (models[heg[0]]["fetch"]["default_tag"] if heg else "")
+          out = {
+              "matrix": json.dumps({"include": ci}),
+              "has_ci": "true" if ci else "false",
+              "heg": "true" if heg else "false",
+              "gpu": "true" if any(c["model"] == "HAC-001" for c in ci) else "false",
+              "gpu_lite": "true" if any(c["model"] == "HDH-001" for c in ci) else "false",
+              "heg_tag": tag,
+          }
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              for k, v in out.items():
+                  f.write("%s=%s\n" % (k, v))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("### Models\n\n| model | how | status |\n|---|---|---|\n")
+              for m in want:
+                  f.write("| %s (%s) | %s | %s |\n" % (m, models[m]["codename"], models[m]["build"], models[m]["status"]))
+              for m in skipped:
+                  f.write("\n**%s skipped**: %s\n" % (m, models[m]["note"]))
+          PY
+
   drivers:
-    needs: host
+    name: drivers ${{ matrix.model }}
+    needs: [host, plan]
+    if: needs.plan.outputs.has_ci == 'true'
     runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     defaults:
       run:
         shell: pwsh
     steps:
       - uses: actions/checkout@v4
 
+      - name: Firmware from outside the repository (automatic; skipped when no bundle is configured)
+        id: fw
+        uses: ./.github/actions/fwfetch-import
+        with:
+          profile: ${{ matrix.fw_profile }}
+          bundle-url: ${{ inputs.firmware_url || secrets.FW_BUNDLE_URL || secrets.NVIDIA_FW_URL }}
+          bundle-sha256: ${{ secrets.FW_BUNDLE_SHA256 }}
+          auth-header: ${{ secrets.FW_BUNDLE_AUTH_HEADER }}
+
       - name: LLVM (clang-cl, lld-link) - the image has it; install only when missing
         run: |
           if (-not (Test-Path 'C:\Program Files\LLVM\bin\clang-cl.exe')) { choco install llvm --no-progress -y }
           & 'C:\Program Files\LLVM\bin\clang-cl.exe' --version
 
-      - name: WDK 10.0.19041 (the image has the SDK, and the WDK 10.0.26100 that the Wi-Fi driver uses)
+      - name: WDK 10.0.19041 (the image has the SDK, and the WDK 10.0.26100 that the Wi-Fi drivers use)
         run: |
           $k = "${env:ProgramFiles(x86)}\Windows Kits\10"
           if (-not (Test-Path "$k\Include\10.0.19041.0\km\wdm.h")) {
@@ -110,32 +199,179 @@ jobs:
             Write-Host 'no secret: Build-Driver.ps1 makes ONE new self-signed certificate for this run'
           }
 
-      - name: Build all drivers
-        run: .\tools\ci\Build-AllDrivers.ps1 -OutRoot "$PWD\build\t210"
+      - name: Build all drivers of ${{ matrix.model }}
+        run: .\tools\ci\Build-AllDrivers.ps1 -Model '${{ matrix.model }}'
 
-      - name: Assemble build/HAC-001 (drivers, INF, CAT, public .cer, SHA256SUMS, licences; refuses private keys)
-        run: python tools/build/assemble_build.py --model HAC-001 --kit-dir build/t210/kit --build-info build/t210/BUILD-INFO.md
+      - name: Assemble build/${{ matrix.model }} (drivers, INF, CAT, public .cer, SHA256SUMS, licences; refuses private keys)
+        run: python tools/build/assemble_build.py --model '${{ matrix.model }}' --kit-dir 'build/_work/${{ matrix.model }}/kit' --build-info 'build/_work/${{ matrix.model }}/BUILD-INFO.md'
+
+      - name: "Verify the output (every .sys is a signed ARM64 native image, every INF has its .sys / .cat - not a hardware test)"
+        run: python tools/ci/verify_build.py 'build/${{ matrix.model }}/drivers'
+
+      - name: "InfVerif on every INF (informational - the WDK checker; findings are listed in the log)"
+        continue-on-error: true
+        run: |
+          $k = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+          $iv = Get-ChildItem $k -Directory | Where-Object { $_.Name -match '^10\.' } | Sort-Object Name -Descending |
+                ForEach-Object { Join-Path $_.FullName 'x64\infverif.exe' } | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iv) { Write-Host '::warning::infverif.exe not found in the WDK'; exit 0 }
+          $bad = 0
+          Get-ChildItem 'build/${{ matrix.model }}/drivers' -Recurse -Filter *.inf | ForEach-Object {
+            & $iv /v /u $_.FullName 2>&1 | Out-String | Write-Host
+            if ($LASTEXITCODE -ne 0) { $bad++; Write-Host "::warning::infverif: $($_.Name) has findings" }
+          }
+          if ($bad) { Write-Host "$bad INF file(s) with infverif findings" }
+
+      - name: fwfetch (ARM64) + the start-up task, so the Switch loads its own firmware at every Windows start
+        run: |
+          rustup target add aarch64-pc-windows-msvc
+          cargo build --locked --release --manifest-path tools/fwfetch/Cargo.toml --target aarch64-pc-windows-msvc
+          $d = 'build/${{ matrix.model }}/fwfetch'
+          New-Item -ItemType Directory -Force $d | Out-Null
+          Copy-Item tools/fwfetch/target/aarch64-pc-windows-msvc/release/fwfetch.exe $d
+          Copy-Item tools/fwfetch/startup/*.ps1 $d
+          Set-Content "$d/README.txt" @(
+            'fwfetch reads firmware that must not be redistributed from YOUR OWN SD card (read-only, no network).',
+            'On the Switch, in an administrator PowerShell, in this folder:',
+            '  .\Install-FwFetchStartup.ps1 -Profile ${{ matrix.fw_profile }}   (add -GpuDir <driver folder> when the GPU driver is used)',
+            'From then on fwfetch runs 1 minute after every Windows start until it has found everything. Log: C:\ProgramData\W4T\logs\fwfetch-startup.log',
+            'Remove: .\Install-FwFetchStartup.ps1 -Remove') -Encoding ascii
+          Get-ChildItem $d -File | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } | Set-Content "$d/SHA256SUMS.txt" -Encoding ascii
+
+      - name: No firmware or key material in what is uploaded
+        run: python tools/check_no_proprietary.py
+
+      - name: Summary
+        if: always()
+        run: |
+          $r = 'build/_work/${{ matrix.model }}/results.json'
+          if (Test-Path $r) {
+            "### ${{ matrix.model }} drivers`n`n| driver | kit | result | note |`n|---|---|---|---|" | Add-Content $env:GITHUB_STEP_SUMMARY
+            Get-Content $r -Raw | ConvertFrom-Json | ForEach-Object {
+              "| $($_.Name) | $($_.Kit) | $($_.Status)$(if ($_.Optional) { ' (optional)' }) | $($_.Note -replace '\|', '/') |" | Add-Content $env:GITHUB_STEP_SUMMARY
+            }
+          }
+          "firmware bundle: ready=${{ steps.fw.outputs.ready }}, complete=${{ steps.fw.outputs.complete }}" | Add-Content $env:GITHUB_STEP_SUMMARY
 
       - uses: actions/upload-artifact@v4
         with:
-          name: build-HAC-001
-          path: build/HAC-001
+          name: build-${{ matrix.model }}
+          path: build/${{ matrix.model }}
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: Switch-Drivers-Erista
+          name: kit-${{ matrix.model }}
           path: |
-            build/t210/kit
-            build/t210/BUILD-INFO.md
-            build/t210/logs
+            build/_work/${{ matrix.model }}/kit
+            build/_work/${{ matrix.model }}/BUILD-INFO.md
+            build/_work/${{ matrix.model }}/results.json
+            build/_work/${{ matrix.model }}/logs
           if-no-files-found: warn
 
+  heg001:
+    name: drivers HEG-001 (upstream release, hash-checked)
+    needs: plan
+    if: needs.plan.outputs.heg == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the upstream release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.heg_tag }}
+        run: |
+          set -euo pipefail
+          read -r REPO ASSET < <(python3 -c 'import json;f=json.load(open("build/models.json"))["models"]["HEG-001"]["fetch"];print(f["repo"],f["asset"])')
+          mkdir -p "$RUNNER_TEMP/heg"
+          gh release download "$TAG" --repo "$REPO" --pattern "$ASSET" --dir "$RUNNER_TEMP/heg"
+          ls -l "$RUNNER_TEMP/heg"
+      - name: Keep only the files that match the SHA-256 values in the repository
+        run: |
+          set -euo pipefail
+          ASSET=$(python3 -c 'import json;print(json.load(open("build/models.json"))["models"]["HEG-001"]["fetch"]["asset"])')
+          python3 tools/build/fill_heg001.py --zip "$RUNNER_TEMP/heg/$ASSET"
+          python3 tools/check_no_proprietary.py
+          {
+            echo "### HEG-001 (OLED)"
+            echo "Upstream binaries, not compiled here. Files kept: $(find build/HEG-001/agent -type f | wc -l) (only those matching drivers/t214-aula/manifest/)."
+            echo 'Firmware (bl31, XUSB, BCM4356) is not in the release: the start-up task from tools/fwfetch/startup loads it on the Switch (profile aula).'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: fwfetch start-up task for the OLED
+        run: |
+          mkdir -p build/HEG-001/fwfetch
+          cp tools/fwfetch/startup/*.ps1 build/HEG-001/fwfetch/
+          echo 'Put fwfetch-aarch64-pc-windows-msvc.exe (from the build-fwfetch workflow) here as fwfetch.exe, then run .\Install-FwFetchStartup.ps1 -Profile aula in an administrator PowerShell on the Switch.' > build/HEG-001/fwfetch/README.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-HEG-001
+          path: build/HEG-001
+          if-no-files-found: error
+
+  gpu:
+    name: gpu HAC-001 (TegraGpu)
+    needs: [host, plan]
+    if: needs.plan.outputs.gpu == 'true'
+    uses: ./.github/workflows/build-erista-gpu.yml
+    with:
+      firmware_url: ${{ inputs.firmware_url }}
+    secrets: inherit
+
+  gpu-lite:
+    name: gpu HDH-001 (TegraGpu, Switch Lite)
+    needs: [host, plan]
+    if: needs.plan.outputs.gpu_lite == 'true'
+    uses: ./.github/workflows/build-lite-gpu.yml
+    with:
+      firmware_url: ${{ inputs.firmware_url }}
+    secrets: inherit
+
+  apps:
+    # SwitchCenter and SwitchPatcher (WinForms, native win-arm64, self-contained) for each model that has them.
+    name: apps ${{ matrix.model }}
+    needs: plan
+    if: needs.plan.outputs.has_ci == 'true'
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Publish the apps (win-arm64)
+        run: |
+          $models = (Get-Content build/models.json -Raw | ConvertFrom-Json).models
+          $src = $models.'${{ matrix.model }}'.source_dir
+          $out = 'build/_apps/${{ matrix.model }}'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $fail = 0
+          foreach ($app in 'SwitchCenter', 'SwitchPatcher') {
+            $proj = "$src/app/$app/src/$app.csproj"
+            if (-not (Test-Path $proj)) { Write-Host "::notice::$app is not part of ${{ matrix.model }}"; continue }
+            dotnet publish $proj -c Release -r win-arm64 --self-contained true -o "$out/$app" 2>&1 | Tee-Object "$out/$app.log"
+            if ($LASTEXITCODE -ne 0) { Write-Host "::error::$app failed to publish"; $fail++ }
+            elseif (-not (Test-Path "$out/$app/$app.exe")) { Write-Host "::error::$app.exe was not produced"; $fail++ }
+          }
+          if ($fail) { exit 1 }
+      - name: Apps are ARM64 and carry no firmware or keys
+        run: |
+          python tools/ci/verify_build.py --apps 'build/_apps/${{ matrix.model }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apps-${{ matrix.model }}
+          path: build/_apps/${{ matrix.model }}
+          if-no-files-found: error
+
   commit-build:
-    # Only on a manual run with commit_build = true. Puts the finished set into build/HAC-001/ of THIS branch.
-    if: github.event_name == 'workflow_dispatch' && inputs.commit_build
-    needs: [host, drivers]
+    # Only on a manual run with commit_build = true. Puts the finished sets into build/<model>/ of THIS branch.
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.commit_build && (needs.drivers.result == 'success' || needs.heg001.result == 'success') }}
+    needs: [host, drivers, heg001, apps]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -143,21 +379,37 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: build-HAC-001
-          path: build/HAC-001
-      - name: Commit build/HAC-001
+          pattern: build-*
+          path: dl
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: apps-*
+          path: dl
+      - name: Commit build/<model>
         run: |
           set -e
+          for d in dl/build-*; do
+            m="${d#dl/build-}"
+            rm -rf "build/$m/drivers" "build/$m/agent" "build/$m/fwfetch"
+            mkdir -p "build/$m"
+            cp -r "$d/." "build/$m/"
+          done
+          for d in dl/apps-*; do
+            [ -d "$d" ] || continue
+            m="${d#dl/apps-}"
+            rm -rf "build/$m/apps"; mkdir -p "build/$m/apps"
+            cp -r "$d/." "build/$m/apps/"
+          done
           python3 tools/check_no_proprietary.py
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f build/HAC-001
+          git add -f build
           git diff --cached --quiet && { echo "nothing changed"; exit 0; }
-          git commit -m "build: HAC-001 driver set from ${GITHUB_SHA::8} (test-signed, not verified on a console)"
+          git commit -m "build: driver sets from ${GITHUB_SHA::8} (test-signed, not verified on a console)"
           git push
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.drivers.result == 'success' }}
     needs: [host, drivers]
     runs-on: ubuntu-24.04
     permissions:
@@ -165,19 +417,25 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: Switch-Drivers-Erista
+          pattern: kit-*
           path: dl
-      - name: "Pre-release with the kits (the .pfx is never in the artifact)"
+      - name: "Pre-release with one kit zip per model (the .pfx is never in the artifact)"
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
-          cd dl
-          zip -qr "../SwitchDrivers-Erista-${GITHUB_REF_NAME}.zip" kit
-          cp kit/SHA256SUMS.txt ../SHA256SUMS.txt
-          cp kit/SwitchWOA-Test.cer ../SwitchWOA-Test.cer || true
-          cd ..
+          FILES=()
+          : > SHA256SUMS.txt
+          for d in dl/kit-*; do
+            m="${d#dl/kit-}"
+            (cd "$d" && zip -qr "../../SwitchDrivers-${m}-${GITHUB_REF_NAME}.zip" kit)
+            FILES+=("SwitchDrivers-${m}-${GITHUB_REF_NAME}.zip")
+            sed "s#  #  ${m}/#" "$d/kit/SHA256SUMS.txt" >> SHA256SUMS.txt
+            cp -n "$d/kit/SwitchWOA-Test.cer" . 2>/dev/null || true
+            { echo "## ${m}"; cat "$d/BUILD-INFO.md"; echo; } >> NOTES.md
+          done
+          EXTRA=(SHA256SUMS.txt)
+          [ -f SwitchWOA-Test.cer ] && EXTRA+=(SwitchWOA-Test.cer)
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --prerelease \
             --title "$GITHUB_REF_NAME (test-signed, not verified on a real Switch)" \
-            --notes-file dl/BUILD-INFO.md \
-            "SwitchDrivers-Erista-${GITHUB_REF_NAME}.zip" SHA256SUMS.txt SwitchWOA-Test.cer
+            --notes-file NOTES.md "${FILES[@]}" "${EXTRA[@]}"

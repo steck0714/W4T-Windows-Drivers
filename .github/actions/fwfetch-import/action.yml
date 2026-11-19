@@ -1,0 +1,116 @@
+name: fwfetch-import
+description: >
+  Load firmware that must not be redistributed from OUTSIDE the repository (a private zip behind a URL) and let fwfetch
+  check and stage it on the runner. The files stay on the runner (RUNNER_TEMP): they are never uploaded as artifacts
+  and never committed. fwfetch itself stays offline; this action does the download (tools/ci/fw_bundle.py).
+
+inputs:
+  profile:
+    description: "fwfetch profile: erista | lite | aula | all"
+    required: true
+  bundle-url:
+    description: "https URL of the private firmware zip (a copy of the tree fwfetch searches: switchroot/..., lib/firmware/...). Empty = nothing is imported."
+    required: false
+    default: ''
+  bundle-sha256:
+    description: "Optional SHA-256 of the zip; the run fails if it differs."
+    required: false
+    default: ''
+  auth-header:
+    description: "Optional value for an Authorization header (e.g. 'Bearer <token>'); dropped when the download is redirected to another host."
+    required: false
+    default: ''
+  deploy-gpu:
+    description: "'true' = also put the NVIDIA GPU files, under their plain names, into the gpu-dir output"
+    required: false
+    default: 'false'
+
+outputs:
+  ready:
+    description: "'true' when a bundle was imported and fwfetch ran (found everything, or only some of it)"
+    value: ${{ steps.run.outputs.ready }}
+  complete:
+    description: "'true' when fwfetch found every file of the profile (exit code 0)"
+    value: ${{ steps.run.outputs.complete }}
+  cache-dir:
+    description: "fwfetch --out-dir: staged copies + fw-lock.json (outside the checkout)"
+    value: ${{ steps.run.outputs.cache_dir }}
+  gpu-dir:
+    description: "directory holding the GPU files when deploy-gpu is true"
+    value: ${{ steps.run.outputs.gpu_dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch and unpack the bundle
+      id: bundle
+      shell: bash
+      env:
+        FW_URL: ${{ inputs.bundle-url }}
+        FW_SHA: ${{ inputs.bundle-sha256 }}
+        FW_BUNDLE_AUTH_HEADER: ${{ inputs.auth-header }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        if [ -z "$FW_URL" ]; then
+          echo "::notice::No firmware bundle given: nothing is imported, and builds that need NVIDIA/Broadcom files skip that part."
+          echo "have=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        if command -v python >/dev/null 2>&1; then PY=python; else PY=python3; fi
+        ROOT="$(cd "$ACTION_PATH/../../.." && pwd)"
+        WORK="$RUNNER_TEMP/fw-bundle"
+        rm -rf "$WORK"; mkdir -p "$WORK/in"
+        ARGS=(--url "$FW_URL" --out "$WORK/bundle.zip")
+        if [ -n "$FW_SHA" ]; then ARGS+=(--sha256 "$FW_SHA"); fi
+        "$PY" "$ROOT/tools/ci/fw_bundle.py" fetch "${ARGS[@]}"
+        "$PY" "$ROOT/tools/ci/fw_bundle.py" extract --zip "$WORK/bundle.zip" --dest "$WORK/in"
+        rm -f "$WORK/bundle.zip"
+        echo "have=true" >> "$GITHUB_OUTPUT"
+        echo "work=$WORK" >> "$GITHUB_OUTPUT"
+        echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+
+    - name: Build fwfetch
+      if: steps.bundle.outputs.have == 'true'
+      shell: bash
+      env:
+        ROOT: ${{ steps.bundle.outputs.root }}
+      run: cargo build --locked --release --manifest-path "$ROOT/tools/fwfetch/Cargo.toml"
+
+    - name: Check and stage with fwfetch
+      id: run
+      shell: bash
+      env:
+        HAVE: ${{ steps.bundle.outputs.have }}
+        WORK: ${{ steps.bundle.outputs.work }}
+        ROOT: ${{ steps.bundle.outputs.root }}
+        PROFILE: ${{ inputs.profile }}
+        DEPLOY_GPU: ${{ inputs.deploy-gpu }}
+      run: |
+        set -uo pipefail
+        if [ "$HAVE" != "true" ]; then
+          echo "ready=false" >> "$GITHUB_OUTPUT"; echo "complete=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        EXE="$ROOT/tools/fwfetch/target/release/fwfetch"
+        [ -x "$EXE" ] || EXE="$EXE.exe"
+        CACHE="$WORK/fw-cache"; GPU="$WORK/gpu"
+        ARGS=(--profile "$PROFILE" --search-root "$WORK/in" --out-dir "$CACHE" --manifest "$ROOT/tools/fwfetch/firmware-manifest.json")
+        if [ "$DEPLOY_GPU" = "true" ]; then ARGS+=(--deploy-gpu "$GPU"); fi
+        "$EXE" "${ARGS[@]}" 2>&1 | tee "$WORK/fwfetch.log"
+        CODE=${PIPESTATUS[0]}
+        {
+          echo "### fwfetch ($PROFILE profile) on the imported bundle"
+          echo 'exit code: `'"$CODE"'` (0 = everything found, 2 = some files missing, 1 = error)'
+          echo '```'; cat "$WORK/fwfetch.log"; echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+        case "$CODE" in
+          0) echo "ready=true" >> "$GITHUB_OUTPUT"; echo "complete=true" >> "$GITHUB_OUTPUT" ;;
+          2) echo "::warning::fwfetch found only part of the '$PROFILE' firmware set in the bundle (see the job summary). Builds that need the missing files skip them."
+             echo "ready=true" >> "$GITHUB_OUTPUT"; echo "complete=false" >> "$GITHUB_OUTPUT" ;;
+          *) echo "::error::fwfetch failed (exit code $CODE)"; exit 1 ;;
+        esac
+        echo "cache_dir=$CACHE" >> "$GITHUB_OUTPUT"
+        echo "gpu_dir=$GPU" >> "$GITHUB_OUTPUT"
+        # the firmware stays on the runner
+        rm -rf "$WORK/in"
