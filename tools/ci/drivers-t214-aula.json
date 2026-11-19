@@ -1,6 +1,6 @@
 [
-  { "name": "swhid",  "kit": "agent/arm64", "dir": "SwitchHid",     "sources": ["src/swhid.c"],  "inf": null, "wdm": true, "libs": ["hidclass.lib"] },
-  { "name": "swbatt", "kit": "agent/arm64", "dir": "SwitchBattery", "sources": ["src/swbatt.c"], "inf": null, "wdm": true, "libs": ["battc.lib"] },
+  { "name": "swhid",  "kit": "agent/arm64", "dir": "SwitchHid",     "sources": ["src/swhid.c"],  "inf": null, "wdm": true, "force_include": "w4t_wdm_compat.h", "libs": ["hidclass.lib"] },
+  { "name": "swbatt", "kit": "agent/arm64", "dir": "SwitchBattery", "sources": ["src/swbatt.c"], "inf": null, "wdm": true, "force_include": "w4t_wdm_compat.h", "libs": ["battc.lib"] },
   { "name": "switchbt",    "kit": "agent/bt",    "dir": "../../t214-hoag/SwitchBluetooth", "sources": ["src/switchbt.c"],       "inf": null, "optional": true },
   { "name": "switchaudio", "kit": "agent/audio", "dir": "../../t214-hoag/SwitchAudio",     "sources": ["src/switchaudio.cpp"],  "inf": null, "optional": true,
     "libs": ["portcls.lib", "libcntpr.lib"], "wdm": true },

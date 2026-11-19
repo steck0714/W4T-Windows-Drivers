@@ -20,7 +20,7 @@ def main(argv=None):
     ap.add_argument("--zip", required=True, help="windows-switch-arm64-drivers-v0_8_0.zip")
     ap.add_argument("--out", default=os.path.join(ROOT, "build", "HEG-001"))
     a = ap.parse_args(argv)
-    man = json.load(open(MANIFEST))
+    man = json.load(open(MANIFEST, encoding="utf-8"))
     zname = os.path.basename(a.zip)
     if zname not in man["zips"]:
         sys.exit("%s is not a zip listed in the manifest (%s)" % (zname, ", ".join(man["zips"])))

@@ -27,7 +27,7 @@ def main(argv=None):
     ap.add_argument("--out", default=os.path.join(ROOT, "build"))
     ap.add_argument("--dest")
     a = ap.parse_args(argv)
-    models = json.load(open(os.path.join(ROOT, "build", "models.json")))["models"]
+    models = json.load(open(os.path.join(ROOT, "build", "models.json"), encoding="utf-8"))["models"]
     if a.model not in models:
         sys.exit("unknown model %r (have: %s)" % (a.model, ", ".join(models)))
     dest = os.path.abspath(a.dest) if a.dest else os.path.join(os.path.abspath(a.out), a.model, "test-signing")

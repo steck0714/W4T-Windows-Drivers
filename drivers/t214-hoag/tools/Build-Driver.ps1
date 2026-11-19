@@ -21,7 +21,8 @@ param(
   [switch]$NoSign,
   [switch]$NoWarnAsError,           # drop /WX (CI retries with this when a newer clang adds warnings)
   [string]$CertThumbprint = $env:SWOA_CERT_THUMBPRINT,   # sign with this cert from CurrentUser\My instead of the self-made one
-  [switch]$Wdm                      # plain WDM driver (DriverEntry, no KMDF), e.g. an sdport miniport
+  [switch]$Wdm,                     # plain WDM driver (DriverEntry, no KMDF), e.g. an sdport miniport
+  [string[]]$ForceInclude = @()     # headers force-included (clang-cl /FI) into every C source; relative names are looked up next to this script
 )
 
 $ErrorActionPreference = 'Stop'
@@ -67,12 +68,18 @@ if (@($Sources | Where-Object { $_ -like '*.cpp' }).Count -gt 0) {
 $cflags = @(
   '--target=aarch64-pc-windows-msvc', '/c', '/kernel', '/GS-', '/Gy', '/Zl', '/O2', '/W4',
   '-Wno-unused-parameter', '-Wno-microsoft-anon-tag', '-Wno-ignored-pragma-intrinsic',
-  '-Wno-pragma-pack', '-Wno-invalid-token-paste', '-Wno-unknown-pragmas', '-Wno-ignored-attributes', '-Wno-nonportable-include-path',
+  '-Wno-pragma-pack', '-Wno-missing-braces', '-Wno-invalid-token-paste', '-Wno-unknown-pragmas', '-Wno-ignored-attributes', '-Wno-nonportable-include-path',
   '/D_ARM64_', '/DARM64', '/D_WIN64', "/DNTDDI_VERSION=$Ntddi", '/D_WIN32_WINNT=0x0A00', '/DWINVER=0x0A00',
   '/DKMDF_VERSION_MAJOR=1', "/DKMDF_VERSION_MINOR=$KmdfMinor", '/DPOOL_NX_OPTIN=1',
   # WDK headers as system headers: their warnings are not ours (/W4 /WX applies to our sources only).
   "/imsvc$Inc\km\crt", "/imsvc$Inc\km", "/imsvc$Inc\shared", "/imsvc$KmdfInc"
 ) + ($ExtraIncludes | ForEach-Object { "/imsvc$($_ -replace '^\$Kits', $Kits)" }) + ($Defines | ForEach-Object { "/D$_" })
+
+foreach ($fi in $ForceInclude) {
+  $fp = if (Test-Path $fi) { (Resolve-Path $fi).Path } else { Join-Path $PSScriptRoot $fi }
+  if (-not (Test-Path $fp)) { throw "Missing force-include header: $fp" }
+  $cflags += "/FI$fp"
+}
 
 if (-not $NoWarnAsError) { $cflags += '/WX' }
 

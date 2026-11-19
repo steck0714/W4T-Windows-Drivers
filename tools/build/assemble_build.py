@@ -42,7 +42,7 @@ def main(argv=None):
     ap.add_argument("--out", default=os.path.join(ROOT, "build"))
     a = ap.parse_args(argv)
 
-    models = json.load(open(os.path.join(ROOT, "build", "models.json")))["models"]
+    models = json.load(open(os.path.join(ROOT, "build", "models.json"), encoding="utf-8"))["models"]
     m = models.get(a.model)
     if not m:
         sys.exit("unknown model %r (have: %s)" % (a.model, ", ".join(models)))

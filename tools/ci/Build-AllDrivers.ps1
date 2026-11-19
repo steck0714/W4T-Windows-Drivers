@@ -75,6 +75,7 @@ function Invoke-One($d, [bool]$relaxed, [string]$log) {
   if ($d.kmdf)     { $p.KmdfVersion = $d.kmdf }
   if ($d.ntddi)    { $p.Ntddi = $d.ntddi }
   if ($d.defines)  { $p.Defines = @($d.defines) }
+  if ($d.force_include) { $p.ForceInclude = @($d.force_include) }
   # the SPB headers live under km\spb\1.0 (harmless for drivers that do not need them); WiFiCx adds its own
   $extra = @('km\spb\1.0') + @($d.includes)
   $p.ExtraIncludes = @($extra | ForEach-Object { Join-Path $inc $_ } | Where-Object { Test-Path $_ })
