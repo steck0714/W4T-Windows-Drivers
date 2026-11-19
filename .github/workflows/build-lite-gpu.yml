@@ -86,6 +86,15 @@ jobs:
           $inc = "${env:ProgramFiles(x86)}\Windows Kits\10\Include\10.0.19041.0"
           $bargs = @('drivers\t214-hoag\TegraGpu\tools\build.py','--mesa','mesa-switch','--wdk-include',$inc,'--sdk-include',$inc,'--out','build\gpu')
           $bargs += '--probe','--render'   # the package never contains firmware; it is placed afterwards by fwfetch
+          # SwitchFan's GPU bridge includes t214/gpu_pmic.h, a forward to integration/switch-lite/... of ANOTHER repository.
+          # When that header is not reachable (it is in neither this tree nor mesa-switch) building SwitchFan with SWITCH_LITE_GPU
+          # cannot succeed, so build only the probe + render (--keep-fan). The regular SwitchFan of the HDH-001 driver set is unaffected.
+          $hdr = 'integration/switch-lite/windows/SwitchFan/src/t214/gpu_pmic.h'
+          $dirs = @('mesa-switch/src','mesa-switch/src/nouveau/headers','mesa-switch/src/nouveau/headers/nvidia/classes','drivers/t214-hoag/SwitchFan/src/t214')
+          if (-not ($dirs | Where-Object { Test-Path (Join-Path $_ $hdr) })) {
+            Write-Host "::warning::$hdr is not available: SwitchFan GPU power bridge NOT built (probe + render only, --keep-fan)"
+            $bargs += '--keep-fan'
+          }
           if ($env:HAVE_FW) { $bargs += @('--gr-firmware',$env:GPU_FW,'--acr-firmware',$env:GPU_FW) }  # only for host-side checks
           python @bargs
           if ($LASTEXITCODE -ne 0) { throw 'build failed' }
