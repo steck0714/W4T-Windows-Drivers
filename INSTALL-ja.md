@@ -5,11 +5,15 @@
 削除するファイルはありません。
 
 ## 2. 中身
-- 新規 41 / 修正 15 ファイル: `drivers/t214-hoag/SwitchFan/`(ruje0504-2/Windows-for-Switch-Drivers c5ae935、DriverVersion 33)、
+- 新規 42 / 修正 17 ファイル: `drivers/t214-hoag/SwitchFan/`(ruje0504-2/Windows-for-Switch-Drivers c5ae935、DriverVersion 33)、
   `.github/workflows/`、`CREDITS.md`、`.gitignore`、`tools/ci/`、`drivers/t214-hoag/TegraGpu/tools/build.py`、`drivers/t214-hoag/docs/hdh001/build-drivers.sh`
 - `external/mesa-switch-woa/tegra-x1-wddm/`: SwitchFan が必要とする mesa-switch-woa(ruje0504-2、コミット c77f8a61fd4b627b218fee1db34b654b4e7233a2)のヘッダと、そのライセンス(GPL-2.0-only / MIT)。
   再配布する場合は、この `LICENSE.md`・`NOTICE`・`LICENSES/` を一緒に置いてください。
   - ビルドに必要な分だけの抜き出しです(ヘッダ6本)。mesa-switch-woa の全体ではありません。
+
+- OLED(Aula)側: `tools/check_swbatt_bridge.py`(新規)、`drivers/t214-aula/README.md`、`build-aula-gpu.yml`、`build-all-drivers.yml` の変更。
+  OLED のファンと GPU 電源ブリッジは swbatt.sys が担当し、Lite の SwitchFan は入れていません。`swbatt.c` は変更していません。
+  swbatt が実装しているのは `0x100`〜`0x108`で、`0x109`〜`0x10f` は未実装です(README に書いてあります)。
 
 ## 3. external/ の扱い
 - `.gitignore` に `external/` を足したので、そのままでは git に入りません。コミットに含めたいときは `git add -f external/`。

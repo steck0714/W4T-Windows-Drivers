@@ -77,6 +77,17 @@ Windows 側から SD の ext4 が見えない場合(Lite の SD ミニポート�
   (同じ I2C3 FTS4 / I2C1 / PWM を 2 つが操作する)。`docs/WINDOWS-SWITCH-COMPAT.md`。
 - Wi-Fi / Bluetooth / 音声は winx Lite 系と**同じコード系統**だが、OLED で動いた根拠は windows-switch の配布物 1 件のみ。
 
+## ファン・GPU 電源ブリッジ(swbatt)
+
+- OLED のファンと `\Device\SwitchBacklight`(GPU 電源ブリッジ、IOCTL `0x222410`)は、Lite の SwitchFan ではなく `swbatt.sys`
+  (`drivers/SwitchBattery`、`ROOT\SWBATT`)が担当する。CI の HEG-001 のドライバ一式(`tools/ci/drivers-t214-aula.json`)で必須としてビルドする。
+- swbatt が実装しているブリッジのコードは `0x100`〜`0x108`(アドレス・PLLP・温度・EMC クロック・DVFS 方針・GPU 報告)。
+  ruje0504-2/mesa-switch-woa `c77f8a6`(`tools/ci/mesa-switch-woa.rev`)の ABI にある `0x109`〜`0x10f`(EMC 投票・レールの取得/解放など)は**未実装**で、
+  `STATUS_INVALID_PARAMETER` を返す(安全側)。このリポジトリの TegraGpu が使うのは `0x100`〜`0x102` だけで、いまの組み合わせでは足りている。
+  値の一致は `tools/check_swbatt_bridge.py` が CI で確認する(不一致なら失敗、未実装は一覧だけ)。
+- `swbatt.c` は上流(windows-switch)とのバイト一致を検査しているので、ここでは書き換えていない。
+- Lite の SwitchFan(v33)は Aula に入れない。
+
 ## 未確認・未対応
 
 - OLED の GPU: `w64.cmd` に実験的な GPU 導入(`agent\gpu\`)があるが、v0.8.0 の zip には中身が無い。
