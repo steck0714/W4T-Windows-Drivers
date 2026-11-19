@@ -15,7 +15,7 @@
 #   gpu-aula (windows)  HEG-001 (OLED): build-aula-gpu.yml - the same TegraGpu sources as the Lite, packed as agent\gpu (experimental).
 #   gpu      (windows)  HAC-001 only: build-erista-gpu.yml (TegraGpu core + signed probe driver; no firmware inside, fwfetch loads it afterwards).
 #   commit-build        manual run with commit_build = true: puts the finished sets into build/<id>/ on this branch.
-#   release  (tag v*)   attaches one kit zip per model + SHA256SUMS + the public .cer to a GitHub *pre-release*.
+#   release  (tag v* or manual run with release_tag)   attaches one kit zip per model + SHA256SUMS + the public .cer to a GitHub *pre-release*.
 #
 # Firmware that must not be redistributed (NVIDIA / Broadcom / Switchroot) is loaded from OUTSIDE the repository, automatically,
 # at the start of every driver job: .github/actions/fwfetch-import downloads your private bundle (repository secret FW_BUNDLE_URL,
@@ -52,6 +52,10 @@ on:
         default: false
       heg001_tag:
         description: 'Only with heg001_upstream: release tag of DanilKhmyrov/windows-switch (empty = the tag in build/models.json)'
+        type: string
+        default: ''
+      release_tag:
+        description: 'Create a GitHub pre-release with this tag name (e.g. v0.0.1-test) from this run. Empty = no release (a pushed v* tag still releases)'
         type: string
         default: ''
   push:
@@ -537,11 +541,13 @@ jobs:
           git push
 
   release:
-    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.drivers.result == 'success' }}
+    if: ${{ !cancelled() && needs.drivers.result == 'success' && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')) }}
     needs: [host, drivers]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    env:
+      TAG: ${{ inputs.release_tag || github.ref_name }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -556,14 +562,14 @@ jobs:
           : > SHA256SUMS.txt
           for d in dl/kit-*; do
             m="${d#dl/kit-}"
-            (cd "$d" && zip -qr "../../SwitchDrivers-${m}-${GITHUB_REF_NAME}.zip" kit)
-            FILES+=("SwitchDrivers-${m}-${GITHUB_REF_NAME}.zip")
+            (cd "$d" && zip -qr "../../SwitchDrivers-${m}-${TAG}.zip" kit)
+            FILES+=("SwitchDrivers-${m}-${TAG}.zip")
             sed "s#  #  ${m}/#" "$d/kit/SHA256SUMS.txt" >> SHA256SUMS.txt
             cp -n "$d/kit/SwitchWOA-Test.cer" . 2>/dev/null || true
             { echo "## ${m}"; cat "$d/BUILD-INFO.md"; echo; } >> NOTES.md
           done
           EXTRA=(SHA256SUMS.txt)
           [ -f SwitchWOA-Test.cer ] && EXTRA+=(SwitchWOA-Test.cer)
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --prerelease \
-            --title "$GITHUB_REF_NAME (test-signed, not verified on a real Switch)" \
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "$TAG (test-signed, not verified on a real Switch)" \
             --notes-file NOTES.md "${FILES[@]}" "${EXTRA[@]}"
