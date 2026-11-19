@@ -118,6 +118,15 @@ try:
         if f["id"] == "bcm4356a3_hcd": f["expect"] = {"size": len(HCD), "sha256": sha(HCD)}
     json.dump(m, open(mp, "w"), indent=1)
 
+    # CI: dump scenario 3 (GPT image, lite profile, --deploy-gpu) so a Windows ARM64 runner can run the real fwfetch.exe on it.
+    if os.environ.get("FWFETCH_DUMP_FIXTURE"):
+        dump = os.environ["FWFETCH_DUMP_FIXTURE"]; shutil.rmtree(dump, ignore_errors=True)
+        shutil.copytree(sd, os.path.join(dump, "sd")); shutil.copy(gpt_img, os.path.join(dump, "disk-gpt.img"))
+        shutil.copy(mp, os.path.join(dump, "manifest.json"))
+        json.dump({"gpu": {n: sha(b) for n, b in GPU.items()}, "bl31": sha(BL31), "xusb": sha(XUSB)},
+                  open(os.path.join(dump, "expected.json"), "w"), indent=1)
+        print("fixture written to " + dump); sys.exit(0)
+
     # 1. real manifest: synthetic firmware must be REJECTED (hash differs), but unhashed bl31 / size-checked xusb are taken
     out1 = os.path.join(tmp, "out1")
     rc, log = run(["--profile", "aula", "--search-root", sd, "--disk", mbr_img, "--out-dir", out1])
