@@ -68,3 +68,14 @@ Broadcom ファームウェア、NVIDIA の GPU / XUSB ファームウェア、`
 | `reference/nvidia-dc/`（`dc` 全体） | CTCaer/switch-l4t-kernel-nvidia `76e6d489`（NVIDIA CORPORATION / CTCaer） | GPL-2.0 |
 | `reference/hekate-l4t/`、`reference/atf/plat-nvidia-tegra/` | CTCaer/hekate `8e1392df`、CTCaer/switch-l4t-atf `ed2ef6be` | GPL-2.0 / BSD-3-Clause |
 | `reference/ms-pep/` | microsoft/Windows-driver-samples `d49bb7d7`（Microsoft） | MS-PL |
+
+## 2026-11-19 追加（README のクレジット整理で見つかった抜け）
+| 参照 | 出典 | ライセンス |
+|---|---|---|
+| GPU 電圧表 GPUB01_NA_CVB_TABLE（`drivers/soc/tegra/tegra210-dvfs.c`）、Wi-Fi / PCIe の参照 | [CTCaer/switch-l4t-kernel-4.9](https://github.com/CTCaer/switch-l4t-kernel-4.9) `2d0059fd3167a8df756de2aa0489d4aa70a9fc15`（NVIDIA CORPORATION、CTCaer、Switchroot）。`drivers/*/TegraGpu/NOTICE` | GPL-2.0 |
+| GM20B レジスタ定義 `hw_*_gm20b.h`（無改変、`drivers/t210-icosa/gpu/GM20B-Diagnostic/regs/nvgpu/`） | [OE4T/linux-nvgpu](https://github.com/OE4T/linux-nvgpu) `l4t/l4t-r32.7.6` `7fbefcbf4b39643ab414454e6e4154865b333757`（NVIDIA CORPORATION） | MIT |
+| UEFI 側のパッチ（`drivers/t214-aula/upstream-src/patches/`） | [imbushuo/NintendoSwitchPkg](https://github.com/imbushuo/NintendoSwitchPkg) `09c3ade4`、[tianocore/edk2](https://github.com/tianocore/edk2)（Intel Corporation の `LaffStd.c` 由来フォント、ARM Limited / Linaro / Red Hat / Andrei Warkentin / Bingxing Wang、naehrwert）。`drivers/t214-aula/NOTICE.md` | BSD-2-Clause-Patent ほか |
+| WDDM 割り当ての参照 | [microsoft/graphics-driver-samples](https://github.com/microsoft/graphics-driver-samples) `de4a2161`（Microsoft） | MIT |
+| KMDF / NetAdapterCx の参照（コードなし） | [microsoft/Windows-Driver-Frameworks](https://github.com/microsoft/Windows-Driver-Frameworks)、[microsoft/Network-Adapter-Class-Extension](https://github.com/microsoft/Network-Adapter-Class-Extension)（Microsoft） | MIT |
+| SwitchWOA の ACPI 前提、Vulkan 進捗 | [ruje0504-2/winx](https://github.com/ruje0504-2/winx)（ruje0504-2） | 各リポジトリに従う |
+| OLED 上流のビルド時取得物（本リポジトリには含めない） | [mstorsjo/llvm-mingw](https://github.com/mstorsjo/llvm-mingw)、[KhronosGroup/Vulkan-Headers・Vulkan-Loader](https://github.com/KhronosGroup)、[PowerShell/Win32-OpenSSH](https://github.com/PowerShell/Win32-OpenSSH) | 各自のライセンス |

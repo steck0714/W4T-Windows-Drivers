@@ -31,6 +31,13 @@
 | `COPYING.md`, `LICENSES/` | ライセンスの案内と SPDX 別の全文 |
 | `CREDITS.md`, `reference/l4t/` | 出典・クレジットと、L4T/hekate/Switchroot の参照ソース |
 
+## 2026-11-19 追加分: HEG-001(OLED)を他の型番と同じ CI 方式に
+- `build/models.json` の HEG-001 を `ci` に変更。`tools/ci/drivers-t214-aula.json` で swhid / swbatt / switchbt / switchaudio / switchwifi をビルド・署名し、`build-all-drivers.yml` が `swagentsvc.exe`(ARM64)と windows-switch の `agent\` スクリプトを足して `build/HEG-001/drivers/agent/` を作る。上流バイナリの照合は `heg001_upstream = true` で従来どおり。
+- `tools/ci/verify_build.py` に `--no-inf-dir` / `--no-cat-dir`(INF なしの swhid / swbatt、カタログを Switch 上で作る Wi-Fi/BT/音声用)を追加。
+- fwfetch: HEG-001 は起動タスクでは配置されない(GPU 以外)ので、成果物の README に `--deploy <起動パーティション>` の手順を入れた。
+- **どれも CI 未実行・WDK 未確認・実機未確認。** v0.8.0 のバイナリとはバイト一致しない。
+- **テスト署名キット**: 全型番の `build/<型番>/test-signing/` に、その実行の `SwitchWOA-Test.cer` と `Install-TestSigning.cmd` ほかを同梱（`tools/testsign/`、`tools/build/make_testsign_kit.py`）。Lite の Stage0 に残っていた古い `.cer` も実行ごとの証明書で上書き。GPU の確認は `docs/ERISTA-GPU-CHECK-ja.md`、ビルドの確認は `docs/FULL-BUILD-CHECK-ja.md`。
+
 ## 2026-11-18 追加分（4 回目: スリープ→HDMI）
 - **スリープ**: `acpi/t210/lpi.asl.inc`（CPU `_LPI`、`SWITCH_LPI` で opt-in。コア停止は Switchroot DT が c7 を無効にしている根拠で無効フラグ付き）、`SwitchSleep/`（PSCI 状態 ID と SC7 前提検査。ATF `ed2ef6be` と突き合わせ）。`tools/check_dsdt_compile.py` が iasl で 3 構成をコンパイル。→ `docs/SLEEP-DESIGN-ja.md`
 - **HDMI**: `SwitchDisplay/src/dp_link.h`（L4T `tegra_dc_dp_calc_config` の移植。原本との差分テスト 2160 通り一致）。→ `docs/HDMI-DESIGN-ja.md`
@@ -77,6 +84,64 @@
     cargo build --release --manifest-path tools/fwfetch/Cargo.toml                  # fwfetch
 
 ビルドと署名の手順は各 `kits/` と `drivers/*/README.md`（WDK 10.0.19041 以降、Wi-Fi は 10.0.26100、テスト署名 + `testsigning on`）。
+
+## クレジット（使った全リポジトリと作者）
+
+このリポジトリは下の先行プロジェクトの成果の上にある。**全員の著作権と許諾条件を尊重すること。** 詳細（参照ファイル・固定コミット・値の対応）は `CREDITS.md`、
+ファイルごとの許諾は各ディレクトリの `LICENSE` / `NOTICE` / `LICENSE-AUDIT.md`、全文は `LICENSES/`。抜け・誤りは Issue / PR で直してほしい。
+ファイル単位の作者が上流に書かれていないものは、**分からないまま作者名を書いていない**（出典のリポジトリ・所有者だけを書いた）。
+
+### 本リポジトリ・直接の土台
+| リポジトリ | 作者・権利者 | 使った部分 | ライセンス |
+|---|---|---|---|
+| [steck0714/W4T-Windows-Drivers](https://github.com/steck0714/W4T-Windows-Drivers) | steck0714（リポジトリ所有者・方針と指示） | 本リポジトリ全体の統合 | GPL-2.0 |
+| [steck0714/winx](https://github.com/steck0714/winx)（NintendoSwitchPkg fork、`NOTICE.winx.md`） | steck0714 ほか | Erista / Lite 用ドライバ・ACPI(DSDT)・kit・app の複製元 | 各ディレクトリの `LICENSE` |
+| [ruje0504-2/winx](https://github.com/ruje0504-2/winx)（WinX companion firmware） | ruje0504-2 | SWOA 系 ACPI デバイスの前提、Vulkan 進捗ページ（参照のみ） | 各リポジトリに従う |
+
+### Windows ドライバ（ソース由来）
+| リポジトリ | 作者・権利者 | 使った部分 | ライセンス |
+|---|---|---|---|
+| [hayato41200/Windows-for-Switch-Drivers](https://github.com/hayato41200/Windows-for-Switch-Drivers)、[hayato41200/Windows-for-Switch](https://github.com/hayato41200/Windows-for-Switch) | hayato41200 | Wi-Fi(BCM4356)・Bluetooth・Audio・Battery 等、Erista 版ドライバの原作 | 同梱 `LICENSE` |
+| [ruje0504-2/Windows-for-Switch-Drivers](https://github.com/ruje0504-2/Windows-for-Switch-Drivers) | ruje0504-2 | T214 Wi-Fi 共通コア、TegraXusb、Lite 版ドライバ一式 | ファイルごとの SPDX |
+| [ruje0504-2/mesa-switch-woa](https://github.com/ruje0504-2/mesa-switch-woa) | ruje0504-2 | TegraGpu(KMD)、Windows 向け NVK backend、KMT ABI ヘッダ | Mesa 由来は MIT、T214 電源実装と KMDF probe は GPL-2.0-only |
+| [DanilKhmyrov/windows-switch](https://github.com/DanilKhmyrov/windows-switch) | DanilKhmyrov | OLED(Aula)枠一式：swhid / swbatt / touchread / swagentsvc、w64.cmd、tune.ps1、電源ボタン長押しの挙動 | GPL-2.0 |
+| SwitchDrivers（2026.11.x 各版）、`windows-10-switch-arm64-*` | 各配布者 | 段階0スクリプト、manifest、構成の突き合わせ | 各配布物に従う |
+
+### GPU（ライブラリ・参照）
+| リポジトリ | 作者・権利者 | 使った部分 | ライセンス |
+|---|---|---|---|
+| [danfromtico/mesa-switch](https://github.com/danfromtico/mesa-switch)（`0ff52079`）、[steck0714/mesa-switch](https://github.com/steck0714/mesa-switch)（フォーク、参照のみ）、[Mesa / NVK](https://docs.mesa3d.org/drivers/nvk.html) | danfromtico、Mesa・NVK 開発者 | GPU コマンドエンコーダ、NAK / NVK の GM20B 対応、ホストテストの検証元 | MIT |
+| [CTCaer/switch-l4t-kernel-nvgpu](https://github.com/CTCaer/switch-l4t-kernel-nvgpu) | NVIDIA CORPORATION、CTCaer、Switchroot | GM20B の GPCPLL(`clk_gm20b.c`)・レジスタ定義、PLL ロック手順 | MIT（`platform_gk20a_tegra` は GPL-2.0） |
+| [CTCaer/switch-l4t-kernel-4.9](https://github.com/CTCaer/switch-l4t-kernel-4.9)（`2d0059fd`） | NVIDIA CORPORATION、CTCaer、Switchroot | GPU 電圧表(GPUB01_NA_CVB_TABLE)、Wi-Fi / PCIe 実装の参照 | GPL-2.0 |
+| [CTCaer/switch-l4t-platform-t210-nx](https://github.com/CTCaer/switch-l4t-platform-t210-nx) | Billy Laws、CTCaer | PMIC・電源ツリー、GPU レール、DVFS 上限 | GPL-2.0 |
+| [OE4T/linux-nvgpu](https://github.com/OE4T/linux-nvgpu)（`l4t/l4t-r32.7.6`、`7fbefcbf`） | NVIDIA CORPORATION、OE4T | GM20B レジスタ定義 `hw_*_gm20b.h`（無改変、`drivers/t210-icosa/gpu/GM20B-Diagnostic/`） | MIT |
+| [torvalds/linux](https://github.com/torvalds/linux)（nouveau v6.12、`666539ee`） | Red Hat Inc. 2017、nouveau 開発者、NVIDIA | GM20B ページテーブル形式、PMU 手順、電圧・speedo の式 | MIT / GPL-2.0-only（ファイルごと） |
+
+### ブート・電源・表示（参照ソースの同梱：`reference/`）
+| リポジトリ | 作者・権利者 | 使った部分 | ライセンス |
+|---|---|---|---|
+| [CTCaer/hekate](https://github.com/CTCaer/hekate)（`8e1392df`） | CTCaer、naehrwert、shchmue、Billy Laws ほか | MAX77620/MAX77621/BM92T36/BQ24193/MAX17050 のシーケンス、I2C、Joy-Con、タッチ、ALS、GPU 電源順、`l4t.c`（`reference/l4t/hekate/`） | GPL-2.0 |
+| [CTCaer/switch-l4t-atf](https://github.com/CTCaer/switch-l4t-atf)（`ed2ef6be`） | ARM Limited、NVIDIA、CTCaer | PSCI / SC7 の状態 ID（`reference/atf/`、スリープの根拠） | BSD-3-Clause |
+| [CTCaer/switch-l4t-kernel-nvidia](https://github.com/CTCaer/switch-l4t-kernel-nvidia)（`76e6d489`） | NVIDIA CORPORATION、CTCaer | DisplayPort / DC（`dp.c` の移植 `dp_link.h`、`reference/nvidia-dc/`） | GPL-2.0 |
+| [Switchroot](https://switchroot.org) / L4T / LineageOS for Switch | Switchroot チーム、NVIDIA | Switch ハードウェア対応の背景、ブート連鎖、DT | 各プロジェクトに従う |
+| [imbushuo/NintendoSwitchPkg](https://github.com/imbushuo/NintendoSwitchPkg)（`09c3ade4`）、[tianocore/edk2](https://github.com/tianocore/edk2) | TianoCore、imbushuo（Bingxing Wang）、ARM Limited、Linaro、Red Hat、Andrei Warkentin、Intel Corporation（`LaffStd.c` 由来の 8x19 フォント）、naehrwert（`Types.h`）、各ポート作者 | UEFI 側（`drivers/t214-aula/upstream-src/` のパッチ。本体は含まない） | BSD-2-Clause-Patent ほか（`drivers/t214-aula/NOTICE.md`） |
+| [microsoft/Windows-driver-samples](https://github.com/microsoft/Windows-driver-samples)（`d49bb7d7`、`reference/ms-pep/`） | Microsoft | PEP の参照 | MS-PL |
+| [microsoft/graphics-driver-samples](https://github.com/microsoft/graphics-driver-samples)（`de4a2161`） | Microsoft | WDDM の割り当て・ハンドル管理の参照（`TegraGpu/windows/allocation.c`） | MIT |
+| [microsoft/Windows-Driver-Frameworks](https://github.com/microsoft/Windows-Driver-Frameworks)、[microsoft/Network-Adapter-Class-Extension](https://github.com/microsoft/Network-Adapter-Class-Extension) | Microsoft | KMDF の割り込み記述子、NetAdapterCx のアダプタ作成の参照（コードは含まない） | MIT |
+
+### ビルド・実行時に取得するもの（本リポジトリには含めない）
+| 名前 | 作者 | 用途 |
+|---|---|---|
+| [mstorsjo/llvm-mingw](https://github.com/mstorsjo/llvm-mingw) | mstorsjo | OLED 上流の NVK ビルド用コンテナ |
+| [KhronosGroup/Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers)、[Vulkan-Loader](https://github.com/KhronosGroup/Vulkan-Loader) | Khronos Group | OLED 上流の NVK ビルド（ARM64 ローダー） |
+| [PowerShell/Win32-OpenSSH](https://github.com/PowerShell/Win32-OpenSSH) | Microsoft / PowerShell チーム | OLED 上流の任意の SSH（ARM64 ビルドを別途取得） |
+| Rust クレート（`tools/fwfetch/THIRD-PARTY.md`：adler2、crc32fast、flate2、sha2、serde、serde_json、memchr、miniz_oxide、libc ほか） | 各クレートの作者（[crates.io](https://crates.io)） | fwfetch の実行ファイル（MIT 側で使用） |
+| Microsoft の WDK / SDK / WiFiCx、公式ドキュメント（Microsoft Learn） | Microsoft | ビルド・仕様の根拠（コードは含まない） |
+| NVIDIA / Maxim / TI / Broadcom の公開データシート・公開ソース | 各社 | 各ドライバの README に個別記載 |
+
+### 作業
+- ソースの統合・整理、静的検査、CI、fwfetch、`build/`、OLED 枠の移動、スリープ・HDMI の設計、テスト署名キット：**Claude（Anthropic）による作業。steck0714 の指示と所有物に基づく**。
+- 含めないもの：Broadcom ファームウェア、NVIDIA の GPU / XUSB ファームウェア、`bl31.bin`、秘密鍵（`tools/fwfetch/` が利用者の SD から取り出す）。
 
 ## ライセンス・出典
 

@@ -26,6 +26,13 @@ Lite 側の設定・ドライバは OLED の根拠にならないので、ここ
 (`python tools/build/fill_heg001.py --zip windows-switch-arm64-drivers-v0_8_0.zip`。`manifest/` のサイズと SHA-256 に一致したものだけ書く)。
 `bl33.bin` / ビットマップはここでは扱わない。
 
+## GitHub Actions でのビルド(他の型番と同じ CI 方式)
+
+`build/models.json` の HEG-001 は `build: ci`。`tools/ci/drivers-t214-aula.json` の一覧を `tools/ci/Build-AllDrivers.ps1 -Model HEG-001` が
+(Lite と同じ `drivers/t214-hoag/tools/Build-Driver.ps1` で)ビルドし、1 つの証明書でテスト署名する。`swhid` / `swbatt` / `swagentsvc` はこのフォルダのソース、
+`switchbt` / `switchaudio` / `switchwifi` は `drivers/t214-hoag/` の同系統ソース(`kit/` の INF と HWID・版が一致)。結果は `build/HEG-001/drivers/agent/`。
+**CI は未実行・実機未確認。** 上流バイナリの照合に戻すにはワークフローを `heg001_upstream = true` で実行する。詳細は `build/HEG-001/README.md`。
+
 ## 上流のソース(`upstream-src/`)
 
 windows-switch の `main`(ユーザー提供の `windows-switch-main.zip`)から、**バイナリと画像を除いた 110 ファイル**を置いた。
@@ -48,7 +55,7 @@ windows-switch の `main`(ユーザー提供の `windows-switch-main.zip`)から
 - 上流の `build*.sh` と `#include "../touchread/touchread.c"` は上流の配置を前提にしている。**`layout.json`** が移動先と上流の位置、上流の SHA-256 を持ち、
   `python tools/aula_layout.py --check` が「クレジットブロックと `#include` の 1 行を除くと上流とバイト一致」を確かめ、
   `python tools/aula_layout.py --materialize <空のディレクトリ>` が上流と同じ形の木を作る(ビルドはそこで行う。こちらではビルドしていない)。
-**このリポジトリではビルドも実行もしていない**(WDK・mingw・Docker・実機が無い)。v0.8.0 のバイナリとの一致も、スクリプト・INF・`swagentsvc.exe` の SHA-256 で
+**このリポジトリを作った環境ではビルドも実行もしていない**(WDK・Docker・実機が無い。CI は上の節)。v0.8.0 のバイナリとの一致も、スクリプト・INF・`swagentsvc.exe` の SHA-256 で
 確かめただけで、`swhid.sys` / `swbatt.sys` がこのソースから出来る証拠は無い。出自・除外したもの・確認内容は `UPSTREAM-SOURCE.md`、**ファイルごとのライセンス監査は `LICENSE-AUDIT.md`、帰属表示は `NOTICE.md`**。
 
 ## 再配布できないファイルは実機から取る(`tools/fwfetch`)

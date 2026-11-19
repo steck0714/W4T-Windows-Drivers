@@ -1,0 +1,19 @@
+[
+  { "name": "swhid",  "kit": "agent/arm64", "dir": "SwitchHid",     "sources": ["src/swhid.c"],  "inf": null, "wdm": true, "libs": ["hidclass.lib"] },
+  { "name": "swbatt", "kit": "agent/arm64", "dir": "SwitchBattery", "sources": ["src/swbatt.c"], "inf": null, "wdm": true, "libs": ["battc.lib"] },
+  { "name": "switchbt",    "kit": "agent/bt",    "dir": "../../t214-hoag/SwitchBluetooth", "sources": ["src/switchbt.c"],       "inf": null, "optional": true },
+  { "name": "switchaudio", "kit": "agent/audio", "dir": "../../t214-hoag/SwitchAudio",     "sources": ["src/switchaudio.cpp"],  "inf": null, "optional": true,
+    "libs": ["portcls.lib", "libcntpr.lib"], "wdm": true },
+  { "name": "switchwifi",  "kit": "agent/wifi",  "dir": "../../t214-hoag/SwitchWifi",
+    "sources": ["core/msgbuf_data.c", "core/msgbuf_ring.c", "core/msgbuf_control.c", "core/phy_rates.c", "core/rx_metadata.c",
+                "core/receive_filter.c", "core/pci_intx.c", "core/station_frame.c", "core/station_security.c",
+                "windows/transport.c", "windows/resources.c", "windows/chip.c", "windows/shared.c", "windows/control.c",
+                "windows/lifecycle.c", "windows/firmware.c", "windows/capabilities.c", "windows/requests.c", "windows/tlv_memory.cpp",
+                "windows/scan.c", "windows/scan_firmware.c", "windows/report.c", "windows/station_filter.c", "windows/station_data.c",
+                "windows/adapter.c", "windows/device.c", "windows/join.c", "windows/join_firmware.c", "windows/station_keys.c"],
+    "inf": null, "optional": true,
+    "wdk": "10.0.26100.0", "kmdf": "1.33", "ntddi": "0x0A00000C",
+    "includes": ["km\\wificx\\1.0", "km\\wlan\\2.0", "km\\netcx\\kmdf\\adapter\\2.2", "shared\\netcx\\shared\\1.0"],
+    "libs": ["{KMLIB}\\wificx\\1.0\\wificxstub.lib", "{KMLIB}\\netcx\\kmdf\\adapter\\2.2\\netadaptercxstub.lib",
+             "{KMLIB}\\wlan\\2.0\\WificxTLVGenParse.lib", "{KMLIB}\\ndis.lib", "libcntpr.lib"] }
+]

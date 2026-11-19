@@ -65,6 +65,28 @@ class T(unittest.TestCase):
     def test_inf_no_driverver(self): self.check(1, "DriverVer", pe=make_pe(), inf=INF.replace("DriverVer=11/19/2026,1.0.0.0\n", ""))
     def test_inf_lists_missing_file(self): self.check(1, "SourceDisksFiles", pe=make_pe(), inf=INF + "y.sys=1\n")
 
+    def test_no_inf_dir_allowed(self):
+        # windows-switch swhid/swbatt: a signed .sys without INF is fine in a folder named with --no-inf-dir
+        with tempfile.TemporaryDirectory() as t:
+            d = os.path.join(t, "agent", "arm64"); os.makedirs(d)
+            with open(os.path.join(d, "swhid.sys"), "wb") as f:
+                f.write(make_pe())
+            self.assertEqual(run(t)[0], 1)
+            rc, out = run(t, "--no-inf-dir", "agent/arm64")
+            self.assertEqual(rc, 0, out)
+            with open(os.path.join(t, "other.sys"), "wb") as f:
+                f.write(make_pe())
+            rc, out = run(t, "--no-inf-dir", "agent/arm64")
+            self.assertEqual(rc, 1, out)   # only the named folder is exempt
+
+    def test_no_cat_dir_allowed(self):
+        # windows-switch Wi-Fi/BT/audio: the catalog is made on the console, so the INF has no .cat in the build
+        with tempfile.TemporaryDirectory() as t:
+            kit(t, pe=make_pe(), cat=False)
+            self.assertEqual(run(t)[0], 1)
+            rc, out = run(t, "--no-cat-dir", "Switch-X")
+            self.assertEqual(rc, 0, out)
+
     def test_allow_unsigned(self):
         with tempfile.TemporaryDirectory() as t:
             rc, out = run(kit(t, pe=make_pe(signed=False)), "--allow-unsigned")

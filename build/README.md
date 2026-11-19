@@ -58,3 +58,8 @@ build/HAC-001/
 - `apps` ジョブ: SwitchCenter / SwitchPatcher を win-arm64 で発行し、`.exe` が ARM64 か、鍵ファイルが無いかを検査 → `apps-<型番>` アーティファクト（`commit_build` で `build/<型番>/apps/`）。
 - `gpu-lite` ジョブ（`build-lite-gpu.yml`）: HDH-001 の TegraGpu。ファームを取り込めた場合は probe と SwitchFan ブリッジを署名・カタログ化し、取り込めない場合は `TegraGpuCore.lib` だけ。表示ドライバや Vulkan ではなく、動作確認用の probe。
 - HEG-001（OLED）は上流のビルド済み（ハッシュ照合）のまま。上流ソースのビルドは、Windows のイメージから取り出した ARM64 バイナリ（ntoskrnl 等）と EWDK 入りの Docker が要るため、CI では行っていない。
+
+## テスト署名キット（2026-11-19 追加、全型番）
+
+各 `build/<型番>/test-signing/` に、その実行の `SwitchWOA-Test.cer` と `Install-TestSigning.cmd`（Switch で管理者実行 → 証明書を信頼 + `testsigning on`）、
+`Stage0-SwitchSetup.ps1`、`Set-SwitchTestSigning.ps1`（PC から SD の BCD を直す）が入る。HAC-001-01 はスクリプトのみ（`.cer` なし）。→ `tools/testsign/README-ja.md`

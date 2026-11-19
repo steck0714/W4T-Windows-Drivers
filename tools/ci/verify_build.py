@@ -9,7 +9,7 @@ This is NOT a run on hardware. It catches build-output errors that a green compi
   - a kit folder with a .sys but no INF (nothing to install it with)
 Exit code 0 = no problems, 1 = problems (listed), 2 = nothing to check.
 
-  verify_build.py build/HAC-001/drivers [--allow-unsigned]
+  verify_build.py build/HAC-001/drivers [--allow-unsigned] [--no-inf-dir agent/arm64] [--no-cat-dir agent/wifi]
   verify_build.py --apps build/_apps/HAC-001      published apps: every top-level .exe must be an ARM64 image,
                                                   and no key material may be in the folder
 """
@@ -54,7 +54,7 @@ def read_inf(path):
     return raw.decode(enc, "replace")
 
 
-def check_inf(path, folder, problems):
+def check_inf(path, folder, problems, skip_cat=False):
     text = read_inf(path)
     rel = os.path.relpath(path, folder)
     if not re.search(r"(?im)^\s*DriverVer\s*=\s*\S", text):
@@ -63,7 +63,7 @@ def check_inf(path, folder, problems):
         problems.append("%s: no NTarm64 section (would not install on ARM64 Windows)" % rel)
     have = {n.lower() for n in os.listdir(os.path.dirname(path))}
     cat = re.search(r"(?im)^\s*CatalogFile(?:\.[A-Za-z0-9]+)?\s*=\s*([^\s;]+)", text)
-    if cat and cat.group(1).lower() not in have:
+    if cat and not skip_cat and cat.group(1).lower() not in have:
         problems.append("%s: CatalogFile %s is not next to the INF" % (rel, cat.group(1)))
     # files the INF copies by name ([SourceDisksFiles] lines are the authoritative list)
     sect = re.search(r"(?ims)^\s*\[SourceDisksFiles[^\]]*\]\s*$(.*?)(?=^\s*\[|\Z)", text)
@@ -114,6 +114,12 @@ def main(argv=None):
     ap.add_argument("folder")
     ap.add_argument("--apps", action="store_true", help="check published apps (ARM64 .exe, no key files) instead of drivers")
     ap.add_argument("--allow-unsigned", action="store_true", help="do not require an embedded signature on .sys files")
+    ap.add_argument("--no-cat-dir", action="append", default=[], metavar="REL_DIR",
+                    help="folder (relative to FOLDER) whose INF has no .cat here because the Switch makes and signs the "
+                         "catalog itself (windows-switch w64.cmd + Inf2Cat for Wi-Fi/Bluetooth/audio); repeatable")
+    ap.add_argument("--no-inf-dir", action="append", default=[], metavar="REL_DIR",
+                    help="folder (relative to FOLDER, e.g. agent/arm64) whose .sys files are installed without an INF "
+                         "(windows-switch swhid/swbatt are registered by w64.cmd); repeatable")
     a = ap.parse_args(argv)
     folder = os.path.abspath(a.folder)
     if not os.path.isdir(folder):
@@ -123,6 +129,7 @@ def main(argv=None):
         return check_apps(folder)
     problems, n_sys, n_inf = [], 0, 0
     kits = {}
+    no_cat = {os.path.normpath(os.path.join(folder, r)) for r in a.no_cat_dir}
     for d, _, fs in os.walk(folder):
         for f in fs:
             ext = os.path.splitext(f)[1].lower()
@@ -145,11 +152,12 @@ def main(argv=None):
                 n_inf += 1
                 kits.setdefault(d, {"sys": 0, "inf": 0})["inf"] += 1
                 try:
-                    check_inf(p, folder, problems)
+                    check_inf(p, folder, problems, skip_cat=os.path.normpath(d) in no_cat)
                 except OSError as e:
                     problems.append("%s: %s" % (os.path.relpath(p, folder), e))
+    no_inf = {os.path.normpath(os.path.join(folder, r)) for r in a.no_inf_dir}
     for d, c in kits.items():
-        if c["sys"] and not c["inf"]:
+        if c["sys"] and not c["inf"] and os.path.normpath(d) not in no_inf:
             problems.append("%s: has a .sys but no INF" % os.path.relpath(d, folder))
     if n_sys == 0 and n_inf == 0:
         print("nothing to check in " + folder)

@@ -112,6 +112,12 @@ foreach ($r in ($results | Where-Object { $_.Status -ne 'FAIL' })) {
 }
 $cer = Join-Path $ToolsDir 'cert\SwitchWOA-Test.cer'
 if (Test-Path $cer) { Copy-Item $cer $KitRoot -Force }
+# A kit folder may carry an OLD SwitchWOA-Test.cer from the repository (Lite's Switch-Stage0 does). That is not the certificate
+# this run signed with: overwrite every such copy with the fresh one, or Stage0 would trust the wrong certificate.
+if (Test-Path $cer) {
+  Get-ChildItem $KitRoot -Recurse -Filter 'SwitchWOA-Test.cer' | Where-Object { $_.DirectoryName -ne $KitRoot } |
+    ForEach-Object { Copy-Item $cer $_.FullName -Force; Write-Host "refreshed stale certificate copy: $($_.FullName.Substring($KitRoot.Length + 1))" }
+}
 $cerNote = if ($env:SWOA_CERT_THUMBPRINT) { "the certificate from the SWOA_PFX_BASE64 secret (thumbprint $($env:SWOA_CERT_THUMBPRINT))" } else { 'a new self-signed certificate made by this run' }
 
 $sums = Get-ChildItem $KitRoot -Recurse -File | Where-Object { $_.Extension -in '.sys', '.inf', '.cat', '.cer' } | ForEach-Object {
