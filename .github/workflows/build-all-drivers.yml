@@ -255,10 +255,11 @@ jobs:
 
       - name: "Verify the output (every .sys is a signed ARM64 native image, every INF has its .sys / .cat - not a hardware test)"
         run: |
-          $extra = @()
+          # swoahello (Stage0) and swoadiag (UsbDiag) are diagnostic drivers installed by their scripts: no INF by design
+          $extra = @('--no-inf-dir', 'Switch-Stage0', '--no-inf-dir', 'Switch-UsbDiag')
           if ('${{ matrix.model }}' -eq 'HEG-001') {
             # windows-switch layout: swhid/swbatt are registered by w64.cmd (no INF); the Wi-Fi/BT/audio catalogs are made on the console
-            $extra = @('--no-inf-dir', 'agent/arm64', '--no-cat-dir', 'agent/wifi', '--no-cat-dir', 'agent/bt', '--no-cat-dir', 'agent/audio')
+            $extra += @('--no-inf-dir', 'agent/arm64', '--no-cat-dir', 'agent/wifi', '--no-cat-dir', 'agent/bt', '--no-cat-dir', 'agent/audio')
           }
           python tools/ci/verify_build.py 'build/${{ matrix.model }}/drivers' @extra
 
