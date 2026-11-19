@@ -12,7 +12,7 @@ size/flag drift gives a KMD that misreads UMD requests. The headers carry _Stati
 so compiling them also checks the layout."""
 import argparse, hashlib, pathlib, subprocess, sys, tempfile
 
-UPSTREAM = "ruje0504-2/mesa-switch-woa 80dfad4"
+UPSTREAM = "ruje0504-2/mesa-switch-woa c77f8a6"
 HERE = pathlib.Path(__file__).resolve().parent.parent
 KMD = HERE / "drivers/t210-icosa/drivers/TegraGpu/windows"
 UMD = HERE / "drivers/t210-icosa/drivers/TegraGpu/tools/nvkmd_windows"
@@ -24,9 +24,9 @@ FILES = {  # file -> directory it must live in
 PINS = {
     "adapter_abi.h": "9cf36e45dac585d0456acf63fb7c441e3be6eb0582dae3fd222263b28719b3ae",
     "allocation_abi.h": "860bbf9c80475c7a853d182cea53ef70a03ef9a5e662aa06c04cf9001aa31ecd",
-    "kmt_abi.h": "994287e1afd1473a5232e884a991501d3030e237b86fbbd5db0c82555c967273",
-    "nvdec_abi.h": "ffd05fb124b630a3d04ac051ae7f7c7d58a20baafb4a6312e3c72ef0e645e5ed",
-    "submit_abi.h": "35fc98ffea62064dee557b13ea44f12b7adac3df4be4267d8a7b1c5f790db747",
+    "kmt_abi.h": "23f93d58cde3f893463270d263ba07ef3ad5523dbf2692b93fd7b2a2a1255a41",
+    "nvdec_abi.h": "4dc45cc8e525577f3684c2b96c42b4bbd6ad353f1bb054a83cc81a448ae95e39",
+    "submit_abi.h": "9359c37d2474e67363d24f1f87573015b5cf73ed1d926f55aac7876071de5d9f",
 }
 def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
 
