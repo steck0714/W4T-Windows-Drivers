@@ -3,6 +3,7 @@
 #include "../platform/t214_gr_context.h"
 #include "../core/gr_draw.h"
 #include "../core/gm20b_mmu.h"
+#include "tg_aligned.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -92,7 +93,7 @@ static enum tg_gpu_gr_context_result run(struct model *m,struct tg_gpu_gr_netlis
 int main(int argc,char **argv)
 {
     struct model m={.regs=calloc(1,0x600000),.inst=calloc(1,4096),
-        .work=aligned_alloc(4096,TG_GPU_GR_CHANNEL_WORK_BYTES)};
+        .work=tg_aligned_alloc(4096,TG_GPU_GR_CHANNEL_WORK_BYTES)};
     struct tg_gpu_gr_context_status s;
     uint32_t ctx[]={0x400080,0,0x1234},bundle[]={0xe100,0xabc},method[]={0x100,0x55};
     struct tg_gpu_gr_netlist net={0};
@@ -180,7 +181,7 @@ int main(int argc,char **argv)
     reset(&m);ctx[0]=0x70000;
     assert(run(&m,&net,&s)==TG_GPU_GR_CTX_FORMAT && !m.writes);ctx[0]=0x400080;
     {
-        void *arena=aligned_alloc(4096,0x80000);assert(arena);memset(arena,0,0x80000);
+        void *arena=tg_aligned_alloc(4096,0x80000);assert(arena);memset(arena,0,0x80000);
         struct tg_gpu_gr_work work={m.work,0x90000000,TG_GPU_GR_WORK_BYTES};
         uint64_t *pt=(uint64_t *)((uint8_t *)arena+0x20000),pte;
         assert(tg_gpu_gr_context_prepare(arena,0x80000000,0x80000,&work));
@@ -205,7 +206,7 @@ int main(int argc,char **argv)
         assert(pt[(TG_GPU_GR_WORK_VA+TG_GPU_DRAW_OFFSET+4096)>>12]==pte);
         assert(tg_gpu_pte_4k(0x90000000,false,true,&pte)&&pt[TG_GPU_GR_WORK_VA>>12]==pte);
         assert(!pt[(TG_GPU_GR_WORK_VA+TG_GPU_GR_CHANNEL_WORK_BYTES)>>12]);
-        free(arena);
+        tg_aligned_free(arena);
     }
     if(argc==2) {
         FILE *f=fopen(argv[1],"rb");assert(f && !fseek(f,0,SEEK_END));long bytes=ftell(f);
@@ -215,7 +216,7 @@ int main(int argc,char **argv)
         reset(&m);assert(run(&m,&net,&s)==TG_GPU_GR_CTX_OK);free(data);
         puts("External NETB graphics initialization streams: PASS (model only)");
     }
-    free(m.regs);free(m.inst);free(m.work);
+    free(m.regs);free(m.inst);tg_aligned_free(m.work);
     puts("PASS: GR binding/golden-save order, owned mappings, cache visibility and failure rejection (model only)");
     return 0;
 }
