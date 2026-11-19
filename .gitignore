@@ -62,3 +62,5 @@ gpmu_ucode_desc.bin
 brcmfmac4356*.bin
 brcmfmac4356*.txt
 BCM4356A3.hcd
+# CI が別リポジトリを固定コミットで取得する場所(mesa-switch-woa など)
+external/
