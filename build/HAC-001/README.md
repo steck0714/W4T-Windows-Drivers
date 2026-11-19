@@ -1,7 +1,7 @@
 # HAC-001 — 初代 Switch（Erista / Tegra X1、コードネーム Icosa）
 
 ソース: `drivers/t210-icosa/`。ビルド設定: `tools/ci/drivers-t210.json`（16 ドライバ）。
-`drivers/` は、CI が作った一式を `tools/build/assemble_build.py` が置く場所。**いまは空**（`.sys` 未作成）。
+`drivers/` は、CI が作った一式を `tools/build/assemble_build.py` が置く場所。**リポジトリ内はいまは空**（CI ではビルドできている。手動実行で `commit_build` を ON にすると置かれる）。
 
 ## 入れる順番（キット名はビルド後のフォルダ名）
 
@@ -16,4 +16,4 @@ Wi-Fi は **1 つだけ**（`Switch-Wlan` か `Switch-Wifi-Probe`。同じ HWID 
 
 ## 状態
 
-ビルド・実機とも未確認。`BUILD-INFO.md`（CI が書く）に OK / WARN / FAIL がドライバ別に出る。
+CI のビルドは成功（2026-11-19、`build-all-drivers` #21）。**実機は未確認。** `BUILD-INFO.md`（CI が書く）に OK / WARN / FAIL がドライバ別に出る。
