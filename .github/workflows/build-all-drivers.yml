@@ -447,7 +447,13 @@ jobs:
           if ($fail) { exit 1 }
       - name: Apps are ARM64 and carry no firmware or keys
         run: |
-          python tools/ci/verify_build.py --apps 'build/_apps/${{ matrix.model }}'
+          # HEG-001 (OLED) has no SwitchCenter / SwitchPatcher: an empty folder is not an error there.
+          if (Get-ChildItem 'build/_apps/${{ matrix.model }}' -Directory -ErrorAction SilentlyContinue) {
+            python tools/ci/verify_build.py --apps 'build/_apps/${{ matrix.model }}'
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            Write-Host "::notice::no apps for ${{ matrix.model }}; nothing to verify"
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: apps-${{ matrix.model }}
