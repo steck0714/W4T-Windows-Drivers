@@ -10,7 +10,7 @@ name: build-fwfetch
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches: [main, master, test]
     tags: ['fwfetch-v*']
     paths: ['tools/fwfetch/**', '.github/workflows/build-fwfetch.yml']
   pull_request:
