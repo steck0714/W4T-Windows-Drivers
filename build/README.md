@@ -3,16 +3,16 @@
 `build/<型番>/` に、その型番向けの**完成したドライバ一式**を置く。ビルド済みバイナリ（`.sys` / `.cat` / `.exe`）はここに置いてよい
 （作者の許可）。**再配布できないファームウェア・鍵は引き続き置かない**（`COPYING.md`、`tools/fwfetch/`）。
 
-> **いまのこのフォルダは「置き場と手順」だけで、`.sys` は入っていない。**
-> ドライバのビルドには Windows の WDK が要る。このフォルダを作った環境には WDK も Windows もなく、
-> Microsoft 配布元にも届かなかったため、`.sys` を作れなかった。下の「埋め方」を実行すると、ここに入る。
+> **このフォルダには、まだ `.sys` をコミットしていない。** ただし **GitHub Actions 上のビルドは通っている**
+> （2026-11-19、`build-all-drivers` #21、コミット `2217398`）。成果物は Actions のアーティファクトに出る。
+> 手動実行で `commit_build` を ON にすると、ここにコミットされる。**実機での動作は、どの型番も未確認。**
 
 | 型番 | 機種 | コードネーム | 状態 | 埋め方 |
 |---|---|---|---|---|
-| `HAC-001` | 初代 Switch（Erista） | Icosa | **CI でビルドできる**（未実行） | GitHub Actions `build-all-drivers`（手動実行で `commit_build` を ON）→ `build/HAC-001/drivers/` |
+| `HAC-001` | 初代 Switch（Erista） | Icosa | **CI でビルド成功**（2026-11-19、#21）。実機未確認 | GitHub Actions `build-all-drivers`（手動実行で `commit_build` を ON）→ `build/HAC-001/drivers/` |
 | `HAC-001-01` | 2019 年版（Mariko） | Iowa | **ドライバ一式が無い** | なし。Erista / Lite の流用はしない（基板・電源・I2C の一致が未証明） |
-| `HDH-001` | Switch Lite | Hoag | **CI でビルドできる**（未実行）。設定は `tools/ci/drivers-t214-hoag.json`（16 ドライバ、うち 4 つは任意） | `build-all-drivers`（`models` に `HDH-001`）→ `build/HDH-001/drivers/` |
-| `HEG-001` | 有機EL | Aula | **上流のビルド済み（windows-switch v0.8.0）のみ**。上流ソースは `drivers/t214-aula/drivers/<ドライバ名>/` と `drivers/t214-aula/upstream-src/`（未ビルド） | `build-all-drivers` が上流のリリースを取得して `fill_heg001.py` で照合（手元なら `python tools/build/fill_heg001.py --zip windows-switch-arm64-drivers-v0_8_0.zip`） |
+| `HDH-001` | Switch Lite | Hoag | **CI でビルド成功**（2026-11-19、#21。実機未確認）。設定は `tools/ci/drivers-t214-hoag.json`（16 ドライバ、うち 4 つは任意） | `build-all-drivers`（`models` に `HDH-001`）→ `build/HDH-001/drivers/` |
+| `HEG-001` | 有機EL | Aula | **既定は CI でソースからビルド**（2026-11-19、#21 で成功。実機未確認。v0.8.0 とバイト一致はしない）。上流のビルド済み（windows-switch v0.8.0）を使うこともできる | 既定: `build-all-drivers`（`models` に `HEG-001`）→ `build/HEG-001/drivers/agent/`。上流版: `heg001_upstream` を ON、または手元で `python tools/build/fill_heg001.py --zip windows-switch-arm64-drivers-v0_8_0.zip` |
 
 機械可読な対応表は `models.json`。
 
@@ -20,6 +20,9 @@
 
 `build-all-drivers`（Actions → Run workflow）の `models` に型番（`HAC-001,HDH-001` のようにカンマ区切り、または `all`）を入れる。型番ごとに別のジョブが走り、
 `build-<型番>` というアーティファクトができる。`commit_build` を ON にすると `build/<型番>/` にコミットされる。`HAC-001-01` は一式が無いので「スキップ」と表示される。
+
+`test` ブランチへの push だけでは `commit-build` / `release` / `heg001` はスキップされる（仕様）。pre-release は、`v*` タグを push するか、手動実行で `release_tag`（例: `v0.0.1-test`）を入れると作られる。
+Lite の GPU だけなら `build-lite-gpu` を手動実行して `release_tag` を入れる（`build-all-drivers` から呼ばれたときは動かない）。同名のタグがあると失敗する。
 
 ## 再配布できないファームは外から自動で読み込む
 
@@ -57,7 +60,7 @@ build/HAC-001/
 - InfVerif（参考表示。失敗しても止めない）。
 - `apps` ジョブ: SwitchCenter / SwitchPatcher を win-arm64 で発行し、`.exe` が ARM64 か、鍵ファイルが無いかを検査 → `apps-<型番>` アーティファクト（`commit_build` で `build/<型番>/apps/`）。
 - `gpu-lite` ジョブ（`build-lite-gpu.yml`）: HDH-001 の TegraGpu。ファームを取り込めた場合は probe と SwitchFan ブリッジを署名・カタログ化し、取り込めない場合は `TegraGpuCore.lib` だけ。表示ドライバや Vulkan ではなく、動作確認用の probe。
-- HEG-001（OLED）は上流のビルド済み（ハッシュ照合）のまま。上流ソースのビルドは、Windows のイメージから取り出した ARM64 バイナリ（ntoskrnl 等）と EWDK 入りの Docker が要るため、CI では行っていない。
+- HEG-001（OLED）は既定でソースから CI ビルドする（`swhid` / `swbatt` / `swagentsvc` ほか、`tools/ci/drivers-t214-aula.json`）。`heg001_upstream` を ON にすると、上流のビルド済み（ハッシュ照合）に切り替わる。上流の UEFI 側（`upstream-src/`）のビルドは、Windows のイメージから取り出した ARM64 バイナリ（ntoskrnl 等）と EWDK 入りの Docker が要るため、CI では行っていない。
 
 ## テスト署名キット（2026-11-19 追加、全型番）
 
