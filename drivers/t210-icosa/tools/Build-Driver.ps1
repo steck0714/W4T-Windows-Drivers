@@ -90,8 +90,9 @@ foreach ($s in @($Sources) + (Join-Path $PSScriptRoot 'kmdf_support.c')) {
   $obj = Join-Path $OutDir ([IO.Path]::GetFileNameWithoutExtension($src) + '.obj')
   # C++ sources (WiFiCx headers are C++): no RTTI, no exceptions, C++17.
   $extra = if ($src -like '*.cpp') { @('/GR-', '/EHs-c-', '/std:c++17', '-Wno-unused-function', '-Wno-missing-field-initializers', '-Wno-duplicate-decl-specifier') } else { @() }
-  $fi = if ((Split-Path $src -Leaf) -eq 'kmdf_support.c') { @() } else { $fiFlags }
-  & "$Llvm\clang-cl.exe" @cflags @fi @extra $src "/Fo$obj"
+  # @() wrapper: a one-element array must stay an array (a bare string would be splatted character by character)
+  $perFile = @(); if ((Split-Path $src -Leaf) -ne 'kmdf_support.c') { $perFile = @($fiFlags) }
+  & "$Llvm\clang-cl.exe" @cflags @perFile @extra $src "/Fo$obj"
   if ($LASTEXITCODE -ne 0) { throw "compile failed: $src" }
   $objs += $obj
 }
