@@ -4,6 +4,16 @@
 #include "table_segment.h"
 #include "../platform/t210_mmu.h"
 
+/* D3DGPU_PHYSICAL_ADDRESS only has an explicit Padding member in newer WDK headers
+ * (the layout is the same; 10.0.19041 leaves the 4 bytes implicit). build.py defines
+ * TG_D3DGPU_PA_HAS_PADDING when the WDK header declares it; without it the check is
+ * skipped because there is no member to read. */
+#ifdef TG_D3DGPU_PA_HAS_PADDING
+#define TG_PA_PADDING(a) ((a).Padding)
+#else
+#define TG_PA_PADDING(a) 0
+#endif
+
 typedef struct _TG_GPU_ROOT_TABLE {
     D3DGPU_PHYSICAL_ADDRESS Address;
     UINT Entries;

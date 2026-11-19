@@ -46,7 +46,7 @@ static NTSTATUS ValidateRecord(const TG_GPU_TABLE_SEGMENT *Tables,
         return Record->Bytes == sizeof(*Record) &&
             Record->Dma.fill == (Record->Kind == PAGING_FILL) &&
             tg_gpu_paging_dma_valid(&Record->Dma) ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
-    if (Record->Reserved || Record->Table.Padding || Record->Table.SegmentId != Tables->SegmentId)
+    if (Record->Reserved || TG_PA_PADDING(Record->Table) || Record->Table.SegmentId != Tables->SegmentId)
         return STATUS_INVALID_PARAMETER;
     if (Record->Kind == PAGING_FLUSH) {
         if (Record->Bytes != sizeof(*Record) || Record->Start)
@@ -124,7 +124,7 @@ NTSTATUS TgGpuBuildPagingBuffer(DXGKARG_BUILDPAGINGBUFFER *Args,
             return STATUS_NOT_SUPPORTED;
         record.Kind = PAGING_UPDATE;
         record.Table = update->PageTableAddress.GpuPhysical;
-        if (record.Table.Padding || record.Table.SegmentId != Build->Tables->SegmentId)
+        if (TG_PA_PADDING(record.Table) || record.Table.SegmentId != Build->Tables->SegmentId)
             return STATUS_INVALID_ADDRESS;
         status = TgGpuMapTableSegment(Build->Tables, record.Table.SegmentOffset,
             target.Size, &cpu, &address);
