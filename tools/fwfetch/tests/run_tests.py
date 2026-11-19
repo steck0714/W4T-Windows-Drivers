@@ -159,6 +159,22 @@ try:
     check("lite profile completes on a GPT image", rc == 0, log[-900:])
     check("all 9 GPU files deployed byte-identical", all(os.path.exists(os.path.join(gdir, n)) and open(os.path.join(gdir, n), "rb").read() == b for n, b in GPU.items()))
 
+    # 3b. --deploy-drivers: Wi-Fi / Bluetooth firmware goes where the installed drivers read it (System32\\drivers\\SwitchWOA, switchwifi)
+    out3b = os.path.join(tmp, "out3b"); drv = os.path.join(tmp, "drivers")
+    rc, log = run(["--profile", "lite", "--search-root", sd, "--disk", gpt_img, "--out-dir", out3b, "--deploy-drivers", drv], manifest=mp)
+    check("--deploy-drivers run completes", rc == 0, log[-900:])
+    check("Wi-Fi firmware deployed for the T214 driver (SwitchWOA) and the Erista driver (switchwifi)",
+          all(os.path.exists(os.path.join(drv, q)) and open(os.path.join(drv, q), "rb").read() == BCM for q in ["SwitchWOA/brcmfmac4356A3-pcie.bin", "switchwifi/brcmfmac4356-pcie.bin"]))
+    check("Bluetooth patch deployed to SwitchWOA\\BCM4356A3.hcd", os.path.exists(os.path.join(drv, "SwitchWOA/BCM4356A3.hcd")) and open(os.path.join(drv, "SwitchWOA/BCM4356A3.hcd"), "rb").read() == HCD)
+    st = open(os.path.join(out3b, "agent/wifi/brcmfmac4356A3-pcie.txt"), "rb").read()
+    check("board file deployed with the replaced MAC, identical to the staged copy", all(open(os.path.join(drv, q), "rb").read() == st for q in ["SwitchWOA/brcmfmac4356A3-pcie.txt", "switchwifi/brcmfmac4356-pcie.txt"]))
+    check("GPU / boot-partition files are not touched by --deploy-drivers", not os.path.exists(os.path.join(drv, "NETB_img.bin")) and not os.path.exists(os.path.join(drv, "wp11")))
+    lock3b = json.load(open(os.path.join(out3b, "fw-lock.json")))
+    check("fw-lock.json records where each driver file was deployed", lock3b["bcm4356a3_fw"]["drivers"] == ["SwitchWOA/brcmfmac4356A3-pcie.bin", "switchwifi/brcmfmac4356-pcie.bin"] and "drivers" not in lock3b["gpu_fecs"], str(lock3b.get("bcm4356a3_fw")))
+    gt = os.path.join(tmp, "gittree"); os.makedirs(gt); subprocess.run(["git", "init", "-q", gt], check=True)
+    rc, log = run(["--profile", "lite", "--search-root", sd, "--out-dir", os.path.join(tmp, "out3c"), "--deploy-drivers", os.path.join(gt, "drivers")], manifest=mp)
+    check("--deploy-drivers inside a git work tree is refused", rc == 1, log[-400:])
+
     # 4. Intel-HEX route (kernel tree), no ext4 at all
     kt = os.path.join(tmp, "ktree/firmware/brcm"); os.makedirs(kt)
     open(os.path.join(kt, "brcmfmac4356A3-pcie.bin.ihex"), "w").write(ihex(BCM))

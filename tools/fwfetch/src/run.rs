@@ -19,6 +19,8 @@ pub struct Opts {
     pub auto: bool,
     pub deploy: Option<PathBuf>,
     pub deploy_gpu: Option<PathBuf>,
+    /// driver folder (normally %SystemRoot%\\System32\\drivers): Wi-Fi / Bluetooth firmware goes where the drivers read it
+    pub deploy_drivers: Option<PathBuf>,
     pub require_known_hash: bool,
     pub quiet: bool,
     pub manifest: Option<PathBuf>,
@@ -46,6 +48,9 @@ struct LockEntry {
     staged: String,
     verified: bool,
     utc: String,
+    /// where `--deploy-drivers` puts the file, relative to the driver folder (lets the start-up task re-check it)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    drivers: Vec<String>,
 }
 
 struct Volume {
@@ -219,7 +224,7 @@ pub fn run(o: Opts) -> Result<i32, String> {
     let log = Log { quiet: o.quiet };
     let out_dir = std::path::absolute(o.out_dir.clone().unwrap_or_else(default_out_dir)).map_err(|e| e.to_string())?;
     util::refuse_git_tree(&out_dir)?;
-    for d in [&o.deploy, &o.deploy_gpu].into_iter().flatten() {
+    for d in [&o.deploy, &o.deploy_gpu, &o.deploy_drivers].into_iter().flatten() {
         util::refuse_git_tree(d)?;
     }
 
@@ -347,7 +352,7 @@ pub fn run(o: Opts) -> Result<i32, String> {
         ));
         lock.insert(
             id.clone(),
-            LockEntry { sha256: sha, size: bytes.len() as u64, origin, staged: e.stage_rel.clone(), verified: has_hash, utc: util::utc_now() },
+            LockEntry { sha256: sha, size: bytes.len() as u64, origin, staged: e.stage_rel.clone(), verified: has_hash, utc: util::utc_now(), drivers: e.drivers.clone() },
         );
         staged_now.insert(id.clone());
     }
@@ -385,6 +390,20 @@ pub fn run(o: Opts) -> Result<i32, String> {
             }
             util::write_atomic(&dep.join(name), &staged_bytes(id, e)?)?;
             log.say(&format!("deployed GPU {name}"));
+        }
+    }
+
+    if let Some(dep) = &o.deploy_drivers {
+        for id in &ids {
+            let Some(e) = entries.get(id) else { continue };
+            if !staged_now.contains(id) || e.drivers.is_empty() {
+                continue;
+            }
+            let b = staged_bytes(id, e)?;
+            for t in &e.drivers {
+                util::write_atomic(&dep.join(t), &b)?;
+                log.say(&format!("deployed driver file {t}"));
+            }
         }
     }
 

@@ -16,6 +16,10 @@ pub struct Expect {
 pub struct Deploy {
     #[serde(rename = "windows-switch", default)]
     pub windows_switch: Vec<String>,
+    /// fixed places, relative to the driver folder (%SystemRoot%\\System32\\drivers), where the installed drivers read the file
+    /// at run time (`--deploy-drivers`)
+    #[serde(default)]
+    pub drivers: Vec<String>,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -65,6 +69,7 @@ pub struct Entry {
     pub expect: Option<Expect>,
     pub random_mac: bool,
     pub deploy: Vec<String>,
+    pub drivers: Vec<String>,
     pub gpu_name: Option<String>,
     /// path of the staged copy, relative to the staging directory
     pub stage_rel: String,
@@ -110,6 +115,7 @@ pub fn load(text: &str) -> Result<Loaded, String> {
                 expect: f.expect.clone(),
                 random_mac: false,
                 deploy: Vec::new(),
+                drivers: Vec::new(),
                 gpu_name: Some(g.clone()),
                 stage_rel: format!("gpu/{g}"),
                 sources: vec![
@@ -125,12 +131,13 @@ pub fn load(text: &str) -> Result<Loaded, String> {
                 expect: f.expect.clone(),
                 random_mac: f.postprocess.as_deref() == Some("random_macaddr"),
                 deploy: f.deploy.windows_switch.clone(),
+                drivers: f.deploy.drivers.clone(),
                 gpu_name: None,
                 stage_rel: first.clone(),
                 sources: f.sources.clone(),
             }
         };
-        for p in std::iter::once(&entry.stage_rel).chain(entry.deploy.iter()) {
+        for p in std::iter::once(&entry.stage_rel).chain(entry.deploy.iter()).chain(entry.drivers.iter()) {
             if !safe_rel(p) || p.contains('*') {
                 return Err(format!("manifest: unsafe output path '{p}' in '{}'", entry.id));
             }

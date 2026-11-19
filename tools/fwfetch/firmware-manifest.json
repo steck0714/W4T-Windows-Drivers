@@ -107,6 +107,10 @@
    "deploy": {
     "windows-switch": [
      "agent/wifi/brcmfmac4356A3-pcie.bin"
+    ],
+    "drivers": [
+     "SwitchWOA/brcmfmac4356A3-pcie.bin",
+     "switchwifi/brcmfmac4356-pcie.bin"
     ]
    },
    "sources": [
@@ -144,6 +148,10 @@
    "deploy": {
     "windows-switch": [
      "agent/wifi/brcmfmac4356A3-pcie.txt"
+    ],
+    "drivers": [
+     "SwitchWOA/brcmfmac4356A3-pcie.txt",
+     "switchwifi/brcmfmac4356-pcie.txt"
     ]
    },
    "sources": [
@@ -176,6 +184,9 @@
    "deploy": {
     "windows-switch": [
      "agent/bt/BCM4356A3.hcd"
+    ],
+    "drivers": [
+     "SwitchWOA/BCM4356A3.hcd"
     ]
    },
    "sources": [

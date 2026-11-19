@@ -32,14 +32,16 @@ args = parser.parse_args()
 if args.keep_fan and not args.probe:
     parser.error("--keep-fan requires --probe")
 gr_names=("NETB_img.bin", "fecs.bin", "gpccs.bin")
-if (args.probe or args.render) and (not args.gr_firmware or
-    any(not (args.gr_firmware / n).is_file() for n in gr_names)):
-    parser.error("--probe and --render require --gr-firmware with the three external NVIDIA GR files")
 acr_names=("nv_acr_ucode_prod.bin", "pmu_bl.bin", "gpmu_ucode_image.bin",
            "gpmu_ucode_desc.bin", "pmu_sig.bin", "fecs_sig.bin")
-if (args.probe or args.render) and (not args.acr_firmware or
-    any(not (args.acr_firmware / n).is_file() for n in acr_names)):
-    parser.error("--probe and --render require --acr-firmware with all six external NVIDIA ACR files")
+# The NVIDIA firmware is NOT needed to build the packages (.sys / .inf). The driver reads the nine files at run time from
+# \\SystemRoot\\System32\\drivers\\TegraGpu (windows/gr_firmware_io.c); fwfetch puts them there afterwards (fwfetch --deploy-gpu,
+# or the start-up task). --gr-firmware / --acr-firmware only let the host tests run on the real files; when given they must be
+# complete. No package ever contains firmware.
+if args.gr_firmware and any(not (args.gr_firmware / n).is_file() for n in gr_names):
+    parser.error("--gr-firmware must contain NETB_img.bin, fecs.bin and gpccs.bin")
+if args.acr_firmware and any(not (args.acr_firmware / n).is_file() for n in acr_names):
+    parser.error("--acr-firmware must contain all six ACR/PMU/FECS files")
 revision = subprocess.check_output(
     ["git", "-C", str(args.mesa), "rev-parse", "HEAD"], text=True).strip()
 if revision != MESA_REVISION:
@@ -239,11 +241,20 @@ if args.windows_tests:
                     "/include:_load_config_used","/nodefaultlib","/release","/opt:ref","/timestamp:0",
                     f"/out:{args.out / 'test-diagnostic.exe'}",str(diagnostic_test),str(sdk_lib)],check=True)
 
-def copy_firmware(dest):
-    for filename in gr_names:
-        shutil.copyfile(args.gr_firmware / filename, dest / filename)
-    for filename in acr_names:
-        shutil.copyfile(args.acr_firmware / filename, dest / filename)
+FIRMWARE_NOTE = """This package contains NO NVIDIA firmware (it may not be redistributed) - and it needs none to be built or installed.
+The driver reads these nine files when it runs, from %SystemRoot%\\System32\\drivers\\TegraGpu\\ :
+  """ + " ".join(gr_names + acr_names) + """
+fwfetch puts them there from your own Switchroot SD card, after the driver is installed (or before it; see the two drivers below for what a missing file does):
+  fwfetch.exe --profile <erista|lite> --auto --deploy-gpu C:\\Windows\\System32\\drivers\\TegraGpu
+or once: Install-FwFetchStartup.ps1 -Profile <erista|lite>   (re-checks and repairs them at every Windows start).
+tegragpuprobe: installs and loads without them; the firmware is read only when a GPU diagnostic is requested, and then the request
+stops early with the firmware status, before the GPU is powered.
+tegragpurender: installs without them, but the adapter cannot start (Device Manager shows an error) until the files are in place;
+after fwfetch has run, disable/enable the device or restart Windows.
+"""
+
+def write_firmware_note(dest):
+    (dest / "FIRMWARE-README.txt").write_text(FIRMWARE_NOTE, encoding="utf-8")
 
 if args.render:
     dest = args.out / "kit/tegragpurender"
@@ -272,7 +283,7 @@ if args.render:
                     "/release", "/opt:ref", "/timestamp:0", f"/out:{dest / 'tegragpuno3d.dll'}",
                     f"/implib:{args.out / 'tegragpuno3d.lib'}", str(umd)], check=True)
     shutil.copyfile(root / "windows/tegragpurender.inf", dest / "tegragpurender.inf")
-    copy_firmware(dest)
+    write_firmware_note(dest)
     print(f"Unsigned MCDM package: {dest}; requires catalog generation and signing.")
 
 if args.probe:
@@ -305,7 +316,7 @@ if args.probe:
                             str(root / "windows/diagnostic_backend.c")], check=True)
             libs.append(diagnostic)
             libs.append(library)
-            copy_firmware(dest)
+            write_firmware_note(dest)
         subprocess.run([args.link, "/nologo", "/driver", "/subsystem:native,10.0", "/machine:arm64",
                         "/entry:FxDriverEntry", "/nodefaultlib", "/release", "/opt:ref", "/opt:icf",
                         "/tsaware:no", "/section:.text,ERP", "/section:.rdata,RP",

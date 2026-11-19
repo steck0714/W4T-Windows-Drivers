@@ -11,12 +11,13 @@ a display miniport or Vulkan ICD. They keep the working POST display driver.
 Build with LLVM and the official Windows WDK/SDK headers. `WDK_INCLUDE` and
 `SDK_INCLUDE` denote their versioned Include directories; the script targets
 ARM64 and the Windows 11 22H2 baseline, using WDDM 2.4 private-memory
-callbacks. `GR_FIRMWARE` is a local directory containing NVIDIA's external
-`NETB_img.bin`, `fecs.bin` and `gpccs.bin` for `tegra21x`/`gm20b`. The files
-are supplied by the operator, not stored in this repository. `ACR_FIRMWARE`
-contains the external NVIDIA 32.7.6 `nv_acr_ucode_prod.bin`, `pmu_bl.bin`,
-`gpmu_ucode_image.bin`, `gpmu_ucode_desc.bin`, `pmu_sig.bin` and `fecs_sig.bin`.
-Both sets are required for the secure T214 probe. From the repository root:
+callbacks. The package contains **no firmware**: the driver reads NVIDIA's external files at run time from
+`\SystemRoot\System32\drivers\TegraGpu\` (`NETB_img.bin`, `fecs.bin`, `gpccs.bin`, `nv_acr_ucode_prod.bin`,
+`pmu_bl.bin`, `gpmu_ucode_image.bin`, `gpmu_ucode_desc.bin`, `pmu_sig.bin`, `fecs_sig.bin`). They are loaded
+afterwards from your own SD card with `tools/fwfetch` (`--deploy-gpu`, or the start-up task), never stored in this
+repository or built into the `.sys`. The probe loads without them; the render adapter cannot start until they exist.
+`GR_FIRMWARE` / `ACR_FIRMWARE` are OPTIONAL local directories with those files, only to run the host-side firmware tests.
+From the repository root:
 
 ```sh
 git clone --depth 1 https://github.com/danfromtico/mesa-switch.git build/mesa-switch
@@ -24,8 +25,8 @@ git -C build/mesa-switch checkout 0ff52079ca9e9e837ed27eb95a8d239f439a1864
 python3 drivers/TegraGpu/tools/build.py \
   --mesa build/mesa-switch \
   --wdk-include "$WDK_INCLUDE" --sdk-include "$SDK_INCLUDE" \
-  --out build/tegra-gpu --probe --gr-firmware "$GR_FIRMWARE" \
-  --acr-firmware "$ACR_FIRMWARE"
+  --out build/tegra-gpu --probe
+# optional, host tests on the real files: --gr-firmware "$GR_FIRMWARE" --acr-firmware "$ACR_FIRMWARE"
 ```
 
 `TegraGpuCore.lib` contains WDDM resource/private-memory helpers, GM20B 4 KiB

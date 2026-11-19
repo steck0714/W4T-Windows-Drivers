@@ -25,6 +25,8 @@ USAGE: fwfetch [OPTIONS]
   --out-dir <DIR>                    staging directory (default %LOCALAPPDATA%\\W4T\\fw-cache). Refused inside a git work tree
   --deploy <DIR>                     copy the windows-switch files into this boot-partition root
   --deploy-gpu <DIR>                 copy the GPU firmware into this directory
+  --deploy-drivers <DIR>             copy the Wi-Fi / Bluetooth firmware to the places the installed drivers read it from
+                                     (DIR = %SystemRoot%\\System32\\drivers -> SwitchWOA\\..., switchwifi\\...)
   --require-known-hash               refuse files that have no published SHA-256
   --manifest <FILE>                  use this manifest instead of the built-in one
   --quiet                            print only warnings and errors
@@ -41,6 +43,7 @@ fn parse() -> Result<Option<run::Opts>, String> {
         auto: false,
         deploy: None,
         deploy_gpu: None,
+        deploy_drivers: None,
         require_known_hash: false,
         quiet: false,
         manifest: None,
@@ -73,6 +76,7 @@ fn parse() -> Result<Option<run::Opts>, String> {
             "--disk" => o.disks.push(PathBuf::from(val("--disk")?)),
             "--deploy" => o.deploy = Some(PathBuf::from(val("--deploy")?)),
             "--deploy-gpu" => o.deploy_gpu = Some(PathBuf::from(val("--deploy-gpu")?)),
+            "--deploy-drivers" => o.deploy_drivers = Some(PathBuf::from(val("--deploy-drivers")?)),
             "--manifest" => o.manifest = Some(PathBuf::from(val("--manifest")?)),
             "--auto" => o.auto = true,
             "--require-known-hash" => o.require_known_hash = true,

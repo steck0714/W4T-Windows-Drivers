@@ -38,7 +38,7 @@ windows-switch は Mariko(OLED) で（ここでは `drivers/t214-aula/` に分�
 | Wi-Fi | switchwlan(WiFiCx 0.6.13) / switchwifi | SWOA0D01 / 0D03(Erista) | 0.6.13 / 0.5.7 | 0.5.7 | R405 | demand | **Erista は実機未検証**。WDK 10.0.26100 必須 |
 | USB Falcon | tegraxusb | SWOA0D02 | - | 0.1.0.0 | - | demand | 物理確認待ち。xHCI 本体は inbox `USBXHCI`（`PNP0D10`） |
 | SD ホスト | nvtsdhc | NVDA0101 | 0.3.2.1 | 0.4.0.1 / WINARM 0.5.1.2 | - | **boot(0)** | 唯一のブートスタート。読めないと 0xc000000f の恐れ |
-| GPU(診断) | tegragpuprobe / tegragpurender | SWOA0F01 | (GM20B-Diagnostic, S0–S2) | 0.1.0.59 / 0.1.0.65 | - | demand | 完成した WDDM ではない |
+| GPU(診断) | tegragpuprobe / tegragpurender | SWOA0F01 | (GM20B-Diagnostic, S0–S2) | 0.1.0.60 / 0.1.0.66 | - | demand | 完成した WDDM ではない |
 | 表示 | SampleDisplay(winx-display, BDD) | WINX0001 | 0.1.0.1 | 0.1.0.1 | - | demand | GOP フレームバッファ用 |
 | 診断 | swoadiag / SwoaHello | (INF 無し) | - | - | - | - | USB 診断・段階0の読み込み試験 |
 

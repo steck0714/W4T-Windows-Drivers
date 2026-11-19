@@ -56,6 +56,8 @@
 - `build/`（型番別のビルド済み置き場）、`tools/build/`、`build-fwfetch.yml`、`build-all-drivers.yml` の組み立て・コミット段（Claude による作業。2026-11-18、ユーザー steck0714 の指示）。fwfetch の Rust 依存は `tools/fwfetch/THIRD-PARTY.md`。
 - 統合・整理、HWID/DSDT 静的検査、windows-switch 互換メモ、電源ボタン長押し(HoldSasMs)の移植、Erista GPU の取り込みと GPCPLL ロック検出修正、電源コールバック検査（Claude による作業。ユーザー steck0714 の指示と所有物に基づく）。
 
+- 2026-11-19: ファームウェアを「ビルドに入れず、あとから読み込む」方式に変更。`tools/fwfetch/`(利用者自身の SD からファームウェアを取り出して照合・配置するツール)は、Switchroot(L4T / Android 系)のファームウェア取得の仕組みが元(Switchroot: https://gitlab.com/switchroot 、ミラー https://github.com/switchroot 。単体のリポジトリは無く、どのリポジトリのどのスクリプトかは未特定。ユーザーの申告に基づく)。このリポジトリの Rust 版への書き直しと拡張は steck0714 ([steck0714/W4T-Windows-Drivers](https://github.com/steck0714/W4T-Windows-Drivers))。`fwfetch --deploy-drivers`、GPU プローブ/レンダー INF からのファームウェア同梱の除去、Erista/Lite の GPU ワークフローで `.sys` を常にビルド・署名する変更、起動時タスクの `-DriverDir` 対応を追加(Claude による作業、ユーザー steck0714 の指示)。
+
 ## 含めないもの
 Broadcom ファームウェア、NVIDIA の GPU / XUSB ファームウェア、`bl31.bin`、秘密鍵。ファームウェアは `tools/fwfetch/` が利用者の実機（Switchroot を入れた SD）から取り出す。ビルド済みの `.sys` / `.exe` は 2026-11-18 から `build/` に置いてよい。
 

@@ -8,12 +8,14 @@
 
 .EXAMPLE
   .\Install-FwFetchStartup.ps1 -Profile lite -GpuDir C:\Windows\System32\drivers\TegraGpu
+  .\Install-FwFetchStartup.ps1 -Profile lite -GpuDir C:\Windows\System32\drivers\TegraGpu -DriverDir C:\Windows\System32\drivers
   .\Install-FwFetchStartup.ps1 -Profile aula
   .\Install-FwFetchStartup.ps1 -Remove
 #>
 param(
   [ValidateSet('erista', 'lite', 'aula')][string]$Profile,
   [string]$GpuDir = '',
+  [string]$DriverDir = '',   # e.g. C:\Windows\System32\drivers (Wi-Fi / Bluetooth firmware for the SwitchWOA drivers)
   [string]$Exe = (Join-Path $PSScriptRoot 'fwfetch.exe'),
   [switch]$Remove
 )
@@ -38,6 +40,7 @@ Copy-Item (Join-Path $PSScriptRoot 'FwFetchStartup.ps1') $dest -Force
 
 $arg = "-NoProfile -ExecutionPolicy Bypass -File `"$dest\FwFetchStartup.ps1`" -Profile $Profile"
 if ($GpuDir) { $arg += " -GpuDir `"$GpuDir`"" }
+if ($DriverDir) { $arg += " -DriverDir `"$DriverDir`"" }
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arg
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $trigger.Delay = 'PT1M'    # give the SD / storage stack time to come up

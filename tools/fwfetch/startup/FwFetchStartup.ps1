@@ -21,6 +21,7 @@ param(
   [Parameter(Mandatory = $true)][ValidateSet('erista', 'lite', 'aula')][string]$Profile,
   [string]$CacheDir = (Join-Path $env:ProgramData 'W4T\fw-cache'),
   [string]$GpuDir = '',            # e.g. C:\Windows\System32\drivers\TegraGpu (erista / lite)
+  [string]$DriverDir = '',         # e.g. C:\Windows\System32\drivers : Wi-Fi / Bluetooth firmware is put into <DriverDir>\SwitchWOA and \switchwifi (needs fwfetch --deploy-drivers)
   [switch]$Force                   # ignore the done marker and always run fwfetch
 )
 $ErrorActionPreference = 'Stop'
@@ -49,7 +50,7 @@ function Read-Lock {
 
 # returns @{ Lock = ...; Cache = @(problems); Deployed = @(problems) } ; a problem is { Id; Path; Why; Want }
 function Test-Integrity {
-  $r = @{ Lock = $null; Cache = @(); Deployed = @() }
+  $r = @{ Lock = $null; Cache = @(); Deployed = @(); Missing = @() }
   $lock = Read-Lock
   $r.Lock = $lock
   if ($null -eq $lock) { return $r }
@@ -59,6 +60,14 @@ function Test-Integrity {
     $f = Join-Path $CacheDir ($e.staged -replace '/', '\')
     if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { $r.Cache += [pscustomobject]@{ Id = $id; Path = $f; Why = 'missing'; Want = $e.sha256 } }
     elseif ((Get-Sha $f) -ne $e.sha256) { $r.Cache += [pscustomobject]@{ Id = $id; Path = $f; Why = 'hash differs'; Want = $e.sha256 } }
+    if ($DriverDir -and $e.drivers) {
+      # existence only: the Wi-Fi board file is written with this Switch's MAC, so its bytes differ from the staged copy on purpose
+      foreach ($t in @($e.drivers)) {
+        if (-not (Test-SafeRel "$t")) { $r.Cache += [pscustomobject]@{ Id = $id; Path = "$t"; Why = 'bad drivers path in lock'; Want = '' }; continue }
+        $d = Join-Path $DriverDir ($t -replace '/', '\')
+        if (-not (Test-Path -LiteralPath $d -PathType Leaf)) { $r.Missing += [pscustomobject]@{ Id = $id; Path = $d; Why = 'missing'; Want = '' } }
+      }
+    }
     if ($GpuDir -and ($e.staged -like 'gpu/*')) {
       $d = Join-Path $GpuDir (Split-Path $e.staged -Leaf)
       if (-not (Test-Path -LiteralPath $d -PathType Leaf)) { $r.Deployed += [pscustomobject]@{ Id = $id; Path = $d; Why = 'missing'; Want = $e.sha256 } }
@@ -76,6 +85,7 @@ $needFetch = [bool]$Force
 if ($null -eq $chk.Lock) { $needFetch = $true; Log 'no usable fw-lock.json: the firmware has not been loaded yet (or the lock was damaged)' }
 elseif (-not (Test-Path $marker)) { $needFetch = $true; Log "profile $Profile was never completed" }
 foreach ($x in $chk.Cache) { Log "cache: $($x.Id) $($x.Why): $($x.Path)"; $needFetch = $true }
+foreach ($x in $chk.Missing) { Log "driver file $($x.Why): $($x.Path)"; $needFetch = $true }
 # GPU driver folder never filled although the profile needs it
 if ($GpuDir -and $null -ne $chk.Lock -and -not (@($chk.Lock.PSObject.Properties | Where-Object { $_.Value.staged -like 'gpu/*' }).Count)) { $needFetch = $true; Log 'lock has no GPU files yet' }
 
@@ -103,6 +113,7 @@ if ($needFetch) {
   if (Test-Path $marker) { Remove-Item $marker -Force }
   $a = @('--profile', $Profile, '--auto', '--out-dir', $CacheDir)
   if ($GpuDir) { New-Item -ItemType Directory -Force $GpuDir | Out-Null; $a += @('--deploy-gpu', $GpuDir) }
+  if ($DriverDir) { New-Item -ItemType Directory -Force $DriverDir | Out-Null; $a += @('--deploy-drivers', $DriverDir) }
   Log "start: fwfetch $($a -join ' ')"
   $out = & $exe @a 2>&1 | Out-String
   $code = $LASTEXITCODE
@@ -114,7 +125,7 @@ if ($needFetch) {
 
 # ---- 4. check again; only a clean state earns the marker -----------------------------------------------------------
 $after = Test-Integrity
-$bad = @($after.Cache) + @($after.Deployed)
+$bad = @($after.Cache) + @($after.Deployed) + @($after.Missing)
 if ($null -eq $after.Lock) { $bad += [pscustomobject]@{ Id = 'lock'; Path = $lockPath; Why = 'missing'; Want = '' } }
 foreach ($x in $bad) { Log "STILL BAD: $($x.Id) $($x.Why): $($x.Path)" }
 if ($needFetch -and $code -eq 0 -and $bad.Count -eq 0) { Set-Content -Path $marker -Value (Get-Date -Format u) -Encoding ascii; Log 'complete: marker written' }
