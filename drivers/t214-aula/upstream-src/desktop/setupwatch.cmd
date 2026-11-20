@@ -5,7 +5,7 @@ rem name, 0xc0000452): the firmware keeps no boot variables. As soon as that err
 rem setupact.log, mark the pass done (ChildCompletion\setup.exe = 3, the manual fix in the
 rem README) and keep it set while setup runs, so setup continues after the error dialog.
 rem   setupwatch.cmd LOGFOLDER
-set P=C:\Windows\Panther\setupact.log
+set P=%SystemRoot%\Panther\setupact.log
 :wait
 findstr /c:"ModifyBootEntries: Error modifying bcd boot entries" %P% >nul 2>&1 && goto found
 reg query HKLM\SYSTEM\Setup /v SystemSetupInProgress 2>nul | find "0x1" >nul || goto :eof

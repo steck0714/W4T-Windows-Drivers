@@ -38,7 +38,7 @@ foreach ($block in ($probe -split "(\r?\n){2,}")) {
         pnputil /delete-driver $Matches[1] /uninstall /force 2>&1 | ForEach-Object { Log "  $_" }
     }
 }
-$dst = 'C:\swagent\gpunative'
+$dst = "$env:SystemDrive\swagent\gpunative"
 if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }
 New-Item -ItemType Directory -Force $dst | Out-Null
 Copy-Item (Join-Path $src 'driver\*') $dst
@@ -70,7 +70,7 @@ $left = [IO.File]::ReadAllBytes("$env:SystemRoot\System32\drivers\TgGpuBootTest2
 Log "  permit byte now $left (0 = consumed)"
 
 Log '-- 3. nvk-windows-check'
-$vk = 'C:\swagent\gpuvk'
+$vk = "$env:SystemDrive\swagent\gpuvk"
 if (Test-Path $vk) { Remove-Item $vk -Recurse -Force }
 New-Item -ItemType Directory -Force $vk | Out-Null
 Copy-Item (Join-Path $src '*') $vk -Exclude 'result.txt', 'run.flag', 'driver'

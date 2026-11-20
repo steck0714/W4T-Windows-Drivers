@@ -25,7 +25,7 @@ Get-PnpDevice -PresentOnly | Where-Object {
 Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object { Log ("  adapter {0} {1} {2}" -f $_.Name, $_.Status, $_.InterfaceDescription) }
 
 Log '-- install tegragpuprobe'
-$dst = 'C:\swagent\gpuprobe'
+$dst = "$env:SystemDrive\swagent\gpuprobe"
 if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }
 New-Item -ItemType Directory -Force $dst | Out-Null
 Copy-Item (Join-Path $src '*') $dst -Exclude 'result.txt', 'run.flag'

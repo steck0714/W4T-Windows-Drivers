@@ -1,8 +1,8 @@
 # Starts at logon of user Switch (HKLM Run value SwUwp set by w32.cmd), without admin rights.
-# 1) Logs the state of AppX packages to C:\swagent\uwp.txt.
-# 2) Once (marker C:\swagent\uwp.done): re-registers all installed packages for this user,
+# 1) Logs the state of AppX packages to <system drive>:\swagent\uwp.txt.
+# 2) Once (marker <system drive>:\swagent\uwp.done): re-registers all installed packages for this user,
 #    the usual fix for a Start menu that opens but does not react.
-$log = 'C:\swagent\uwp.txt'
+$log = "$env:SystemDrive\swagent\uwp.txt"
 try { Add-Content -Path $log -Value '' -ErrorAction Stop } catch { $log = Join-Path $env:LOCALAPPDATA 'swuwp.txt' }
 function Log($text) { Add-Content -Path $log -Value $text -Encoding ASCII }
 
@@ -24,11 +24,11 @@ try {
     Log "list failed: $_"
 }
 
-if (-not (Test-Path 'C:\swagent\uwp.done')) {
-    Set-Content -Path 'C:\swagent\uwp.done' -Value 'done'
+if (-not (Test-Path "$env:SystemDrive\swagent\uwp.done")) {
+    Set-Content -Path "$env:SystemDrive\swagent\uwp.done" -Value 'done'
     Log "-- re-register"
     $manifests = @(Get-AppxPackage | ForEach-Object { Join-Path $_.InstallLocation 'AppxManifest.xml' })
-    $manifests += @(Get-ChildItem 'C:\Windows\SystemApps\*\AppxManifest.xml' | ForEach-Object { $_.FullName })
+    $manifests += @(Get-ChildItem "$env:SystemRoot\SystemApps\*\AppxManifest.xml" | ForEach-Object { $_.FullName })
     foreach ($manifest in ($manifests | Sort-Object -Unique)) {
         if (-not (Test-Path $manifest)) { continue }
         $p = @{ Name = Split-Path (Split-Path $manifest) -Leaf }

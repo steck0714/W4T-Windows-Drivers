@@ -39,12 +39,20 @@ static void WINAPI service_main(DWORD argc, LPWSTR *argv)
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi;
     DWORD exitCode = NO_ERROR;
+    WCHAR workDir[MAX_PATH] = L"C:\\swagent";   // fallback only
+    WCHAR sysDir[MAX_PATH];
 
     (void) argc; (void) argv;
     g_handle = RegisterServiceCtrlHandlerExW(L"swagent", control, NULL);
     if (!g_handle)
         return;
     report(SERVICE_RUNNING, NO_ERROR);
+    // <drive of the running Windows>:\swagent (the drive letter of a Switchroot SD card is not always C:)
+    if (GetSystemDirectoryW(sysDir, MAX_PATH) >= 3 && sysDir[1] == L':') {
+        workDir[0] = sysDir[0];
+        workDir[1] = L':';
+        lstrcpyW(workDir + 2, L"\\swagent");
+    }
     // skip our own path (quoted or not) and the spaces after it
     while (*cmd && (quoted || *cmd != L' ')) {
         if (*cmd == L'"')
@@ -57,7 +65,7 @@ static void WINAPI service_main(DWORD argc, LPWSTR *argv)
         report(SERVICE_STOPPED, ERROR_BAD_ARGUMENTS);
         return;
     }
-    if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, L"C:\\swagent", &si, &pi)) {
+    if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, workDir, &si, &pi)) {
         WaitForSingleObject(pi.hProcess, INFINITE);
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);

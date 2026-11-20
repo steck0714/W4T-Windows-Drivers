@@ -20,21 +20,27 @@
    "upstream": "drivers/swbatt/swbatt.c",
    "upstream_sha256": "d7e9f57b218ae1de0b325c4a3e5214266f6bb6b1f5e0b6f0e57d14edecba08b1",
    "credit_block": true,
-   "include_rewrites": []
+   "include_rewrites": [],
+   "w4t_modified_sha256": "b4f9146c5f70d44bc405f4379a7d6099f9a211ffd9faab4c3d4b846c286c1517",
+   "w4t_modified_note": "2026-11-20: drive-letter fixes (system volume instead of C:/D:); differs from upstream on purpose"
   },
   {
    "path": "drivers/SwitchTouchRead/src/touchread.c",
    "upstream": "drivers/touchread/touchread.c",
    "upstream_sha256": "b070c739c514d21001ed075c9e58c4197de6eb4624872bcc7d82199da76e3b45",
    "credit_block": true,
-   "include_rewrites": []
+   "include_rewrites": [],
+   "w4t_modified_sha256": "705d0a3f6bf97c3a4a10ae61656c1aa2d5daf33d32fc026ac791b702225dd8ad",
+   "w4t_modified_note": "2026-11-20: drive-letter fixes (system volume instead of C:/D:); differs from upstream on purpose"
   },
   {
    "path": "drivers/SwitchAgent/src/swagentsvc.c",
    "upstream": "desktop/swagentsvc.c",
    "upstream_sha256": "3badea6a8257736fa4b73ba6a709c04383bb370fbb671c5cd3db444c7b21054f",
    "credit_block": true,
-   "include_rewrites": []
+   "include_rewrites": [],
+   "w4t_modified_sha256": "5b2ee266d1450a2d873c98bdfbf5c6c621d281621d6048637a25b86ecc421a8d",
+   "w4t_modified_note": "2026-11-20: drive-letter fixes (system volume instead of C:/D:); differs from upstream on purpose"
   },
   {
    "path": "drivers/SwitchWifi/switchwifi.inf",

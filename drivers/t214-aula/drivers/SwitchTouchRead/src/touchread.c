@@ -9,7 +9,7 @@
  * layout.json). tools/aula_layout.py restores the upstream bytes; see CREDITS.md.
  * W4T-CREDIT-END */
 // Touch panel access over I2C3 (address 0x49): I2C helpers and panel setup shared with swhid.
-// Built on its own, it is a test driver that logs touches to D:\agent\touch.txt for a minute.
+// Built on its own, it is a test driver that logs touches to <system drive>:\swagent\touch.txt for a minute.
 #include <ntddk.h>
 
 #define I2C3_BASE       0x7000C500ULL
@@ -184,17 +184,58 @@ out:
     return ok;
 }
 
+// Opens a file in <system volume root>\swagent\ without a drive letter: \SystemRoot is a symbolic link to
+// e.g. \Device\HarddiskVolume3\Windows, so everything up to its last backslash is the volume root.
+// Falls back to the old C: path only when \SystemRoot cannot be read.
+static NTSTATUS OpenSwagentFile(PHANDLE file, PIO_STATUS_BLOCK io, const WCHAR *tail, const WCHAR *fallback)
+{
+    UNICODE_STRING link, name;
+    OBJECT_ATTRIBUTES attributes;
+    HANDLE linkHandle;
+    WCHAR path[300];
+    ULONG chars = 0;
+    ULONG used = 0;
+    ULONG returned = 0;
+    NTSTATUS status;
+
+    RtlInitUnicodeString(&link, L"\\SystemRoot");
+    InitializeObjectAttributes(&attributes, &link, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+    name.Buffer = path;
+    name.Length = 0;
+    name.MaximumLength = 200 * sizeof(WCHAR);
+    status = ZwOpenSymbolicLinkObject(&linkHandle, GENERIC_READ, &attributes);
+    if (NT_SUCCESS(status)) {
+        status = ZwQuerySymbolicLinkObject(linkHandle, &name, &returned);
+        ZwClose(linkHandle);
+    }
+    if (NT_SUCCESS(status)) {
+        chars = name.Length / sizeof(WCHAR);
+        while (chars > 0 && path[chars - 1] != L'\\')
+            chars--;                       // keep the backslash: it ends the volume root
+        if (chars < 2)
+            status = STATUS_UNSUCCESSFUL;
+    }
+    if (NT_SUCCESS(status)) {
+        while (tail[used] != 0 && chars + used < 299) {
+            path[chars + used] = tail[used];
+            used++;
+        }
+        path[chars + used] = 0;
+        RtlInitUnicodeString(&name, path);
+    } else {
+        RtlInitUnicodeString(&name, fallback);
+    }
+    InitializeObjectAttributes(&attributes, &name, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+    return ZwCreateFile(file, GENERIC_WRITE | SYNCHRONIZE, &attributes, io, NULL,
+        FILE_ATTRIBUTE_NORMAL, 0, FILE_OVERWRITE_IF, FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+}
+
 static VOID SaveLog(VOID)
 {
-    UNICODE_STRING name;
-    OBJECT_ATTRIBUTES attributes;
     IO_STATUS_BLOCK io;
     HANDLE file;
 
-    RtlInitUnicodeString(&name, L"\\??\\D:\\agent\\touch.txt");
-    InitializeObjectAttributes(&attributes, &name, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
-    if (NT_SUCCESS(ZwCreateFile(&file, GENERIC_WRITE | SYNCHRONIZE, &attributes, &io, NULL,
-            FILE_ATTRIBUTE_NORMAL, 0, FILE_OVERWRITE_IF, FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0))) {
+    if (NT_SUCCESS(OpenSwagentFile(&file, &io, L"swagent\\touch.txt", L"\\??\\C:\\swagent\\touch.txt"))) {
         ZwWriteFile(file, NULL, NULL, NULL, &io, g_log, g_len, NULL, NULL);
         ZwFlushBuffersFile(file, &io);
         ZwClose(file);

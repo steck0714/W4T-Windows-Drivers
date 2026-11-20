@@ -3,7 +3,7 @@
 # agent\tune.flag exists (each step checks first, so a repeated run changes nothing); with
 # agent\untune.flag instead, everything is put back from the backup and the backup is removed.
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tune.ps1 AGENT_DIR [undo]
-# The original value of every setting is saved once in C:\swagent\tune-backup.json before it is
+# The original value of every setting is saved once in <system drive>:\swagent\tune-backup.json before it is
 # first changed. Kept on purpose: Wi-Fi, Bluetooth, audio, touch keyboard (TabletInputService),
 # Windows Update, Delivery Optimization and the update orchestrator (language packs and Windows
 # features are installed through them; automatic updates stay off by the agent's policies),
@@ -12,7 +12,7 @@
 param([string]$Agent, [string]$Mode = 'apply')
 $ErrorActionPreference = 'Continue'
 $log = Join-Path $Agent 'tune-log.txt'
-$bk = 'C:\swagent\tune-backup.json'
+$bk = Join-Path $env:SystemDrive 'swagent\tune-backup.json'
 function Log([string]$t) { Add-Content -Path $log -Value $t -Encoding ascii }
 if ((Test-Path $log) -and (Get-Item $log).Length -gt 200KB) { Move-Item $log "$log.old" -Force }
 Log "==== tune $Mode $(Get-Date -Format s)"

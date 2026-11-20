@@ -58,7 +58,7 @@ Log (State)
 Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | ForEach-Object { Log ("  display: {0} {1} {2}" -f $_.Status, $_.InstanceId, $_.FriendlyName) }
 
 Log '-- 1. display driver'
-$dst = 'C:\swagent\gpudesk'
+$dst = "$env:SystemDrive\swagent\gpudesk"
 # The 16 MB of contiguous memory the driver needs is only there early after boot: when the
 # driver is already installed and registered, go straight to the switch.
 $ready = (Prop DriverVersion) -eq $ver -and (Test-Path "$dst\app\TegraGpuD3DVk.dll")

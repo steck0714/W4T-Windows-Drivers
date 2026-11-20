@@ -1,6 +1,6 @@
 # Vulkan triangle on the GPU (NVK), shown in a window for 5 minutes. Works while the GPU driver runs
 # in native mode (after the agent's gpuvk test, until the next reboot).
-$vk = 'C:\swagent\gpuvk'
+$vk = "$env:SystemDrive\swagent\gpuvk"
 $env:NVK_I_WANT_A_BROKEN_VULKAN_DRIVER = '1'
 $check = & "$vk\nvk-windows-check.exe" "$vk\libvulkan_nouveau.dll" 2>$null | Out-String
 if ($check -notmatch '"native_ready_kmd":1') {

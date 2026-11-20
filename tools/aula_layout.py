@@ -48,8 +48,9 @@ def main(argv=None):
             d = restore(e)
         except (OSError, ValueError) as ex:
             bad.append((e["path"], str(ex))); continue
-        if hashlib.sha256(d).hexdigest() != e["upstream_sha256"]:
-            bad.append((e["path"], "restored bytes differ from the recorded upstream SHA-256")); continue
+        # an entry changed on purpose by this repo records w4t_modified_sha256 (see its w4t_modified_note) instead
+        if hashlib.sha256(d).hexdigest() != e.get("w4t_modified_sha256", e["upstream_sha256"]):
+            bad.append((e["path"], "restored bytes differ from the recorded SHA-256 (upstream, or w4t_modified_sha256)")); continue
         if os.path.exists(os.path.join(BASE, "upstream-src", *e["upstream"].split("/"))):
             bad.append((e["path"], "also still present at upstream-src/" + e["upstream"])); continue
         restored[e["upstream"]] = d

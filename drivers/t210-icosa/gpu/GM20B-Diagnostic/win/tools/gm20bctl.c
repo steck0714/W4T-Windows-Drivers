@@ -33,6 +33,7 @@ K32 HANDLE CreateFileA(const char *, DWORD, DWORD, void *, DWORD, DWORD, HANDLE)
 K32 BOOL ReadFile(HANDLE, void *, DWORD, DWORD *, void *);
 K32 BOOL WriteFile(HANDLE, const void *, DWORD, DWORD *, void *);
 K32 BOOL CloseHandle(HANDLE);
+K32 DWORD ExpandEnvironmentStringsA(const char *, char *, DWORD);
 K32 HANDLE GetStdHandle(DWORD);
 K32 BOOL DeviceIoControl(HANDLE, DWORD, void *, DWORD, void *, DWORD, DWORD *, void *);
 K32 const char *GetCommandLineA(void);
@@ -479,10 +480,15 @@ static int cmd_decode(const char *path)
 	static u8 rbuf[sizeof(struct jentry) * 128];
 	struct gm20b_jf_header hdr;
 	struct jentry last;
-	HANDLE f = CreateFileA(path, GENERIC_READ, SHARE_READ | SHARE_WRITE, 0, OPEN_EXISTING, 0, 0);
+	char full[520];
+	HANDLE f;
 	DWORD got = 0;
 	u32 have = 0, total = 0, loads = 0;
 
+	/* the default path holds %SystemRoot%; a path given on the command line goes through unchanged */
+	if (ExpandEnvironmentStringsA(path, full, sizeof(full)) != 0 && ExpandEnvironmentStringsA(path, full, sizeof(full)) <= sizeof(full))
+		path = full;
+	f = CreateFileA(path, GENERIC_READ, SHARE_READ | SHARE_WRITE, 0, OPEN_EXISTING, 0, 0);
 	if (f == BAD_HANDLE) {
 		pf("cannot open %s (Win32 error %u)\n", path, (u32)GetLastError());
 		return 1;

@@ -9,8 +9,8 @@ $src = Join-Path $Agent 'ssh'
 $zip = Join-Path $src 'OpenSSH-ARM64.zip'
 $key = Join-Path $src 'authorized_keys'
 if (-not (Test-Path $zip) -or -not (Test-Path $key)) { 'ssh: no package or key on the card'; exit 0 }
-$dest = 'C:\Program Files\OpenSSH'
-$data = 'C:\ProgramData\ssh'
+$dest = "$env:ProgramFiles\OpenSSH"
+$data = "$env:ProgramData\ssh"
 
 # Reinstall when the package on the card changed (10.4 dropped every connection right after
 # accepting it on this console; 9.5 is the version Windows 11 itself ships).
@@ -44,7 +44,7 @@ if (-not (Get-Service sshd -ErrorAction SilentlyContinue)) {
 New-Item -ItemType Directory -Force -Path $data | Out-Null
 # No "Match Group administrators" block: on a Russian Windows the group is "Администраторы" and
 # the connection was dropped before the banner. Both key files are listed instead. The log goes to
-# C:\ProgramData\ssh\logs\sshd.log (SyslogFacility LOCAL0).
+# $env:ProgramData\ssh\logs\sshd.log (SyslogFacility LOCAL0).
 $config = @"
 Port 22
 PubkeyAuthentication yes
@@ -64,7 +64,7 @@ if (-not (Test-Path $cfgFile) -or (Get-Content $cfgFile -Raw) -ne $config) {
 $adminKeys = Join-Path $data 'administrators_authorized_keys'
 $user = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon').DefaultUserName
 if (-not $user) { $user = 'Player' }
-$userSsh = "C:\Users\$user\.ssh"
+$userSsh = "$env:SystemDrive\Users\$user\.ssh"
 New-Item -ItemType Directory -Force -Path $userSsh | Out-Null
 foreach ($target in @($adminKeys, (Join-Path $userSsh 'authorized_keys'))) {
     if (-not (Test-Path $target) -or (Get-FileHash $target).Hash -ne (Get-FileHash $key).Hash) {

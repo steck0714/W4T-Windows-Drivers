@@ -17,3 +17,10 @@
 
 上流は GPL-2.0(`LICENSE`)。`patches/` は NintendoSwitchPkg / edk2 への差分で、当てる先のファイルは BSD License と GPL-2.0 が混在する。
 ファイルごとの確認は `LICENSE-AUDIT.md`、帰属表示は `NOTICE.md`。配るときは上流の入手先と対応するソースを添える。
+
+## 2026-11-20: 改変したファイル(上の「無改変」の例外)
+
+ドライブ文字の固定(`C:`・`D〜K`・`W:`・`S:`)をやめるため、`upstream-src/desktop/` の次を**意図して改変した**。上流とバイト一致しない。
+`boot.cmd` `boot64.cmd` `setup.cmd` `setup64.cmd` `findagent64.cmd`(書き直し)、`w32.cmd` `w64.cmd` `copylogs.cmd` `setupwatch.cmd` `vk-triangle.cmd`、
+`tune.ps1` `remove_win10.ps1` `ssh_setup.ps1` `uwp.ps1` `gpu*.ps1` `vk-triangle-preview.ps1`、`build_w32.sh`(`findagent.cmd` を入れる 1 行)。
+`kit/agent/` の同名ファイルと内容を揃えてある(`findagent.cmd` = `findagent64.cmd`)。上流に戻すときは `windows-switch-main.zip` の同名ファイルで置き換える。

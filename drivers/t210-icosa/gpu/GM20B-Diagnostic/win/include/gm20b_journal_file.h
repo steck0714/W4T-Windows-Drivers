@@ -22,7 +22,8 @@ typedef unsigned int gm_u32;
 #define GM20B_JF_SEQ_WIN     0xF0000000u
 
 #define GM20B_JF_PATH_NT     L"\\SystemRoot\\gm20b-journal.bin"
-#define GM20B_JF_PATH_USER   "C:\\Windows\\gm20b-journal.bin"
+/* user mode: %SystemRoot% is expanded by the tool (the Windows drive letter is not always C:) */
+#define GM20B_JF_PATH_USER   "%SystemRoot%\\gm20b-journal.bin"
 
 struct gm20b_jf_header {
 	gm_u32 magic;        /* GM20B_JF_MAGIC */

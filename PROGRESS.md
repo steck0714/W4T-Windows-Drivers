@@ -41,4 +41,6 @@
 - [x] `--auto` が、ドライブ文字の無いボリューム(FAT32 `switchroot` 領域など)も `mountvol` の一覧から `\\?\Volume{GUID}\` で探す。探索先の重複を大文字小文字・末尾 `\` 無視で除去
 - [x] `Install-FwFetchStartup.ps1` はドライブ文字をタスクに書かない(`auto` で保存、スクリプトは実行時に `$env:ProgramData` から探す)。`FwFetchStartup.ps1` は古い文字のパスをいまの Windows に読み替え、存在しないドライブにはフォルダを作らずに止まる
 - [x] Rust 単体テスト 5 件 + `run_tests.py` 5 件追加(Linux で全通過)。**Windows 実機・ARM64・PowerShell は未確認**。`build/*/fwfetch/` は CI が作り直す(この修正では触っていない)
-- [ ] 未対応: `drivers/t214-aula` の `w64.cmd` / `swagentsvc.c` / `swbatt.c`、`tools/testsign`・各 kits のログ(`C:\…`)は C: 前提のまま
+- [x] 2026-11-20: `swagentsvc.c` / `swbatt.c` / `touchread.c` / `w64.cmd` / `tune.ps1` / `remove_win10.ps1` / `gm20bctl.c` の C: 固定を、実行中 Windows のシステムドライブ基準に変更。SD のブート領域は `kit/agent/findagent.cmd` が A〜Z → 文字なしボリューム(GUIDパス → 空き文字を実行時に選んで一時割り当て)の順に探す(Switchroot系の複数パーティションSDを想定、実機未確認・ビルド未実行)
+- [x] 2026-11-20: `upstream-src/desktop` の boot/setup 系・w32/w64・各 ps1 も同様に変更(上流とは意図して不一致。`UPSTREAM-SOURCE.md` 参照)。boot.cmd / setup.cmd も findagent.cmd 経由(D〜K の固定リストをやめた)
+- [ ] 未対応: `tools/testsign`・各 kits のログ(`C:\…`)

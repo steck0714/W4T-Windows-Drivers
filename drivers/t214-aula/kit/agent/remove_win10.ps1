@@ -5,7 +5,8 @@
 # Nothing is changed unless every check passes: the partition starts exactly where C: ends, is a
 # 20-30 GB NTFS data partition, is not the boot or system partition and is not C: itself.
 $ErrorActionPreference = 'Stop'
-$c = Get-Partition -DriveLetter C
+$sl = $env:SystemDrive.TrimEnd(':')   # the running Windows' own drive letter (not always C:)
+$c = Get-Partition -DriveLetter $sl
 $parts = Get-Partition -DiskNumber $c.DiskNumber
 "win10 removal: C: disk $($c.DiskNumber) partition $($c.PartitionNumber) offset $($c.Offset) size $($c.Size)"
 $parts | ForEach-Object { "  partition $($_.PartitionNumber) offset $($_.Offset) size $($_.Size) type $($_.Type) letter '$($_.DriveLetter)' boot $($_.IsBoot) system $($_.IsSystem)" }
@@ -13,22 +14,22 @@ $next = $parts | Where-Object { $_.Offset -eq ($c.Offset + $c.Size) }
 if (-not $next) {
     # Already removed (Windows refuses while its page file is there, so it may have been removed
     # from the partition table on the Mac): only grow C: over the free space after it.
-    $max = (Get-PartitionSupportedSize -DriveLetter C).SizeMax
+    $max = (Get-PartitionSupportedSize -DriveLetter $sl).SizeMax
     if ($max -lt $c.Size + 1GB) { 'win10 removal: no partition and no free space after C:, nothing changed'; exit 1 }
     "win10 removal: no partition after C:, growing C: from $($c.Size) to $max bytes"
-    Resize-Partition -DriveLetter C -Size $max
-    "win10 removal: done, C: is now $((Get-Partition -DriveLetter C).Size) bytes"
+    Resize-Partition -DriveLetter $sl -Size $max
+    "win10 removal: done, C: is now $((Get-Partition -DriveLetter $sl).Size) bytes"
     exit 0
 }
 $fs = (Get-Volume -Partition $next -ErrorAction SilentlyContinue).FileSystem
 if ($next.PartitionNumber -eq $c.PartitionNumber -or $next.IsBoot -or $next.IsSystem -or
-        $next.DriveLetter -eq 'C' -or $fs -ne 'NTFS' -or $next.Size -lt 20GB -or $next.Size -gt 30GB) {
+        $next.DriveLetter -eq $sl -or $fs -ne 'NTFS' -or $next.Size -lt 20GB -or $next.Size -gt 30GB) {
     "win10 removal: partition $($next.PartitionNumber) ($fs, $($next.Size) bytes) failed the checks, nothing changed"
     exit 1
 }
 "win10 removal: removing partition $($next.PartitionNumber) ($fs, $($next.Size) bytes)"
 Remove-Partition -DiskNumber $c.DiskNumber -PartitionNumber $next.PartitionNumber -Confirm:$false
-$max = (Get-PartitionSupportedSize -DriveLetter C).SizeMax
+$max = (Get-PartitionSupportedSize -DriveLetter $sl).SizeMax
 "win10 removal: growing C: from $($c.Size) to $max bytes"
-Resize-Partition -DriveLetter C -Size $max
-"win10 removal: done, C: is now $((Get-Partition -DriveLetter C).Size) bytes"
+Resize-Partition -DriveLetter $sl -Size $max
+"win10 removal: done, C: is now $((Get-Partition -DriveLetter $sl).Size) bytes"

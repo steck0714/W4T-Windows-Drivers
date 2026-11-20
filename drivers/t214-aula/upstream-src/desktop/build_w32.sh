@@ -25,6 +25,8 @@ TMP="$(mktemp -d)"; MNT="$TMP/mnt"; mkdir "$MNT"
 ntfs-3g "$IMAGE" "$MNT"
 trap 'fusermount -u "$MNT" 2>/dev/null || true' EXIT
 cp "$HERE/setup.cmd" "$HERE/copylogs.cmd" "$HERE/boot.cmd" "$MNT/swagent/"
+# finds the boot partition by its \agent\w32.cmd at run time: any drive letter, or none (boot.cmd / setup.cmd call it)
+cp "$HERE/findagent64.cmd" "$MNT/swagent/findagent.cmd"
 # Setup itself creates the user (unattend.xml); boot.cmd only writes a log.
 echo done > "$MNT/swagent/user.done"
 CONFIG="$MNT/Windows/System32/config"

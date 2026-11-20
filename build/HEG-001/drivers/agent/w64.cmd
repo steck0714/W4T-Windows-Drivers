@@ -19,7 +19,7 @@ rem Settings that only need to be applied once per agent version: skipped while 
 rem equals the copy saved after the last full run. The agent used to spend minutes on every boot
 rem here (PowerShell is slow on this CPU and SD card) while the user was already working.
 set ONCE=1
-if exist C:\swagent\w64-applied.cmd fc /b %~f0 C:\swagent\w64-applied.cmd >nul 2>&1 && set ONCE=
+if exist %SystemDrive%\swagent\w64-applied.cmd fc /b %~f0 %SystemDrive%\swagent\w64-applied.cmd >nul 2>&1 && set ONCE=
 if not defined ONCE (
   echo -- settings unchanged since the last full run, skipped >> %LOG%
   goto :afteronce
@@ -42,9 +42,10 @@ call :crashdumps %1
 call :onedrive
 call :noupdate
 call :defender %1
-copy /y %~f0 C:\swagent\w64-applied.cmd >nul 2>&1
+copy /y %~f0 %SystemDrive%\swagent\w64-applied.cmd >nul 2>&1
 :afteronce
 call :svchost %1
+call :helpers %1
 call :bcdfix
 call :removewin10 %1
 call :dumpcopy %1
@@ -65,7 +66,7 @@ set EK=HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\SWTS0001\0
 set HG={745a17a0-74d3-11d0-b6fe-00a0c90f57da}
 set CK=HKLM\SYSTEM\CurrentControlSet\Control\Class\%HG%\0099
 reg query "%EK%" /v Service >nul 2>&1
-if errorlevel 1 if exist C:\Windows\System32\drivers\swhid.sys (
+if errorlevel 1 if exist %SystemRoot%\System32\drivers\swhid.sys (
   echo -- binding SWTS0001 to swhid >> %LOG%
   reg add "%CK%" /v DriverDesc /t REG_SZ /d "Switch touch panel" /f >> %LOG% 2>&1
   reg add "%CK%" /v ProviderName /t REG_SZ /d "windows-10-switch" /f >> %LOG% 2>&1
@@ -84,7 +85,7 @@ set BK=HKLM\SYSTEM\CurrentControlSet\Enum\Root\SWBATT\0000
 set BG={72631e54-78a4-11d0-bcf7-00aa00b7b32a}
 set BC=HKLM\SYSTEM\CurrentControlSet\Control\Class\%BG%\0099
 reg query "%BK%" /v Service >nul 2>&1
-if errorlevel 1 if exist C:\Windows\System32\drivers\swbatt.sys (
+if errorlevel 1 if exist %SystemRoot%\System32\drivers\swbatt.sys (
   echo -- creating ROOT\SWBATT >> %LOG%
   reg add "%BC%" /v DriverDesc /t REG_SZ /d "Switch battery" /f >> %LOG% 2>&1
   reg add "%BC%" /v ProviderName /t REG_SZ /d "windows-10-switch" /f >> %LOG% 2>&1
@@ -113,7 +114,7 @@ echo -- drivers >> %LOG%
 sc query swhid >> %LOG% 2>&1
 sc query swbatt >> %LOG% 2>&1
 reg query HKLM\SYSTEM\CurrentControlSet\Enum\HID /s /f SWTS >> %LOG% 2>&1
-copy /y C:\swagent\bat.txt %1:\agent\bat64.txt >nul 2>&1
+copy /y %SystemDrive%\swagent\bat.txt %1:\agent\bat64.txt >nul 2>&1
 powercfg /batteryreport /output %1:\agent\battery64.html >> %LOG% 2>&1
 call :gpureport
 call :perf %1
@@ -129,7 +130,7 @@ goto :eof
 rem Creates the kernel service for driver %1 if it does not exist yet.
 :service
 reg query HKLM\SYSTEM\CurrentControlSet\Services\%1 /v ImagePath >nul 2>&1 && goto :eof
-if not exist C:\Windows\System32\drivers\%1.sys goto :eof
+if not exist %SystemRoot%\System32\drivers\%1.sys goto :eof
 echo -- creating service %1 >> %LOG%
 reg add HKLM\SYSTEM\CurrentControlSet\Services\%1 /v Type /t REG_DWORD /d 1 /f >> %LOG% 2>&1
 reg add HKLM\SYSTEM\CurrentControlSet\Services\%1 /v Start /t REG_DWORD /d 3 /f >> %LOG% 2>&1
@@ -147,10 +148,10 @@ set NEWF=%1.sys
 reg query HKLM\SYSTEM\CurrentControlSet\Services\%1 /v ImagePath >nul 2>&1 || goto :copy
 set NEWF=%1_b.sys
 reg query HKLM\SYSTEM\CurrentControlSet\Services\%1 /v ImagePath | find /i "%1_b.sys" >nul && (set CURF=%1_b.sys& set NEWF=%1.sys)
-fc /b %2:\agent\arm64\%1.sys C:\Windows\System32\drivers\%CURF% >nul 2>&1 && goto :eof
+fc /b %2:\agent\arm64\%1.sys %SystemRoot%\System32\drivers\%CURF% >nul 2>&1 && goto :eof
 :copy
 echo -- installing %1 as %NEWF% >> %LOG%
-copy /y %2:\agent\arm64\%1.sys C:\Windows\System32\drivers\%NEWF% >> %LOG% 2>&1
+copy /y %2:\agent\arm64\%1.sys %SystemRoot%\System32\drivers\%NEWF% >> %LOG% 2>&1
 reg query HKLM\SYSTEM\CurrentControlSet\Services\%1 /v ImagePath >nul 2>&1 && (
   reg add HKLM\SYSTEM\CurrentControlSet\Services\%1 /v ImagePath /t REG_EXPAND_SZ /d \SystemRoot\System32\drivers\%NEWF% /f >> %LOG% 2>&1
   set REBOOT=1
@@ -165,10 +166,10 @@ echo -- onedrive >> %LOG%
 reg add HKLM\SOFTWARE\Policies\Microsoft\Windows\OneDrive /v DisableFileSyncNGSC /t REG_DWORD /d 1 /f >> %LOG% 2>&1
 taskkill /f /im OneDriveSetup.exe >> %LOG% 2>&1
 taskkill /f /im OneDrive.exe >> %LOG% 2>&1
-for %%F in (C:\Windows\SysWOW64\OneDriveSetup.exe C:\Windows\System32\OneDriveSetup.exe) do if exist %%F call :odfile %%F
+for %%F in (%SystemRoot%\SysWOW64\OneDriveSetup.exe %SystemRoot%\System32\OneDriveSetup.exe) do if exist %%F call :odfile %%F
 for /f "tokens=*" %%K in ('reg query HKU 2^>nul ^| findstr /r /c:"S-1-5-21-[0-9-]*$"') do call :odkey "%%K"
-call :odprofile "C:\Users\Default"
-for /d %%P in (C:\Users\*) do call :odprofile "%%P"
+call :odprofile "%SystemDrive%\Users\Default"
+for /d %%P in (%SystemDrive%\Users\*) do call :odprofile "%%P"
 for /f "tokens=1 delims=," %%T in ('schtasks /query /fo csv /nh 2^>nul ^| findstr /i onedrive') do schtasks /delete /tn %%T /f >> %LOG% 2>&1
 goto :eof
 
@@ -197,14 +198,14 @@ rem Wi-Fi (Windows 11 only; the device ACPI\SWOA0D01 exists only with a Wi-Fi UE
 rem Package on the boot partition in agent\wifi: switchwifi.sys/.inf, the board firmware,
 rem wifi_sign.ps1 and Inf2Cat from the WDK (inf2cat\). The catalog is made here and signed with
 rem test certificates the console makes for itself (wifi_sign.ps1), then the package is installed
-rem with pnputil once per driver build (marker: the staged copy in C:\swagent\wifi plus
+rem with pnputil once per driver build (marker: the staged copy in %SystemDrive%\swagent\wifi plus
 rem installed-v2.ok; the name changed when the cleanup below removed a fresh 0.5.7 install).
 :wifi
 if not exist %1:\agent\wifi\switchwifi.inf goto :eof
 ver | find "10.0.22" >nul || goto :eof
 echo -- wifi >> %LOG%
-set WD=C:\swagent\wifi
-set FW=C:\Windows\System32\drivers\SwitchWOA
+set WD=%SystemDrive%\swagent\wifi
+set FW=%SystemRoot%\System32\drivers\SwitchWOA
 if not exist %FW% mkdir %FW%
 copy /y %1:\agent\wifi\brcmfmac4356A3-pcie.bin %FW%\ >> %LOG% 2>&1
 copy /y %1:\agent\wifi\brcmfmac4356A3-pcie.txt %FW%\ >> %LOG% 2>&1
@@ -251,8 +252,8 @@ if not exist %1:\agent\bt\switchbt.inf goto :eof
 if not exist %1:\agent\wifi\inf2cat\Inf2Cat.exe goto :eof
 ver | find "10.0.22" >nul || goto :eof
 echo -- bluetooth >> %LOG%
-set BD=C:\swagent\bt
-set FW=C:\Windows\System32\drivers\SwitchWOA
+set BD=%SystemDrive%\swagent\bt
+set FW=%SystemRoot%\System32\drivers\SwitchWOA
 if not exist %FW% mkdir %FW%
 copy /y %1:\agent\bt\BCM4356A3.hcd %FW%\ >> %LOG% 2>&1
 if exist %BD%\installed-local.ok fc /b %1:\agent\bt\switchbt.sys %BD%\switchbt.sys >nul 2>&1 && goto :btreport
@@ -287,7 +288,7 @@ if not exist %1:\agent\audio\switchaudio.inf goto :eof
 if not exist %1:\agent\wifi\inf2cat\Inf2Cat.exe goto :eof
 ver | find "10.0.22" >nul || goto :eof
 echo -- audio >> %LOG%
-set AD=C:\swagent\audio
+set AD=%SystemDrive%\swagent\audio
 if exist %AD%\installed-local.ok fc /b %1:\agent\audio\switchaudio.sys %AD%\switchaudio.sys >nul 2>&1 && goto :audioreport
 if exist %AD% rmdir /s /q %AD%
 mkdir %AD%
@@ -320,7 +321,7 @@ if not exist %1:\agent\gpu\tegragpurender.inf goto :eof
 if not exist %1:\agent\wifi\inf2cat\Inf2Cat.exe goto :eof
 ver | find "10.0.22" >nul || goto :eof
 echo -- gpu >> %LOG%
-set GD=C:\swagent\gpu
+set GD=%SystemDrive%\swagent\gpu
 if exist %GD%\installed-local.ok fc /b %1:\agent\gpu\tegragpurender.sys %GD%\tegragpurender.sys >nul 2>&1 && goto :eof
 if exist %GD% rmdir /s /q %GD%
 mkdir %GD%
@@ -369,19 +370,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File %1:\agent\remove_win10.ps1 >
 goto :eof
 
 rem Crash dumps of user-mode programs (Windows Error Reporting LocalDumps): minidumps in
-rem C:\swagent\dumps, at most 10; those not yet on the card are copied to agent\dumps.
+rem %SystemDrive%\swagent\dumps, at most 10; those not yet on the card are copied to agent\dumps.
 :crashdumps
 set LD=HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps
-reg add "%LD%" /v DumpFolder /t REG_EXPAND_SZ /d C:\swagent\dumps /f >nul 2>&1
+reg add "%LD%" /v DumpFolder /t REG_EXPAND_SZ /d %SystemDrive%\swagent\dumps /f >nul 2>&1
 reg add "%LD%" /v DumpType /t REG_DWORD /d 1 /f >nul 2>&1
 reg add "%LD%" /v DumpCount /t REG_DWORD /d 10 /f >nul 2>&1
 goto :eof
 
 :dumpcopy
-if not exist C:\swagent\dumps goto :eof
+if not exist %SystemDrive%\swagent\dumps goto :eof
 if not exist %1:\agent\dumps mkdir %1:\agent\dumps
 echo -- crash dumps >> %LOG%
-for %%F in (C:\swagent\dumps\*.dmp) do if not exist "%1:\agent\dumps\%%~nxF" (
+for %%F in (%SystemDrive%\swagent\dumps\*.dmp) do if not exist "%1:\agent\dumps\%%~nxF" (
   echo %%~nxF >> %LOG%
   copy /y "%%F" %1:\agent\dumps\ >nul 2>&1
 )
@@ -404,18 +405,20 @@ rem TreatAsSystem); the kernel then refuses it and bcdedit, language packs and s
 rem Added here once the boot partition is active (see README, Lessons learned): then Windows
 rem finds its EFI system partition and mountvol /S can reach the BCD.
 bcdedit /enum {bootmgr} >nul 2>&1 && goto :eof
-mountvol S: /S >nul 2>&1 || (
-  echo -- bcd: not openable and no EFI system partition found: mark the boot partition active >> %LOG%
+set ESP=
+for %%L in (Z Y X W V U T S R Q P O N M L K J I H G F E D) do if not defined ESP if not exist %%L:\ mountvol %%L: /S >nul 2>&1 && set ESP=%%L
+if not defined ESP (
+  echo -- bcd: not openable and no EFI system partition found (or no free drive letter): mark the boot partition active >> %LOG%
   goto :eof
 )
-if exist S:\EFI\Microsoft\Boot\BCD (
+if exist %ESP%:\EFI\Microsoft\Boot\BCD (
   echo -- bcd: marking the store as the system store >> %LOG%
-  reg load HKLM\SWBCD S:\EFI\Microsoft\Boot\BCD >> %LOG% 2>&1
+  reg load HKLM\SWBCD %ESP%:\EFI\Microsoft\Boot\BCD >> %LOG% 2>&1
   reg add HKLM\SWBCD\Description /v System /t REG_DWORD /d 1 /f >> %LOG% 2>&1
   reg add HKLM\SWBCD\Description /v TreatAsSystem /t REG_DWORD /d 1 /f >> %LOG% 2>&1
   reg unload HKLM\SWBCD >> %LOG% 2>&1
 )
-mountvol S: /D >nul 2>&1
+mountvol %ESP%: /D >nul 2>&1
 bcdedit /enum {bootmgr} >> %LOG% 2>&1
 goto :eof
 
@@ -424,16 +427,23 @@ rem The swagent service host (swagentsvc.exe, desktop/swagentsvc.c). Images buil
 rem 2026-11-15 ran cmd.exe as the service binary, and every boot waited 45 s for it (event 7009).
 rem From agent\swagentsvc.exe: copied when it differs, ImagePath switched once; next boot uses it.
 if not exist %1:\agent\swagentsvc.exe goto :eof
-fc /b %1:\agent\swagentsvc.exe C:\swagent\swagentsvc.exe >nul 2>&1 || copy /y %1:\agent\swagentsvc.exe C:\swagent\swagentsvc.exe >> %LOG% 2>&1
+fc /b %1:\agent\swagentsvc.exe %SystemDrive%\swagent\swagentsvc.exe >nul 2>&1 || copy /y %1:\agent\swagentsvc.exe %SystemDrive%\swagent\swagentsvc.exe >> %LOG% 2>&1
 reg query HKLM\SYSTEM\CurrentControlSet\Services\swagent /v ImagePath | find /i "swagentsvc.exe" >nul && goto :eof
-if not exist C:\swagent\swagentsvc.exe goto :eof
+if not exist %SystemDrive%\swagent\swagentsvc.exe goto :eof
 echo -- swagent: service host installed >> %LOG%
-reg add HKLM\SYSTEM\CurrentControlSet\Services\swagent /v ImagePath /t REG_EXPAND_SZ /d "C:\swagent\swagentsvc.exe C:\Windows\System32\cmd.exe /c C:\swagent\boot.cmd" /f >> %LOG% 2>&1
+reg add HKLM\SYSTEM\CurrentControlSet\Services\swagent /v ImagePath /t REG_EXPAND_SZ /d "%SystemDrive%\swagent\swagentsvc.exe %SystemRoot%\System32\cmd.exe /c %SystemDrive%\swagent\boot.cmd" /f >> %LOG% 2>&1
+goto :eof
+
+:helpers
+rem findagent.cmd (finds the boot partition even when Windows gave it no letter or a letter other than D:):
+rem copied from agent\findagent.cmd when it differs; boot.cmd / setup.cmd of the image call it from swagent.
+if not exist %1:\agent\findagent.cmd goto :eof
+fc /b %1:\agent\findagent.cmd %SystemDrive%\swagent\findagent.cmd >nul 2>&1 || copy /y %1:\agent\findagent.cmd %SystemDrive%\swagent\findagent.cmd >> %LOG% 2>&1
 goto :eof
 
 :tune
 rem Lightweight Windows (tune.ps1): agent\tune.flag applies it on every boot (each step checks
-rem first), agent\untune.flag puts everything back from C:\swagent\tune-backup.json.
+rem first), agent\untune.flag puts everything back from %SystemDrive%\swagent\tune-backup.json.
 if exist %1:\agent\untune.flag (
   echo -- untune >> %LOG%
   powershell -NoProfile -ExecutionPolicy Bypass -File %1:\agent\tune.ps1 %1:\agent undo >> %LOG% 2>&1
@@ -471,7 +481,7 @@ powershell -NoProfile -Command "Get-WinEvent -FilterHashtable @{LogName='Microso
 powershell -NoProfile -Command "$b=(Get-CimInstance Win32_OperatingSystem).LastBootUpTime; 'boot started ' + $b + ', agent at ' + (Get-Date) + ' = ' + [int]((Get-Date)-$b).TotalSeconds + ' s'" >> %PF% 2>&1
 rem SD read speed on the recovery image, which nothing reads during a normal boot (not cached):
 rem 128 MB sequentially in 1 MB blocks, then 2000 random 4 KB reads further into the file.
-powershell -NoProfile -Command "$f='C:\Windows\System32\Recovery\winre.wim'; $s=[IO.File]::Open($f,'Open','Read','ReadWrite'); $buf=New-Object byte[] 1MB; $t=[Diagnostics.Stopwatch]::StartNew(); for($i=0;$i -lt 128;$i++){ [void]$s.Read($buf,0,1MB) }; $t.Stop(); 'sequential read: ' + [math]::Round(128/$t.Elapsed.TotalSeconds,1) + ' MB/s'; $r=New-Object Random 7; $b4=New-Object byte[] 4096; $t=[Diagnostics.Stopwatch]::StartNew(); for($i=0;$i -lt 2000;$i++){ $s.Position=(200MB + [long]($r.Next(0,100000))*4096); [void]$s.Read($b4,0,4096) }; $t.Stop(); 'random 4 KB reads: ' + [math]::Round(2000/$t.Elapsed.TotalSeconds) + ' per second (' + [math]::Round(8/$t.Elapsed.TotalSeconds,2) + ' MB/s)'; $s.Close()" >> %PF% 2>&1
+powershell -NoProfile -Command "$f='%SystemRoot%\System32\Recovery\winre.wim'; $s=[IO.File]::Open($f,'Open','Read','ReadWrite'); $buf=New-Object byte[] 1MB; $t=[Diagnostics.Stopwatch]::StartNew(); for($i=0;$i -lt 128;$i++){ [void]$s.Read($buf,0,1MB) }; $t.Stop(); 'sequential read: ' + [math]::Round(128/$t.Elapsed.TotalSeconds,1) + ' MB/s'; $r=New-Object Random 7; $b4=New-Object byte[] 4096; $t=[Diagnostics.Stopwatch]::StartNew(); for($i=0;$i -lt 2000;$i++){ $s.Position=(200MB + [long]($r.Next(0,100000))*4096); [void]$s.Read($b4,0,4096) }; $t.Stop(); 'random 4 KB reads: ' + [math]::Round(2000/$t.Elapsed.TotalSeconds) + ' per second (' + [math]::Round(8/$t.Elapsed.TotalSeconds,2) + ' MB/s)'; $s.Close()" >> %PF% 2>&1
 echo ==== perf done %time% >> %PF%
 type %PF% >> %LOG%
 goto :eof
@@ -482,8 +492,8 @@ rem preferences and its scheduled tasks. Windows ignores these while Tamper Prot
 rem switch can only be turned off by hand in Windows Security. Leftover signature installers and
 rem kernel live dumps are deleted either way.
 :defender
-del /q C:\Windows\ServiceProfiles\NetworkService\AppData\Local\Temp\mpam-*.exe >nul 2>&1
-del /q C:\Windows\LiveKernelReports\*.dmp >nul 2>&1
+del /q %SystemRoot%\ServiceProfiles\NetworkService\AppData\Local\Temp\mpam-*.exe >nul 2>&1
+del /q %SystemRoot%\LiveKernelReports\*.dmp >nul 2>&1
 if not exist %1:\agent\defender-off.flag goto :eof
 echo -- defender off >> %LOG%
 set DEF=HKLM\SOFTWARE\Policies\Microsoft\Windows Defender
@@ -499,8 +509,8 @@ reg add "%DEF%\Signature Updates" /v UpdateOnStartUp /t REG_DWORD /d 0 /f >> %LO
 reg add "%DEF%\Signature Updates" /v ScheduleDay /t REG_DWORD /d 8 /f >> %LOG% 2>&1
 reg add "%DEF%\Scan" /v ScheduleDay /t REG_DWORD /d 8 /f >> %LOG% 2>&1
 powershell -NoProfile -Command "Set-MpPreference -DisableRealtimeMonitoring $true -DisableBehaviorMonitoring $true -DisableIOAVProtection $true -MAPSReporting 0 -SubmitSamplesConsent 2 -SignatureScheduleDay 8 -ScanScheduleDay 8 -ErrorAction SilentlyContinue; Get-ScheduledTask -TaskPath '\Microsoft\Windows\Windows Defender\' -ErrorAction SilentlyContinue | Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null; $s=Get-MpComputerStatus -ErrorAction SilentlyContinue; 'defender: tamper protection ' + $s.IsTamperProtected + ', real-time ' + $s.RealTimeProtectionEnabled" >> %LOG% 2>&1
-del /q C:\Windows\ServiceProfiles\NetworkService\AppData\Local\Temp\mpam-*.exe >nul 2>&1
-del /q C:\Windows\LiveKernelReports\*.dmp >nul 2>&1
+del /q %SystemRoot%\ServiceProfiles\NetworkService\AppData\Local\Temp\mpam-*.exe >nul 2>&1
+del /q %SystemRoot%\LiveKernelReports\*.dmp >nul 2>&1
 goto :eof
 
 rem OpenSSH server (Windows 11) from agent\ssh, by ssh_setup.ps1: key login from the Mac only.
