@@ -14,7 +14,10 @@
 #                       models without a driver set get the scripts only (job testsign-skipped).
 #   gpu-aula (windows)  HEG-001 (OLED): build-aula-gpu.yml - the same TegraGpu sources as the Lite, packed as agent\gpu (experimental).
 #   gpu      (windows)  HAC-001 only: build-erista-gpu.yml (TegraGpu core + signed probe driver; no firmware inside, fwfetch loads it afterwards).
-#   commit-build        manual run with commit_build = true: puts the finished sets into build/<id>/ on this branch.
+#   commit-build        AUTOMATIC: after every push to a branch (and on a manual run unless commit_build is switched off) the finished sets
+#                       (drivers, .sys/.inf/.cat, .cer, fwfetch, test-signing, SHA256SUMS) are put into build/<id>/ on this branch.
+#                       A model whose job failed has no artifact and keeps what it had. The big self-contained apps (SwitchCenter /
+#                       SwitchPatcher) are committed only by a manual run, so a normal push does not add ~100 MB of binaries each time.
 #   release  (tag v* or manual run with release_tag)   attaches one kit zip per model + SHA256SUMS + the public .cer to a GitHub *pre-release*.
 #
 # Firmware that must not be redistributed (NVIDIA / Broadcom / Switchroot) is loaded from OUTSIDE the repository, automatically,
@@ -39,9 +42,9 @@ on:
         type: string
         default: 'all'
       commit_build:
-        description: 'Also commit the finished driver sets to build/<model>/ on this branch (test-signed .sys/.cat/.inf, public .cer, SHA256SUMS)'
+        description: 'Commit the finished driver sets to build/<model>/ on this branch (test-signed .sys/.cat/.inf, public .cer, SHA256SUMS). Also puts the apps there. A push to a branch always commits the driver sets (without apps)'
         type: boolean
-        default: false
+        default: true
       firmware_url:
         description: 'Optional https URL of your private firmware zip (otherwise the secret FW_BUNDLE_URL is used if it exists)'
         type: string
@@ -246,7 +249,7 @@ jobs:
           }
 
       - name: Build all drivers of ${{ matrix.model }}
-        run: .\tools\ci\Build-AllDrivers.ps1 -Model '${{ matrix.model }}'
+        run: .\tools\ci\Build-AllDrivers.ps1 -Model '${{ matrix.model }}' -NoAssemble   # the next step assembles build/<model> (same script as the local run)
 
       - name: Assemble build/${{ matrix.model }} (drivers, INF, CAT, public .cer, SHA256SUMS, licences; refuses private keys)
         run: python tools/build/assemble_build.py --model '${{ matrix.model }}' --kit-dir 'build/_work/${{ matrix.model }}/kit' --build-info 'build/_work/${{ matrix.model }}/BUILD-INFO.md'
@@ -505,44 +508,64 @@ jobs:
           if-no-files-found: ignore   # HEG-001 has no SwitchCenter / SwitchPatcher
 
   commit-build:
-    # Only on a manual run with commit_build = true. Puts the finished sets into build/<model>/ of THIS branch.
-    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.commit_build && (needs.drivers.result == 'success' || needs.heg001.result == 'success') }}
+    # Puts the finished driver sets into build/<model>/ of THIS branch, automatically:
+    #   - after every push to a branch (main / master / test): driver sets only (build-<model> artifacts);
+    #   - on a manual run when commit_build is on (the default): driver sets AND the apps (apps-<model> artifacts).
+    # A model whose build job failed has no build-<model> artifact, so its folder keeps what it had. Nothing runs for tags or pull requests.
+    # The commit is made with GITHUB_TOKEN, which does not start another workflow run (no loop).
+    if: ${{ !cancelled() && github.ref_type == 'branch' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.commit_build)) }}
     needs: [host, drivers, heg001, apps]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    concurrency:
+      group: commit-build-${{ github.ref_name }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}   # the branch head now, not the commit that started the run: the push below must be a fast-forward
       - uses: actions/download-artifact@v4
         with:
           pattern: build-*
           path: dl
       - uses: actions/download-artifact@v4
+        if: github.event_name == 'workflow_dispatch'
         with:
           pattern: apps-*
           path: dl
       - name: Commit build/<model>
+        env:
+          EVENT: ${{ github.event_name }}
         run: |
           set -e
+          if ! ls -d dl/build-* >/dev/null 2>&1; then echo "no build-<model> artifact in this run: nothing to commit"; exit 0; fi
           for d in dl/build-*; do
+            [ -d "$d" ] || continue
             m="${d#dl/build-}"
             rm -rf "build/$m/drivers" "build/$m/agent" "build/$m/fwfetch" "build/$m/test-signing"
             mkdir -p "build/$m"
             cp -r "$d/." "build/$m/"
           done
-          for d in dl/apps-*; do
-            [ -d "$d" ] || continue
-            m="${d#dl/apps-}"
-            rm -rf "build/$m/apps"; mkdir -p "build/$m/apps"
-            cp -r "$d/." "build/$m/apps/"
-          done
+          if [ "$EVENT" = workflow_dispatch ]; then
+            for d in dl/apps-*; do
+              [ -d "$d" ] || continue
+              m="${d#dl/apps-}"
+              rm -rf "build/$m/apps"; mkdir -p "build/$m/apps"
+              cp -r "$d/." "build/$m/apps/"
+            done
+          fi
           python3 tools/check_no_proprietary.py
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -f build
           git diff --cached --quiet && { echo "nothing changed"; exit 0; }
           git commit -m "build: driver sets from ${GITHUB_SHA::8} (test-signed, not verified on a console)"
-          git push
+          for i in 1 2 3; do
+            git push && exit 0
+            git pull --rebase origin "$GITHUB_REF_NAME"
+          done
+          echo "::error::could not push build/ to $GITHUB_REF_NAME"; exit 1
 
   release:
     if: ${{ !cancelled() && needs.drivers.result == 'success' && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')) }}
