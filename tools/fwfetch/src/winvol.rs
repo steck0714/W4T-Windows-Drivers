@@ -7,6 +7,7 @@
 //!   * resolves the place the running Windows keeps its drivers from %SystemRoot% (never from a typed-in letter),
 //!   * expands %VAR% tokens in paths (a scheduled task or a script may hand them over unexpanded), and
 //!   * lists volumes that have NO drive letter (as \\?\Volume{GUID}\ roots) so their `switchroot\` folder is searched too.
+//!
 //! Everything here is read-only; the only external program started is mountvol.exe (list mode, no arguments).
 use std::path::{Path, PathBuf};
 
