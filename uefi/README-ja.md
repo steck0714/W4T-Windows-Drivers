@@ -1,5 +1,7 @@
 # uefi/ — UEFI / EDK II 側の開発用ソース
 
+日本語 / [English](README.md) / [简体中文](README-zh-CN.md) / [Español](README-es.md) / [Português (Brasil)](README-pt-BR.md) / [Français](README-fr.md) / [Deutsch](README-de.md) / [한국어](README-ko.md)
+
 Windows ドライバ(`drivers/`)を **EDK II(UEFI)から起動したときに確実に動かす**ための、UEFI 側のソースと
 開発用の道具。**BL33 / bl31 などのファームウェアイメージ、バイナリは含まない**(それらは winx 本体のビルド成果物)。
 実機では未確認。EDK II(ARM64)でのビルドもまだしていない(下の「確認済み / 未確認」)。
