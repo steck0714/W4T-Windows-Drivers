@@ -1,8 +1,8 @@
 # Build info: HEG-001
 
 - model: HEG-001
-- commit: 79ad434f7fc9aee6ca6f6e5b94c062fdc0015327
-- built: 2026-11-20 04:02:26Z
+- commit: 858daf245b12661614ef029af96153ee3e646aad
+- built: 2026-11-20 05:57:07Z
 - WDK for most drivers: 10.0.19041.0 (a driver with its own wdk entry, e.g. Wi-Fi, uses that one)
 - signed with: a new self-signed certificate made by this run
 

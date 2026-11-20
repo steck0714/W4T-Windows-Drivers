@@ -16,12 +16,17 @@
   fwfetch exit code 0 = everything found, 2 = something missing (tried again at the next start: the card may not be
   readable yet, or the file is not on it), 1 = error. This script exits 0 only when the final check is clean.
   Never writes to the SD card. Never uses the network.
+
+  Drive letters: nothing here assumes Windows is on C:. -GpuDir / -DriverDir take 'auto' (= this Windows' System32\drivers), a path
+  with %SystemRoot% / {SystemRoot}, or a plain path; a path saved by an older install whose '<letter>:\...\System32\drivers' letter is no
+  longer the running Windows is moved to the running Windows (and logged). The SD card's FAT32 'switchroot' partition is found even when
+  it has no drive letter (fwfetch --auto also searches volumes by their \\?\Volume{GUID}\ name).
 #>
 param(
   [Parameter(Mandatory = $true)][ValidateSet('erista', 'lite', 'aula')][string]$Profile,
   [string]$CacheDir = (Join-Path $env:ProgramData 'W4T\fw-cache'),
-  [string]$GpuDir = '',            # e.g. C:\Windows\System32\drivers\TegraGpu (erista / lite)
-  [string]$DriverDir = '',         # e.g. C:\Windows\System32\drivers : Wi-Fi / Bluetooth firmware is put into <DriverDir>\SwitchWOA and \switchwifi (needs fwfetch --deploy-drivers)
+  [string]$GpuDir = '',            # 'auto' = <SystemRoot>\System32\drivers\TegraGpu of THIS Windows (erista / lite). Windows on a Switch is rarely on C: (it lives on the SD card), so do not type a drive letter
+  [string]$DriverDir = '',         # 'auto' = <SystemRoot>\System32\drivers of THIS Windows: Wi-Fi / Bluetooth firmware is put into <DriverDir>\SwitchWOA and \switchwifi (needs fwfetch --deploy-drivers)
   [switch]$Force                   # ignore the done marker and always run fwfetch
 )
 $ErrorActionPreference = 'Stop'
@@ -33,6 +38,34 @@ $log = Join-Path $logDir 'fwfetch-startup.log'
 $marker = Join-Path $CacheDir "done.$Profile"
 $lockPath = Join-Path $CacheDir 'fw-lock.json'
 function Log([string]$m) { Add-Content -Path $log -Value ("{0:u} {1}" -f (Get-Date), $m) -Encoding utf8 }
+
+# ---- where the RUNNING Windows lives (never assume C:) ----------------------------------------------------------------
+$sysRoot = $env:SystemRoot; if (-not $sysRoot) { $sysRoot = $env:windir }
+if (-not $sysRoot) { Log 'SystemRoot is not set: cannot tell where this Windows lives'; exit 1 }
+$sysDrivers = Join-Path $sysRoot 'System32\drivers'
+function Resolve-W4TDir([string]$p, [string]$autoSub) {
+  if (-not $p) { return '' }
+  if ($p -eq 'auto') { if ($autoSub) { return (Join-Path $sysDrivers $autoSub) } else { return $sysDrivers } }
+  $q = $p.Replace('{SystemRoot}', $sysRoot).Replace('{SystemDrive}', (Split-Path -Qualifier $sysRoot))
+  $q = [Environment]::ExpandEnvironmentVariables($q)
+  # a path saved by an older install: '<letter>:\...\System32\drivers[\x]' with a letter that is not this Windows any more -> follow this Windows
+  $m = [regex]::Match($q, '^[A-Za-z]:\\.*?\\System32\\drivers(?<rest>(\\.*)?)$', 'IgnoreCase')
+  if ($m.Success -and -not $q.StartsWith($sysRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    $moved = $sysDrivers + $m.Groups['rest'].Value
+    Log "path '$p' is not on the running Windows ($sysRoot): using '$moved' instead"
+    return $moved
+  }
+  return $q
+}
+function Test-DriveExists([string]$p) {
+  # never let New-Item invent a folder on a drive that is not there (or is another disk's) - stop and say so
+  try { $qual = Split-Path -Qualifier $p -ErrorAction Stop } catch { return $true }   # relative / UNC: nothing to check
+  return (Test-Path -LiteralPath ($qual + '\'))
+}
+$GpuDir = Resolve-W4TDir $GpuDir 'TegraGpu'
+$DriverDir = Resolve-W4TDir $DriverDir ''
+foreach ($d in @($GpuDir, $DriverDir)) { if ($d -and -not (Test-DriveExists $d)) { Log "drive of '$d' does not exist (the drive letter changed?). Re-run Install-FwFetchStartup.ps1 with -GpuDir auto -DriverDir auto"; exit 1 } }
+Log "Windows is on $sysRoot; GpuDir='$GpuDir' DriverDir='$DriverDir' CacheDir='$CacheDir'"
 
 # keep the log small
 if ((Test-Path $log) -and (Get-Item $log).Length -gt 512KB) { Move-Item $log "$log.old" -Force }
