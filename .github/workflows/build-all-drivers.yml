@@ -283,8 +283,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'swagentsvc.exe failed to build' }
           python -c "import sys; sys.path.insert(0,'tools/ci'); import verify_build as v; pe=v.read_pe(sys.argv[1]); assert pe['machine']==v.IMAGE_FILE_MACHINE_ARM64, pe; print('swagentsvc.exe is ARM64')" "$agent/swagentsvc.exe"
           if ($LASTEXITCODE -ne 0) { throw 'swagentsvc.exe is not an ARM64 image' }
-          Get-ChildItem $agent -Recurse -File | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.FullName.Substring((Resolve-Path 'build/HEG-001/drivers').Path.Length + 1).Replace('\', '/') } |
-            Set-Content 'build/HEG-001/drivers/agent/SHA256SUMS-agent.txt' -Encoding ascii
+          # Collect every hash into a variable BEFORE writing the list: a streaming pipeline into Set-Content would let Get-FileHash
+          # open the list file that Set-Content already holds open for writing ("being used by another process").
+          $drvRoot = (Resolve-Path 'build/HEG-001/drivers').Path
+          $sumsFile = Join-Path $agent 'SHA256SUMS-agent.txt'
+          Remove-Item $sumsFile -Force -ErrorAction SilentlyContinue
+          $agentSums = @(Get-ChildItem $agent -Recurse -File | Where-Object { $_.Name -ne 'SHA256SUMS-agent.txt' } | Sort-Object FullName | ForEach-Object {
+            '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.FullName.Substring($drvRoot.Length + 1).Replace('\', '/')
+          })
+          Set-Content -LiteralPath $sumsFile -Value $agentSums -Encoding ascii
 
       - name: "Verify the output (every .sys is a signed ARM64 native image, every INF has its .sys / .cat - not a hardware test)"
         run: |
@@ -336,7 +343,14 @@ jobs:
               'From then on fwfetch runs 1 minute after every Windows start until it has found everything. Log: %ProgramData%\W4T\logs\fwfetch-startup.log',
               'Remove: .\Install-FwFetchStartup.ps1 -Remove') -Encoding ascii
           }
-          Get-ChildItem $d -File | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } | Set-Content "$d/SHA256SUMS.txt" -Encoding ascii
+          # Hash everything into a variable first, THEN write SHA256SUMS.txt. The old one-pipeline form made Set-Content open
+          # SHA256SUMS.txt while Get-ChildItem was still listing the folder, so Get-FileHash tried to read the file being written.
+          $sumsFile = Join-Path $d 'SHA256SUMS.txt'
+          Remove-Item $sumsFile -Force -ErrorAction SilentlyContinue
+          $fwSums = @(Get-ChildItem $d -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' } | Sort-Object Name | ForEach-Object {
+            '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          })
+          Set-Content -LiteralPath $sumsFile -Value $fwSums -Encoding ascii
 
       - name: No firmware or key material in what is uploaded
         run: python tools/check_no_proprietary.py
