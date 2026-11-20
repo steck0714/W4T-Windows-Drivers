@@ -26,6 +26,9 @@ on:
   push:
     paths: ['drivers/t214-hoag/TegraGpu/**', 'drivers/t214-hoag/SwitchFan/**', 'tools/ci/mesa-switch-woa.rev', '.github/workflows/build-lite-gpu.yml']
 
+permissions:
+  contents: read   # the 'release' job below raises this to write for itself only
+
 env:
   MESA_REV: 0ff52079ca9e9e837ed27eb95a8d239f439a1864
 

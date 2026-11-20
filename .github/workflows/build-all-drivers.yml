@@ -439,6 +439,10 @@ jobs:
     name: gpu HDH-001 (TegraGpu, Switch Lite)
     needs: [host, plan]
     if: needs.plan.outputs.gpu_lite == 'true'
+    # build-lite-gpu.yml has a 'release' job that needs contents: write (it is skipped when called from here,
+    # but GitHub validates the permission statically), so the caller must allow it.
+    permissions:
+      contents: write
     uses: ./.github/workflows/build-lite-gpu.yml
     with:
       firmware_url: ${{ inputs.firmware_url }}
