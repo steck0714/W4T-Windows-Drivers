@@ -1,0 +1,571 @@
+diff --git a/Library/PlatformBootManagerLib/GpuHandoff.c b/Library/PlatformBootManagerLib/GpuHandoff.c
+new file mode 100644
+index 0000000..f87cb6c
+--- /dev/null
++++ b/Library/PlatformBootManagerLib/GpuHandoff.c
+@@ -0,0 +1,105 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* EDK II side of the GM20B hand-off (Erista / Lite / OLED).
++ *
++ * PlatformGpuHandoffBeforeBoot () is called right before Windows Boot Manager
++ * is started. It makes sure the GPU is in reset and clamped (see GpuHandoff.h),
++ * prints the result, and arms an ExitBootServices notification that re-checks
++ * the same contract at the last moment, because anything that ran between the
++ * menu and the OS loader (option ROM style drivers, the boot manager itself,
++ * the display path) may have clocked or unclamped the GPU again.
++ *
++ * It never powers the GPU and never blocks the boot: every failure is reported
++ * and Windows starts anyway (the driver then reports BUSY / a probe error
++ * instead of the machine hanging in firmware).
++ *
++ * Built only with -DSWITCH_ERISTA_GPU=1, -DSWITCH_LITE_GPU=1 or
++ * -DSWITCH_OLED_GPU=1. Not run on hardware yet.
++ */
++#if defined(SWITCH_ERISTA_GPU) || defined(SWITCH_LITE_GPU) || defined(SWITCH_OLED_GPU)
++#include <Uefi.h>
++#include <Library/BaseLib.h>
++#include <Library/BaseMemoryLib.h>
++#include <Library/IoLib.h>
++#include <Library/UefiLib.h>
++#include <Library/UefiBootServicesTableLib.h>
++#include "GpuHandoff.h"
++
++#if defined(SWITCH_ERISTA_GPU)
++#define WINX_GPU_HIDREV   GH_HIDREV_T210
++#define WINX_GPU_BOARD    L"Erista"
++#else
++/* Lite (HDH-001) and OLED (HEG-001) are both T210B01. */
++#define WINX_GPU_HIDREV   GH_HIDREV_T210B01
++#if defined(SWITCH_OLED_GPU)
++#define WINX_GPU_BOARD    L"OLED"
++#else
++#define WINX_GPU_BOARD    L"Lite"
++#endif
++#endif
++
++STATIC EFI_EVENT                   mGpuHandoffEbsEvent;
++STATIC enum gpu_handoff_result     mGpuHandoffLast = GPU_HANDOFF_BAD_ARGUMENT;
++STATIC struct gpu_handoff_report   mGpuHandoffReport;
++
++STATIC UINT32 GhRead32 (VOID *Context, UINT32 Address)
++{
++  (VOID)Context;
++  return MmioRead32 (Address);
++}
++
++STATIC VOID GhWrite32 (VOID *Context, UINT32 Address, UINT32 Value)
++{
++  (VOID)Context;
++  MmioWrite32 (Address, Value);
++  MemoryFence ();
++}
++
++STATIC VOID GhDelay (VOID *Context, UINT32 Microseconds)
++{
++  (VOID)Context;
++  gBS->Stall (Microseconds);
++}
++
++STATIC CONST struct gpu_handoff_io mGpuHandoffIo = { NULL, GhRead32, GhWrite32, GhDelay };
++
++STATIC CONST CHAR16 *
++GpuHandoffText (enum gpu_handoff_result Result)
++{
++  switch (Result) {
++    case GPU_HANDOFF_COLD:          return L"cold (in reset, clamped)";
++    case GPU_HANDOFF_RESTORED:      return L"was running; isolated again";
++    case GPU_HANDOFF_WRONG_SOC:     return L"not this SoC; untouched";
++    case GPU_HANDOFF_BUS_ERROR:     return L"bus error; untouched";
++    case GPU_HANDOFF_DRAIN_TIMEOUT: return L"MC drain timeout; untouched";
++    case GPU_HANDOFF_NOT_ISOLATED:  return L"NOT isolated after restore";
++    default:                        return L"bad argument";
++  }
++}
++
++/* Runs at ExitBootServices: no console, no allocation, no Print. */
++STATIC VOID EFIAPI
++GpuHandoffOnExitBootServices (IN EFI_EVENT Event, IN VOID *Context)
++{
++  (VOID)Event;
++  (VOID)Context;
++  mGpuHandoffLast = gpu_handoff_prepare (&mGpuHandoffIo, WINX_GPU_HIDREV, &mGpuHandoffReport);
++}
++
++VOID
++PlatformGpuHandoffBeforeBoot (VOID)
++{
++  mGpuHandoffLast = gpu_handoff_prepare (&mGpuHandoffIo, WINX_GPU_HIDREV, &mGpuHandoffReport);
++  Print (L"GPU hand-off (%s): %s\r\n", WINX_GPU_BOARD, GpuHandoffText (mGpuHandoffLast));
++  Print (L"  RESET_X %08x -> %08x  CLAMP %08x -> %08x  CLOCK_X %08x -> %08x\r\n",
++         mGpuHandoffReport.reset_before, mGpuHandoffReport.reset_after,
++         mGpuHandoffReport.clamp_before, mGpuHandoffReport.clamp_after,
++         mGpuHandoffReport.clocks_before, mGpuHandoffReport.clocks_after);
++  if (mGpuHandoffEbsEvent == NULL) {
++    if (EFI_ERROR (gBS->CreateEvent (EVT_SIGNAL_EXIT_BOOT_SERVICES, TPL_NOTIFY,
++                                     GpuHandoffOnExitBootServices, NULL, &mGpuHandoffEbsEvent))) {
++      mGpuHandoffEbsEvent = NULL;
++      Print (L"GPU hand-off: ExitBootServices re-check not armed.\r\n");
++    }
++  }
++}
++#endif
+diff --git a/Library/PlatformBootManagerLib/GpuHandoff.h b/Library/PlatformBootManagerLib/GpuHandoff.h
+new file mode 100644
+index 0000000..cfbcc78
+--- /dev/null
++++ b/Library/PlatformBootManagerLib/GpuHandoff.h
+@@ -0,0 +1,189 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* GM20B GPU hand-off from EDK II to Windows (Erista / Lite / OLED).
++ *
++ * The Windows TegraGpu driver (tg_gpu_power_up in platform/t210_power.c and
++ * platform/t214_power.c) requires the GPU to arrive in a known cold state:
++ *   - CAR RESET_X bit 24 set   (GPU in reset)
++ *   - PMC GPU clamp bit 0 set  (GPU isolated)
++ * and returns TG_GPU_POWER_BUSY otherwise, so a UEFI path that left the GPU
++ * clocked / unclamped makes the driver refuse to start. The OLED upstream
++ * (DanilKhmyrov/windows-switch, patches/...gpu-gputestonly.patch) states the
++ * same contract: "The GPU stays in reset and clamped; the driver powers it".
++ *
++ * This header holds only the register logic, with no EDK II dependency, so it
++ * can be compiled and tested on a host (Tools/host-tests/gpu-handoff). It
++ * never powers the GPU: it only verifies the contract and, when it does not
++ * hold, restores it in the same order as tg_gpu_power_down() (MC drain, clamp,
++ * reset, clock gate). It touches no PMIC and no PLL.
++ *
++ * Board differences are limited to the expected HIDREV chip revision.
++ */
++#ifndef WINX_GPU_HANDOFF_H
++#define WINX_GPU_HANDOFF_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#define GH_APB_MISC_HIDREV 0x70000804u
++#define GH_HIDREV_MASK     0xfff0u
++#define GH_HIDREV_T210     0x2110u /* Erista, HAC-001 */
++#define GH_HIDREV_T210B01  0x2120u /* Mariko family: Lite HDH-001, OLED HEG-001, Iowa */
++
++#define GH_CAR_BASE        0x60006000u
++#define GH_CAR_CLOCK_X     (GH_CAR_BASE + 0x280u)
++#define GH_CAR_CLOCK_SET   (GH_CAR_BASE + 0x284u)
++#define GH_CAR_CLOCK_CLR   (GH_CAR_BASE + 0x288u)
++#define GH_CAR_RESET_X     (GH_CAR_BASE + 0x28cu)
++#define GH_CAR_RESET_SET   (GH_CAR_BASE + 0x290u)
++#define GH_CAR_RESET_CLR   (GH_CAR_BASE + 0x294u)
++#define GH_GPU_GATE        (1u << 24)
++#define GH_GPU_REF         (1u << 29)
++#define GH_GPU_CLOCKS      (GH_GPU_GATE | GH_GPU_REF)
++#define GH_PMC_GPU_CLAMP   0x7000e6d4u
++#define GH_MC_FLUSH        0x70019970u
++#define GH_MC_FLUSH_STATUS 0x70019974u
++#define GH_MC_GPU_BIT      (1u << 2)
++
++struct gpu_handoff_io {
++    void *context;
++    uint32_t (*read32)(void *context, uint32_t address);
++    void (*write32)(void *context, uint32_t address, uint32_t value);
++    void (*delay_us)(void *context, uint32_t microseconds);
++};
++
++enum gpu_handoff_result {
++    GPU_HANDOFF_COLD,          /* already in the contract state; nothing written */
++    GPU_HANDOFF_RESTORED,      /* was not cold; isolated again and verified */
++    GPU_HANDOFF_BAD_ARGUMENT,
++    GPU_HANDOFF_WRONG_SOC,     /* HIDREV is not the expected chip; nothing touched */
++    GPU_HANDOFF_BUS_ERROR,     /* a read returned all ones; nothing written */
++    GPU_HANDOFF_DRAIN_TIMEOUT, /* MC did not drain; clamp/reset left untouched */
++    GPU_HANDOFF_NOT_ISOLATED   /* readback after restore still not cold */
++};
++
++struct gpu_handoff_report {
++    uint32_t hidrev;
++    uint32_t reset_before, clamp_before, clocks_before;
++    uint32_t reset_after, clamp_after, clocks_after;
++    bool wrote;
++};
++
++static inline bool gh_is_cold(uint32_t reset, uint32_t clamp)
++{
++    return (reset & GH_GPU_GATE) != 0 && (clamp & 1u) != 0;
++}
++
++static inline void gh_update32(const struct gpu_handoff_io *io, uint32_t address,
++                               uint32_t mask, uint32_t value)
++{
++    uint32_t old = io->read32(io->context, address);
++    io->write32(io->context, address, (old & ~mask) | (value & mask));
++    (void)io->read32(io->context, address);
++}
++
++/* Same handshake as drain_mc() in the driver: request the flush, then require
++ * the status bit to be set and stable for five consecutive reads. */
++static inline bool gh_drain_mc(const struct gpu_handoff_io *io)
++{
++    unsigned int attempt, sample;
++    uint32_t request;
++    gh_update32(io, GH_MC_FLUSH, GH_MC_GPU_BIT, GH_MC_GPU_BIT);
++    request = io->read32(io->context, GH_MC_FLUSH);
++    if (request == UINT32_MAX || !(request & GH_MC_GPU_BIT))
++        return false;
++    for (attempt = 0; attempt < 100000; ++attempt) {
++        uint32_t value;
++        io->delay_us(io->context, 10);
++        value = io->read32(io->context, GH_MC_FLUSH_STATUS);
++        if (value == UINT32_MAX)
++            return false;
++        if (!(value & GH_MC_GPU_BIT))
++            continue;
++        for (sample = 0; sample < 5; ++sample)
++            if (io->read32(io->context, GH_MC_FLUSH_STATUS) != value)
++                break;
++        if (sample == 5)
++            return true;
++    }
++    return false;
++}
++
++/* expected_hidrev: GH_HIDREV_T210 for Erista, GH_HIDREV_T210B01 for Lite / OLED.
++ * report may be NULL. Safe to call repeatedly (idempotent on a cold GPU). */
++static inline enum gpu_handoff_result
++gpu_handoff_prepare(const struct gpu_handoff_io *io, uint32_t expected_hidrev,
++                    struct gpu_handoff_report *report)
++{
++    struct gpu_handoff_report local;
++    uint32_t reset, clamp, clocks, hid, mc_before;
++    bool flush_was_set;
++
++    if (!io || !io->read32 || !io->write32 || !io->delay_us)
++        return GPU_HANDOFF_BAD_ARGUMENT;
++    if (!report)
++        report = &local;
++    report->wrote = false;
++    report->reset_after = report->clamp_after = report->clocks_after = 0;
++
++    hid = io->read32(io->context, GH_APB_MISC_HIDREV);
++    report->hidrev = hid;
++    if (hid == UINT32_MAX)
++        return GPU_HANDOFF_BUS_ERROR;
++    if ((hid & GH_HIDREV_MASK) != expected_hidrev)
++        return GPU_HANDOFF_WRONG_SOC;
++
++    reset = io->read32(io->context, GH_CAR_RESET_X);
++    clamp = io->read32(io->context, GH_PMC_GPU_CLAMP);
++    clocks = io->read32(io->context, GH_CAR_CLOCK_X);
++    report->reset_before = reset;
++    report->clamp_before = clamp;
++    report->clocks_before = clocks;
++    if (reset == UINT32_MAX || clamp == UINT32_MAX || clocks == UINT32_MAX)
++        return GPU_HANDOFF_BUS_ERROR;
++    if (gh_is_cold(reset, clamp)) {
++        report->reset_after = reset;
++        report->clamp_after = clamp;
++        report->clocks_after = clocks;
++        return GPU_HANDOFF_COLD;
++    }
++
++    /* Not cold. Quiesce memory traffic first, exactly like tg_gpu_power_down();
++     * if the MC will not drain, leave clamp/reset alone (clamping a GPU that is
++     * still master on the bus is worse than reporting the failure). */
++    report->wrote = true;
++    mc_before = io->read32(io->context, GH_MC_FLUSH);
++    if (mc_before == UINT32_MAX) {
++        report->wrote = false;
++        return GPU_HANDOFF_BUS_ERROR;
++    }
++    flush_was_set = (mc_before & GH_MC_GPU_BIT) != 0;
++    if (!gh_drain_mc(io)) {
++        if (!flush_was_set)
++            gh_update32(io, GH_MC_FLUSH, GH_MC_GPU_BIT, 0);
++        return GPU_HANDOFF_DRAIN_TIMEOUT;
++    }
++    gh_update32(io, GH_PMC_GPU_CLAMP, 1u, 1u);
++    io->delay_us(io->context, 10);
++    io->write32(io->context, GH_CAR_RESET_SET, GH_GPU_GATE);
++    io->delay_us(io->context, 10);
++    io->write32(io->context, GH_CAR_CLOCK_CLR, GH_GPU_CLOCKS);
++    io->delay_us(io->context, 10);
++    /* Release only the flush request we raised; the driver redoes the drain
++     * itself when it takes ownership. */
++    if (!flush_was_set)
++        gh_update32(io, GH_MC_FLUSH, GH_MC_GPU_BIT, 0);
++
++    reset = io->read32(io->context, GH_CAR_RESET_X);
++    clamp = io->read32(io->context, GH_PMC_GPU_CLAMP);
++    clocks = io->read32(io->context, GH_CAR_CLOCK_X);
++    report->reset_after = reset;
++    report->clamp_after = clamp;
++    report->clocks_after = clocks;
++    if (reset == UINT32_MAX || clamp == UINT32_MAX || clocks == UINT32_MAX)
++        return GPU_HANDOFF_BUS_ERROR;
++    if (!gh_is_cold(reset, clamp) || (clocks & GH_GPU_CLOCKS) != 0)
++        return GPU_HANDOFF_NOT_ISOLATED;
++    return GPU_HANDOFF_RESTORED;
++}
++
++#endif
+diff --git a/Library/PlatformBootManagerLib/LiteHomeBoot.c b/Library/PlatformBootManagerLib/LiteHomeBoot.c
+index 5609e8d..65d4cab 100644
+--- a/Library/PlatformBootManagerLib/LiteHomeBoot.c
++++ b/Library/PlatformBootManagerLib/LiteHomeBoot.c
+@@ -19,6 +19,7 @@
+ STATIC BOOLEAN IsWindowsPartition (EFI_HANDLE Handle);
+ #ifdef SWITCH_LITE_GPU
+ VOID LiteGpuPowerCheck (VOID);
++VOID PlatformGpuHandoffBeforeBoot (VOID);
+ #endif
+ 
+ #if defined(SWITCH_LITE_TOUCH) && defined(SWITCH_LITE_PERFORMANCE)
+@@ -328,6 +329,7 @@ BootWindowsFromMenu (IN VOID *Context)
+   CheckPowerBeforeWindows ();
+ #ifdef SWITCH_LITE_GPU
+   if (BootCheckMode ("gpu_check=") == 1) LiteGpuPowerCheck ();
++  PlatformGpuHandoffBeforeBoot ();
+ #endif
+   CheckWifiBeforeWindows ();
+ #endif
+diff --git a/Library/PlatformBootManagerLib/PlatformBm.h b/Library/PlatformBootManagerLib/PlatformBm.h
+index 1f5b5eb..d12730e 100644
+--- a/Library/PlatformBootManagerLib/PlatformBm.h
++++ b/Library/PlatformBootManagerLib/PlatformBm.h
+@@ -31,6 +31,10 @@
+ VOID PlatformWifiPrepareBeforeBoot (VOID);
+ #endif
+ 
++#if defined(SWITCH_ERISTA_GPU) || defined(SWITCH_LITE_GPU) || defined(SWITCH_OLED_GPU)
++VOID PlatformGpuHandoffBeforeBoot (VOID);
++#endif
++
+ VOID
+ PlatformRegisterFvBootOption (
+   IN CONST EFI_GUID  *FileGuid,
+diff --git a/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf b/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf
+index 1edde5d..81de3c1 100644
+--- a/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf
++++ b/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf
+@@ -45,6 +45,8 @@
+   ../../Platforms/Switch/SwitchBoardDetect.h
+   WifiPrepareBoot.c
+   LiteGpuPowerCheck.c
++  GpuHandoff.c
++  GpuHandoff.h
+ 
+ [Packages]
+   MdeModulePkg/MdeModulePkg.dec
+diff --git a/Library/PlatformBootManagerLib/SwitchBootMenu.c b/Library/PlatformBootManagerLib/SwitchBootMenu.c
+index ba77440..2960cd0 100644
+--- a/Library/PlatformBootManagerLib/SwitchBootMenu.c
++++ b/Library/PlatformBootManagerLib/SwitchBootMenu.c
+@@ -1134,6 +1134,13 @@ SwitchBootMenuRun (
+              ContainsAsciiNoCase (Option->Description, L"WinARM"))) {
+           PlatformWifiPrepareBeforeBoot ();
+         }
++#endif
++#if defined(SWITCH_ERISTA_GPU) || defined(SWITCH_OLED_GPU)
++        if (Option->Description != NULL &&
++            (ContainsAsciiNoCase (Option->Description, L"Windows") ||
++             ContainsAsciiNoCase (Option->Description, L"WinARM"))) {
++          PlatformGpuHandoffBeforeBoot ();
++        }
+ #endif
+         if (IsShellOption (Option)) {
+           WinxVisualsPrepareShell ();
+diff --git a/NintendoSwitch.dsc b/NintendoSwitch.dsc
+index 506dbb2..c05c68a 100644
+--- a/NintendoSwitch.dsc
++++ b/NintendoSwitch.dsc
+@@ -36,6 +36,7 @@
+   DEFINE LITE_BOOT_SD_FLAGS    =
+   DEFINE LITE_XUSB_FLAGS        =
+   DEFINE LITE_GPU_FLAGS         =
++  DEFINE GPU_HANDOFF_FLAGS      =
+   DEFINE SWITCH_BOARD_FLAGS    =
+ !ifdef SWITCH_BOARD_ERISTA
+   DEFINE SWITCH_BOARD_FLAGS    = -DSWITCH_BOARD_ERISTA=1 -DSWITCH_BOARD_ICOSA=1
+@@ -92,6 +93,30 @@
+   !endif
+   DEFINE LITE_GPU_IRQ_FLAGS = -DSWITCH_LITE_GPU_IRQ=1
+ !endif
++!ifdef SWITCH_ERISTA_GPU
++  !ifndef SWITCH_BOARD_ERISTA
++    !error "SWITCH_ERISTA_GPU requires the T210/Icosa board profile"
++  !endif
++  !ifndef SWITCH_HEKATE
++    !error "SWITCH_ERISTA_GPU requires the Hekate boot chain"
++  !endif
++  !ifdef SWITCH_OLED_GPU
++    !error "Select only one of SWITCH_ERISTA_GPU and SWITCH_OLED_GPU"
++  !endif
++  DEFINE GPU_HANDOFF_FLAGS = -DSWITCH_ERISTA_GPU=1
++!endif
++!ifdef SWITCH_OLED_GPU
++  !ifndef SWITCH_BOARD_OLED
++    !error "SWITCH_OLED_GPU requires the T214/Aula (OLED) board profile"
++  !endif
++  !ifndef SWITCH_HEKATE
++    !error "SWITCH_OLED_GPU requires the Hekate boot chain"
++  !endif
++  !ifdef SWITCH_LITE_GPU
++    !error "Select only one of SWITCH_LITE_GPU and SWITCH_OLED_GPU"
++  !endif
++  DEFINE GPU_HANDOFF_FLAGS = -DSWITCH_OLED_GPU=1
++!endif
+ !ifdef SWITCH_LITE_XUSB
+   !ifndef SWITCH_WIFI_RUNTIME
+     !error "SWITCH_LITE_XUSB requires the B01 shared PCIe/UPHY preparation"
+@@ -248,7 +273,7 @@
+ [BuildOptions.common]
+ !ifdef SWITCH_HEKATE
+   # Boot chain: hekate (L4T launcher) -> BL31 -> bl33.bin (stub + this FD).
+-  GCC:*_*_AARCH64_CC_FLAGS = -std=gnu11 -Wno-unused-variable -DSWITCH_BOOT_CHAIN_HEKATE=1 $(SWITCH_BOARD_FLAGS) $(EXCFB_FLAGS) $(LITE_GPU_FLAGS) $(LITE_TOUCH_FLAGS) $(LITE_FAN_FLAGS) $(LITE_PERFORMANCE_FLAGS) $(WIFI_RUNTIME_FLAGS) $(WIFI_ERISTA_FLAGS) $(LITE_XUSB_FLAGS) $(LITE_BOOT_SD_FLAGS)
++  GCC:*_*_AARCH64_CC_FLAGS = -std=gnu11 -Wno-unused-variable -DSWITCH_BOOT_CHAIN_HEKATE=1 $(SWITCH_BOARD_FLAGS) $(EXCFB_FLAGS) $(LITE_GPU_FLAGS) $(GPU_HANDOFF_FLAGS) $(LITE_TOUCH_FLAGS) $(LITE_FAN_FLAGS) $(LITE_PERFORMANCE_FLAGS) $(WIFI_RUNTIME_FLAGS) $(WIFI_ERISTA_FLAGS) $(LITE_XUSB_FLAGS) $(LITE_BOOT_SD_FLAGS)
+ !else
+   GCC:*_*_AARCH64_CC_FLAGS = -Wno-unused-variable $(EXCFB_FLAGS)
+ !endif
+@@ -299,7 +324,7 @@
+ !else
+   DEFINE ACPI_ASL_SWOA           =
+ !endif
+-  GCC:*_*_AARCH64_ASLPP_FLAGS = $(SWITCH_BOARD_FLAGS) $(LITE_GPU_FLAGS) $(LITE_GPU_IRQ_FLAGS) $(LITE_XUSB_FLAGS) $(LITE_SIO_FLAGS) $(WIFI_RUNTIME_FLAGS) $(WIFI_ERISTA_FLAGS) $(LITE_BOOT_SD_FLAGS) $(LITE_BACKLIGHT_FLAGS) $(LITE_BLUETOOTH_FLAGS) $(LITE_AUDIO_FLAGS) $(LITE_DISPLAY_FLAGS) $(LITE_SYSTEM_FLAGS) $(LITE_PERFORMANCE_FLAGS) $(LITE_FAN_FLAGS) $(LITE_POWER_FLAGS) $(LITE_POWER_IRQ_FLAGS) $(LITE_TOUCH_FLAGS) $(ACPI_ASL_SDNV) $(ACPI_ASL_SWOA) $(ACPI_ASL_EMMC) $(ACPI_ASL_XHCI) $(ACPI_ASL_EHCI) $(ACPI_ASL_EHCI_TXFILL)
++  GCC:*_*_AARCH64_ASLPP_FLAGS = $(SWITCH_BOARD_FLAGS) $(LITE_GPU_FLAGS) $(GPU_HANDOFF_FLAGS) $(LITE_GPU_IRQ_FLAGS) $(LITE_XUSB_FLAGS) $(LITE_SIO_FLAGS) $(WIFI_RUNTIME_FLAGS) $(WIFI_ERISTA_FLAGS) $(LITE_BOOT_SD_FLAGS) $(LITE_BACKLIGHT_FLAGS) $(LITE_BLUETOOTH_FLAGS) $(LITE_AUDIO_FLAGS) $(LITE_DISPLAY_FLAGS) $(LITE_SYSTEM_FLAGS) $(LITE_PERFORMANCE_FLAGS) $(LITE_FAN_FLAGS) $(LITE_POWER_FLAGS) $(LITE_POWER_IRQ_FLAGS) $(LITE_TOUCH_FLAGS) $(ACPI_ASL_SDNV) $(ACPI_ASL_SWOA) $(ACPI_ASL_EMMC) $(ACPI_ASL_XHCI) $(ACPI_ASL_EHCI) $(ACPI_ASL_EHCI_TXFILL)
+ 
+ ################################################################################
+ #
+diff --git a/Tools/host-tests/gpu-handoff/run.sh b/Tools/host-tests/gpu-handoff/run.sh
+new file mode 100755
+index 0000000..4927fe8
+--- /dev/null
++++ b/Tools/host-tests/gpu-handoff/run.sh
+@@ -0,0 +1,6 @@
++#!/bin/sh
++# Host test for GpuHandoff.h (no EDK II needed).
++set -e
++cd "$(dirname "$0")"
++cc -std=gnu11 -Wall -Wextra -Werror -O2 test.c -o /tmp/gpu-handoff-test
++/tmp/gpu-handoff-test
+diff --git a/Tools/host-tests/gpu-handoff/test.c b/Tools/host-tests/gpu-handoff/test.c
+new file mode 100644
+index 0000000..af97a91
+--- /dev/null
++++ b/Tools/host-tests/gpu-handoff/test.c
+@@ -0,0 +1,120 @@
++// SPDX-License-Identifier: GPL-2.0-only
++// Host test for Library/PlatformBootManagerLib/GpuHandoff.h with a register model.
++#include <stdio.h>
++#include <string.h>
++#include "../../../Library/PlatformBootManagerLib/GpuHandoff.h"
++
++struct model {
++    uint32_t hidrev, clock_x, reset_x, clamp, mc_flush;
++    bool mc_drains;      /* MC_FLUSH_STATUS follows the request */
++    bool bus_error;      /* every read returns all ones */
++    unsigned writes;
++    uint32_t last_clamp_write_mc_status; /* MC status when the clamp was written */
++};
++
++static uint32_t rd(void *c, uint32_t a)
++{
++    struct model *m = c;
++    if (m->bus_error) return UINT32_MAX;
++    switch (a) {
++    case GH_APB_MISC_HIDREV: return m->hidrev;
++    case GH_CAR_CLOCK_X:     return m->clock_x;
++    case GH_CAR_RESET_X:     return m->reset_x;
++    case GH_PMC_GPU_CLAMP:   return m->clamp;
++    case GH_MC_FLUSH:        return m->mc_flush;
++    case GH_MC_FLUSH_STATUS: return (m->mc_drains && (m->mc_flush & GH_MC_GPU_BIT)) ? GH_MC_GPU_BIT : 0;
++    }
++    return 0;
++}
++static void wr(void *c, uint32_t a, uint32_t v)
++{
++    struct model *m = c;
++    m->writes++;
++    switch (a) {
++    case GH_CAR_CLOCK_SET: m->clock_x |= v; break;
++    case GH_CAR_CLOCK_CLR: m->clock_x &= ~v; break;
++    case GH_CAR_RESET_SET: m->reset_x |= v; break;
++    case GH_CAR_RESET_CLR: m->reset_x &= ~v; break;
++    case GH_PMC_GPU_CLAMP:
++        m->last_clamp_write_mc_status = rd(c, GH_MC_FLUSH_STATUS);
++        m->clamp = v; break;
++    case GH_MC_FLUSH:      m->mc_flush = v; break;
++    default: break;
++    }
++}
++static void dl(void *c, uint32_t us) { (void)c; (void)us; }
++
++static int failures;
++#define CHECK(cond) do { if (!(cond)) { printf("FAIL line %d: %s\n", __LINE__, #cond); failures++; } } while (0)
++
++static struct model mk(uint32_t hid, bool cold)
++{
++    struct model m = { .hidrev = hid, .mc_drains = true };
++    m.reset_x = cold ? GH_GPU_GATE : 0;
++    m.clamp = cold ? 1 : 0;
++    m.clock_x = cold ? 0 : GH_GPU_CLOCKS;
++    return m;
++}
++
++int main(void)
++{
++    struct gpu_handoff_report r;
++    struct model m;
++    struct gpu_handoff_io io;
++    enum gpu_handoff_result res;
++
++    memset(&io, 0, sizeof io);
++    io.read32 = rd; io.write32 = wr; io.delay_us = dl;
++
++    /* 1. Cold GPU on each board: nothing is written, twice in a row. */
++    for (int board = 0; board < 2; ++board) {
++        uint32_t hid = board ? 0x2120u : 0x2110u;
++        m = mk(hid | 0x1, true); io.context = &m;   /* low nibble = minor rev */
++        res = gpu_handoff_prepare(&io, hid, &r);
++        CHECK(res == GPU_HANDOFF_COLD); CHECK(m.writes == 0); CHECK(!r.wrote);
++        res = gpu_handoff_prepare(&io, hid, &r);
++        CHECK(res == GPU_HANDOFF_COLD); CHECK(m.writes == 0);
++    }
++
++    /* 2. Running GPU (clocks on, reset released, unclamped): isolated, drained first. */
++    m = mk(0x2121, false); io.context = &m;
++    res = gpu_handoff_prepare(&io, GH_HIDREV_T210B01, &r);
++    CHECK(res == GPU_HANDOFF_RESTORED); CHECK(r.wrote);
++    CHECK(gh_is_cold(m.reset_x, m.clamp)); CHECK((m.clock_x & GH_GPU_CLOCKS) == 0);
++    CHECK(m.last_clamp_write_mc_status & GH_MC_GPU_BIT);   /* clamp only after MC drained */
++    CHECK((m.mc_flush & GH_MC_GPU_BIT) == 0);               /* our flush request released */
++    CHECK(gpu_handoff_prepare(&io, GH_HIDREV_T210B01, &r) == GPU_HANDOFF_COLD);
++
++    /* 3. Flush request already set by someone else stays set. */
++    m = mk(0x2111, false); m.mc_flush = GH_MC_GPU_BIT; io.context = &m;
++    CHECK(gpu_handoff_prepare(&io, GH_HIDREV_T210, &r) == GPU_HANDOFF_RESTORED);
++    CHECK(m.mc_flush & GH_MC_GPU_BIT);
++
++    /* 4. MC never drains: clamp/reset/clock are NOT touched. */
++    m = mk(0x2121, false); m.mc_drains = false; io.context = &m;
++    res = gpu_handoff_prepare(&io, GH_HIDREV_T210B01, &r);
++    CHECK(res == GPU_HANDOFF_DRAIN_TIMEOUT);
++    CHECK(m.clamp == 0); CHECK(m.reset_x == 0); CHECK(m.clock_x == GH_GPU_CLOCKS);
++    CHECK((m.mc_flush & GH_MC_GPU_BIT) == 0);
++
++    /* 5. Wrong SoC: Erista build on a T210B01 and the reverse. Nothing is written. */
++    m = mk(0x2121, false); io.context = &m;
++    CHECK(gpu_handoff_prepare(&io, GH_HIDREV_T210, &r) == GPU_HANDOFF_WRONG_SOC);
++    CHECK(m.writes == 0);
++    m = mk(0x2111, false); io.context = &m;
++    CHECK(gpu_handoff_prepare(&io, GH_HIDREV_T210B01, &r) == GPU_HANDOFF_WRONG_SOC);
++    CHECK(m.writes == 0);
++
++    /* 6. Bus error (all ones): nothing is written. */
++    m = mk(0x2121, false); m.bus_error = true; io.context = &m;
++    CHECK(gpu_handoff_prepare(&io, GH_HIDREV_T210B01, &r) == GPU_HANDOFF_BUS_ERROR);
++    CHECK(m.writes == 0);
++
++    /* 7. Bad arguments. */
++    CHECK(gpu_handoff_prepare(NULL, GH_HIDREV_T210, &r) == GPU_HANDOFF_BAD_ARGUMENT);
++    memset(&io, 0, sizeof io);
++    CHECK(gpu_handoff_prepare(&io, GH_HIDREV_T210, NULL) == GPU_HANDOFF_BAD_ARGUMENT);
++
++    printf(failures ? "FAILED (%d)\n" : "PASS\n", failures);
++    return failures != 0;
++}

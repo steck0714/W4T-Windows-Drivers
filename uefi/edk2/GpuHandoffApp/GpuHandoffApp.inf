@@ -1,0 +1,35 @@
+## @file
+#  GpuHandoff.efi - UEFI Shell tool that checks / restores the GM20B hand-off state.
+#  Drop into NintendoSwitchPkg/Drivers/GpuHandoffApp/ (keep ../GpuHandoff/GpuHandoff.h
+#  next to it, or copy the header here and fix the include) and add
+#    NintendoSwitchPkg/Drivers/GpuHandoffApp/GpuHandoffApp.inf
+#  to [Components] in NintendoSwitch.dsc. Not a BL33 / firmware image.
+#
+#  SPDX-License-Identifier: GPL-2.0-only
+##
+
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = GpuHandoff
+  FILE_GUID                      = 6C0E4B5A-5D3F-4B7B-9E7A-2F1D8A4C7E21
+  MODULE_TYPE                    = UEFI_APPLICATION
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = UefiMain
+
+[Sources]
+  GpuHandoffApp.c
+  ../GpuHandoff/GpuHandoff.h
+
+[Packages]
+  MdePkg/MdePkg.dec
+
+[LibraryClasses]
+  UefiApplicationEntryPoint
+  UefiLib
+  UefiBootServicesTableLib
+  BaseLib
+  BaseMemoryLib
+  IoLib
+
+[Protocols]
+  gEfiShellParametersProtocolGuid
