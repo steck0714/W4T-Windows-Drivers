@@ -1,0 +1,17 @@
+Wi-Fi (Windows 11 only) needs three more things in this folder, which cannot be
+redistributed here:
+
+1. brcmfmac4356A3-pcie.bin - BCM4356 firmware from Switchroot:
+   github.com/CTCaer/switch-l4t-kernel-4.9, firmware/brcm/brcmfmac4356A3-pcie.bin.ihex
+   (Intel HEX: convert it to binary, 583641 bytes,
+   SHA-256 32a16e7b4391ccd248d3677c17cde940f398aaaaa6163571fcbff2bbee026ade).
+2. brcmfmac4356A3-pcie.txt - board file from Switchroot's nx-firmware
+   (gitlab.com/switchroot/android/nx-firmware). Replace the macaddr= line with a random
+   locally administered address (first byte ending in 2, 6, A or E), e.g. 02:xx:xx:xx:xx:xx.
+3. inf2cat\ - the folder c\bin\10.0.26100.0\x86 of the NuGet package
+   Microsoft.Windows.WDK.ARM64 10.0.26100.x (Inf2Cat.exe and its DLLs).
+
+On the first Windows 11 boot the agent copies the firmware, makes the driver catalog
+with Inf2Cat, signs it with test certificates the console creates for itself
+(wifi_sign.ps1, non-exportable keys), installs the driver and reboots once.
+The loader for Windows 11 (wp11/bl33.bin from the loader zip) prepares the radio.

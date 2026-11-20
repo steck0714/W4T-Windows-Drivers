@@ -1,0 +1,64 @@
+{
+ "schema": 1,
+ "model": "HEG-001",
+ "family": "t214-aula",
+ "files": [
+  {
+   "path": "SwitchWOA-Test.cer",
+   "size": 804,
+   "sha256": "8780505ddfdd5fd04cbc42c1d5efc410c67b338ddc6ce853fd7dab3e98a5d7a2"
+  },
+  {
+   "path": "drivers/agent/arm64/swbatt.sys",
+   "size": 39336,
+   "sha256": "853212dda43b160a157e7620da6c91a0e11a080bd79dce68601898564b15ecd5"
+  },
+  {
+   "path": "drivers/agent/arm64/swhid.sys",
+   "size": 28584,
+   "sha256": "14356cd283f8a8378fe2580299cd0a90cc0539b270e4609fbae585ed46019111"
+  },
+  {
+   "path": "drivers/agent/audio/switchaudio.inf",
+   "size": 2530,
+   "sha256": "b804a9322d81aa747774db790a61318942036799261fdc0be4e612f3e9d72627",
+   "driver_ver": "05/01/2022,1.0.0.9",
+   "hardware_ids": [
+    "ACPI\\SWOA0C01"
+   ]
+  },
+  {
+   "path": "drivers/agent/audio/switchaudio.sys",
+   "size": 27048,
+   "sha256": "aa849d2f059da0e085ecd2fc8e44a6a0fcfaaf9c3b9255d92327eeb817825194"
+  },
+  {
+   "path": "drivers/agent/bt/switchbt.inf",
+   "size": 1295,
+   "sha256": "23ccd51c32eab5b22bec6799cea78d0c567ffd340cb242d54d10d86843152b53",
+   "driver_ver": "05/01/2022,1.0.0.19",
+   "hardware_ids": [
+    "ACPI\\SWOA0B01"
+   ]
+  },
+  {
+   "path": "drivers/agent/bt/switchbt.sys",
+   "size": 43432,
+   "sha256": "a104d9b63134c68cfe0f0da6a8ac0a85c556a7e28f6965e9c70a9cb5a616b80e"
+  },
+  {
+   "path": "drivers/agent/wifi/switchwifi.inf",
+   "size": 1777,
+   "sha256": "1322053143b1cf58db98b953b9b21176d01e4d01e55acb4719cddd48ad5e9482",
+   "driver_ver": "05/02/2022,0.5.7.0",
+   "hardware_ids": [
+    "ACPI\\SWOA0D01"
+   ]
+  },
+  {
+   "path": "drivers/agent/wifi/switchwifi.sys",
+   "size": 178088,
+   "sha256": "fa829e38290bf1ef86371756b3696fc48cb588e60361502a0ef4c64c514d95bc"
+  }
+ ]
+}

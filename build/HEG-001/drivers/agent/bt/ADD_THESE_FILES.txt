@@ -1,0 +1,11 @@
+Bluetooth (Windows 11 only) needs one more file in this folder, which cannot be
+redistributed here:
+
+BCM4356A3.hcd - the Broadcom patch from Switchroot:
+   github.com/CTCaer/switch-l4t-kernel-4.9, firmware/brcm/BCM4356A3.hcd.ihex
+   (Intel HEX: convert it to binary, 39008 bytes,
+   SHA-256 761a2c26f2bce5b0c4ed6efa8a3dc07e0ccea1dcd284e82cbfdb421907d27cab).
+
+The agent installs Bluetooth with the same tools as Wi-Fi (agent\wifi\inf2cat and
+agent\wifi\wifi_sign.ps1), so set up agent\wifi first. The Windows 11 loader
+(wp11/bl33.bin from the loader zip) powers the chip and checks it answers.

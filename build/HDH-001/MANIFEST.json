@@ -1,0 +1,295 @@
+{
+ "schema": 1,
+ "model": "HDH-001",
+ "family": "t214-hoag",
+ "files": [
+  {
+   "path": "SwitchWOA-Test.cer",
+   "size": 804,
+   "sha256": "9c0c169b7f580b77864ab88b70f091254711c47fc90e9de72f8d7c994cf0651a"
+  },
+  {
+   "path": "drivers/Switch-Audio/switchaudio.cat",
+   "size": 2443,
+   "sha256": "ebd145104fe81484620e00c19746e0c780e5348c2dddcc509cfb62bec43a386c"
+  },
+  {
+   "path": "drivers/Switch-Audio/switchaudio.inf",
+   "size": 2353,
+   "sha256": "41eb52a8c6db586f48065d0ddddf1c9ad5e5e46ad4043e4b5d1560c7a04ab180",
+   "driver_ver": "11/05/2026,1.0.0.9",
+   "hardware_ids": [
+    "ACPI\\SWOA0C01"
+   ]
+  },
+  {
+   "path": "drivers/Switch-Audio/switchaudio.sys",
+   "size": 27048,
+   "sha256": "a992b3b1a985162470bee433b42ebed981682ceeea14d8c53fa0cd0469f1bc35"
+  },
+  {
+   "path": "drivers/Switch-Battery/switchbattery.cat",
+   "size": 2525,
+   "sha256": "9bcca5ca7a67d285154748d7aa118d0778ddd621c6e9955f2bdb5b0fde0e09c1"
+  },
+  {
+   "path": "drivers/Switch-Battery/switchbattery.inf",
+   "size": 1680,
+   "sha256": "10b73a8fe0d8e56091ef23062c2985c274b15f38c3b70f44e78d159394ec5746",
+   "driver_ver": "11/08/2026,1.0.0.11",
+   "hardware_ids": [
+    "ACPI\\SWOA0301",
+    "ACPI\\SWOA0314"
+   ]
+  },
+  {
+   "path": "drivers/Switch-Battery/switchbattery.sys",
+   "size": 31656,
+   "sha256": "51fcdbec1f5d8656eff52a325133d1e3b9fe40366b62f0c3ea49163db20d27b0"
+  },
+  {
+   "path": "drivers/Switch-Bluetooth/switchbt.cat",
+   "size": 2419,
+   "sha256": "41f095fb5339c92ed24a04e64c2a46cc7bb2c72e6e659e22a9275c13b20724a8"
+  },
+  {
+   "path": "drivers/Switch-Bluetooth/switchbt.inf",
+   "size": 1114,
+   "sha256": "521b1d6c7dfc463c6809bc0dbb23a33e1d278551fc76b0adbd3593b22d3548e7",
+   "driver_ver": "11/07/2026,1.0.0.19",
+   "hardware_ids": [
+    "ACPI\\SWOA0B01"
+   ]
+  },
+  {
+   "path": "drivers/Switch-Bluetooth/switchbt.sys",
+   "size": 43432,
+   "sha256": "e8f83f2317ed2fa7925546ac1203b31764e3566ea0589d3a2814f4c3027b9258"
+  },
+  {
+   "path": "drivers/Switch-CpuClock/switchcpu.cat",
+   "size": 2427,
+   "sha256": "26d9813e6aae5f69fafe8308817f8cc92fdfe29f9877bebebab931d0bded07aa"
+  },
+  {
+   "path": "drivers/Switch-CpuClock/switchcpu.inf",
+   "size": 1406,
+   "sha256": "fb03f40754dcd2bde4f2bf97ec55578866e1489722f98dd4e26ca22213655a56",
+   "driver_ver": "10/31/2026,1.0.0.3",
+   "hardware_ids": [
+    "ACPI\\SWOA0701"
+   ]
+  },
+  {
+   "path": "drivers/Switch-CpuClock/switchcpu.sys",
+   "size": 22952,
+   "sha256": "4505f483b25cb5c51207662499eafc25ac4cd1abcd485e32b19593d8f5b1b636"
+  },
+  {
+   "path": "drivers/Switch-Fan/switchfan.cat",
+   "size": 2493,
+   "sha256": "ee6c1c6cfebb742cbb6654dbf1227956a1b91170753e083438b00cf8ed22699e"
+  },
+  {
+   "path": "drivers/Switch-Fan/switchfan.inf",
+   "size": 1496,
+   "sha256": "9e1d929811d13376eb8c611db4de3a379d77e58f2ebe684553ff84d32d2bdda9",
+   "driver_ver": "11/15/2026,1.0.0.33",
+   "hardware_ids": [
+    "ACPI\\SWOA0401",
+    "ACPI\\SWOA0402"
+   ]
+  },
+  {
+   "path": "drivers/Switch-Fan/switchfan.sys",
+   "size": 30632,
+   "sha256": "a23bcbe2176a715e941e031c7c1ab1433f65429d6b7ae800bac58fa65e206145"
+  },
+  {
+   "path": "drivers/Switch-PowerButton/switchpwrbtn.cat",
+   "size": 2451,
+   "sha256": "e43e8d279f712c14d0ff3812271b9362ab9fb7e186796496535e2b59d527c995"
+  },
+  {
+   "path": "drivers/Switch-PowerButton/switchpwrbtn.inf",
+   "size": 1322,
+   "sha256": "61329497d5aa86978f6617981120679c025f17f89c271bc23084635ddae2ef48",
+   "driver_ver": "11/18/2026,1.0.0.8",
+   "hardware_ids": [
+    "ACPI\\SWOA0601"
+   ]
+  },
+  {
+   "path": "drivers/Switch-PowerButton/switchpwrbtn.sys",
+   "size": 27048,
+   "sha256": "92639a2278ea0e70eac3185957226c89c5790eb0f6d4d9a62d77dcb404bbd629"
+  },
+  {
+   "path": "drivers/Switch-Rtc/switchrtc.cat",
+   "size": 2427,
+   "sha256": "e00a73a7c7f195612aee21ac0f702ce36d7becf5e485a3ae79df337e4db7448a"
+  },
+  {
+   "path": "drivers/Switch-Rtc/switchrtc.inf",
+   "size": 1120,
+   "sha256": "7645edae42afc451b69bd37bde11976cd3e409ceb197775bc245343b95f19751",
+   "driver_ver": "10/26/2026,1.0.0.2",
+   "hardware_ids": [
+    "ACPI\\SWOA0801"
+   ]
+  },
+  {
+   "path": "drivers/Switch-Rtc/switchrtc.sys",
+   "size": 16808,
+   "sha256": "79bd8016dcd3b3340dcf4d30458b508cf2139fcfb4fb92a8479ecd67bc9060cf"
+  },
+  {
+   "path": "drivers/Switch-Sd/nvtsdhc.cat",
+   "size": 2411,
+   "sha256": "72886ea6a0b7be19706362e17df76849b1fde679b7b4ff1fa3d676b33895ce76"
+  },
+  {
+   "path": "drivers/Switch-Sd/nvtsdhc.inf",
+   "size": 1517,
+   "sha256": "1ce671db350af3a5d84f733290017c44eb8ae25ee61ef9d79ceb90eefd05a92e",
+   "driver_ver": "11/06/2026,0.4.0.1",
+   "hardware_ids": [
+    "ACPI\\NVDA0101"
+   ]
+  },
+  {
+   "path": "drivers/Switch-Sd/nvtsdhc.sys",
+   "size": 18344,
+   "sha256": "cfc1612b80bf4bff39cd183c51b7d4f476392288f4534c947e2a6da934111a83"
+  },
+  {
+   "path": "drivers/Switch-Sensor/switchsio.cat",
+   "size": 2427,
+   "sha256": "99ab4e69b12f7f6b6506a5c17637a7204463b408d2c8f654e5926586996ed1da"
+  },
+  {
+   "path": "drivers/Switch-Sensor/switchsio.inf",
+   "size": 1080,
+   "sha256": "b7d7403949fa8acb0de90f8af60d682d70b7ccfc24bb26c7a6014c65e0082d6b",
+   "driver_ver": "11/08/2026,0.2.5.0",
+   "hardware_ids": [
+    "ACPI\\SWOA0902"
+   ]
+  },
+  {
+   "path": "drivers/Switch-Sensor/switchsio.sys",
+   "size": 28584,
+   "sha256": "2e059d9fd5bdac3e4784515a78a55ca76293862cb30bc9e053950fbe8af0f02a"
+  },
+  {
+   "path": "drivers/Switch-Stage0/SwitchWOA-Test.cer",
+   "size": 804,
+   "sha256": "9c0c169b7f580b77864ab88b70f091254711c47fc90e9de72f8d7c994cf0651a"
+  },
+  {
+   "path": "drivers/Switch-Stage0/swoahello.sys",
+   "size": 9128,
+   "sha256": "46d9171d9cb38eecacedc098be620dcb6145a37a5d5434d91f0fcb6fff616c2e"
+  },
+  {
+   "path": "drivers/Switch-Stage1/tegra210gpio.cat",
+   "size": 2451,
+   "sha256": "b32c3d9b6828acc71e2dcac93a6c7f1a15397cbbf88c9f31d2fbedd2f595c412"
+  },
+  {
+   "path": "drivers/Switch-Stage1/tegra210gpio.inf",
+   "size": 1175,
+   "sha256": "7b4d5c6f0c9b67edc37932595709c11b0276c562447ebda0998f925847cd894f",
+   "driver_ver": "10/29/2026,1.0.0.4",
+   "hardware_ids": [
+    "ACPI\\SWOA0101"
+   ]
+  },
+  {
+   "path": "drivers/Switch-Stage1/tegra210gpio.sys",
+   "size": 16296,
+   "sha256": "8e7c2d7ad9340d8e07fe2e35269c82f9ba64df95f069a33698b3eea87262f389"
+  },
+  {
+   "path": "drivers/Switch-Stage3/tegra210i2c.cat",
+   "size": 2443,
+   "sha256": "73b5b58ec93867f067d2a0255aa97d8430af3f46ac86dd305ea801b199fdcc41"
+  },
+  {
+   "path": "drivers/Switch-Stage3/tegra210i2c.inf",
+   "size": 1145,
+   "sha256": "17bf542dead155e159ded84d27b8b21e484d5db478f9c3a54265ab31ee8ee271",
+   "driver_ver": "11/17/2026,1.0.0.6",
+   "hardware_ids": [
+    "ACPI\\SWOA0201"
+   ]
+  },
+  {
+   "path": "drivers/Switch-Stage3/tegra210i2c.sys",
+   "size": 20392,
+   "sha256": "c7f17dc9ab850188eecee0aba90a3799b2bbd699ccc80816445a711df8eb8dcc"
+  },
+  {
+   "path": "drivers/Switch-Touch/switchtouch.cat",
+   "size": 2443,
+   "sha256": "81aeae7e7cafe1f62d13a9ef8f1495d2df32c5216fb7d64dea0bf5c3505b7529"
+  },
+  {
+   "path": "drivers/Switch-Touch/switchtouch.inf",
+   "size": 1434,
+   "sha256": "a66193131a13131e923ad01ca8ad9e13aab939e4b176b5f5587b1a23e8761035",
+   "driver_ver": "11/08/2026,1.0.1.2",
+   "hardware_ids": [
+    "ACPI\\SWOA0502"
+   ]
+  },
+  {
+   "path": "drivers/Switch-Touch/switchtouch.sys",
+   "size": 29096,
+   "sha256": "b085757c08b48a76dc5fab979e887debfc5e7c4f0cd2771702d2367c179f6fd7"
+  },
+  {
+   "path": "drivers/Switch-UsbDiag/swoadiag.sys",
+   "size": 13736,
+   "sha256": "0fa07ba11fb1cf43d123a57c2dfbf07bd482c98e607928cf779c19a2bb88b846"
+  },
+  {
+   "path": "drivers/Switch-Wifi/switchwifi.cat",
+   "size": 2435,
+   "sha256": "306108f77283a27e730f594f13b1c76d1f3b9e4a0bc505a19bc7507e7028f2a1"
+  },
+  {
+   "path": "drivers/Switch-Wifi/switchwifi.inf",
+   "size": 1426,
+   "sha256": "a635fbfe26a91cd4e326f2101c8deefefb819d0b1c029f71aa142dc23a68066e",
+   "driver_ver": "11/12/2026,0.5.7.0",
+   "hardware_ids": [
+    "ACPI\\SWOA0D01"
+   ]
+  },
+  {
+   "path": "drivers/Switch-Wifi/switchwifi.sys",
+   "size": 178088,
+   "sha256": "c824e0d0db6932bf379b4f31abf2d0213947f1edf6e32661ee987e38f9f51c5f"
+  },
+  {
+   "path": "drivers/Switch-Xusb/tegraxusb.cat",
+   "size": 2427,
+   "sha256": "d90e1e79dc8f2ca731e75cd56945c29d034c795a4a16ab1d253c5c0cb44b4655"
+  },
+  {
+   "path": "drivers/Switch-Xusb/tegraxusb.inf",
+   "size": 853,
+   "sha256": "6739ff5acccdb7b57978127e160bd7fb0343327351ec9e5102b603cec8dc535b",
+   "driver_ver": "11/06/2026,0.1.0.0",
+   "hardware_ids": [
+    "ACPI\\SWOA0D02"
+   ]
+  },
+  {
+   "path": "drivers/Switch-Xusb/tegraxusb.sys",
+   "size": 12200,
+   "sha256": "1384caa92f78b770cc332cd282a471523a907ad3b9a48584a0f0196f410da7d4"
+  }
+ ]
+}

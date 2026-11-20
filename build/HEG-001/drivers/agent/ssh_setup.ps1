@@ -1,0 +1,90 @@
+# Installs and configures the OpenSSH server from agent\ssh (Windows 11): Microsoft's
+# Win32-OpenSSH ARM64 build (OpenSSH-ARM64.zip, not part of this repository) and the public key
+# authorized_keys made on the Mac. Called by w64.cmd on every boot; does nothing once installed
+# with the same key. Login by key only, no passwords, port 22 open to the local subnet only.
+#   powershell -NoProfile -ExecutionPolicy Bypass -File ssh_setup.ps1 AGENT_DIR
+param([string]$Agent)
+$ErrorActionPreference = 'Stop'
+$src = Join-Path $Agent 'ssh'
+$zip = Join-Path $src 'OpenSSH-ARM64.zip'
+$key = Join-Path $src 'authorized_keys'
+if (-not (Test-Path $zip) -or -not (Test-Path $key)) { 'ssh: no package or key on the card'; exit 0 }
+$dest = 'C:\Program Files\OpenSSH'
+$data = 'C:\ProgramData\ssh'
+
+# Reinstall when the package on the card changed (10.4 dropped every connection right after
+# accepting it on this console; 9.5 is the version Windows 11 itself ships).
+$changed = $false
+$zipHash = (Get-FileHash $zip).Hash
+$mark = Join-Path $dest 'package.sha256'
+if ((Get-Service sshd -ErrorAction SilentlyContinue) -and
+        (-not (Test-Path $mark) -or (Get-Content $mark -Raw).Trim() -ne $zipHash)) {
+    'ssh: removing the previous OpenSSH'
+    Stop-Service sshd -Force -ErrorAction SilentlyContinue
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest 'uninstall-sshd.ps1')
+    Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue
+}
+if (-not (Get-Service sshd -ErrorAction SilentlyContinue)) {
+    'ssh: installing OpenSSH'
+    $tmp = Join-Path $env:TEMP 'openssh-unpack'
+    if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
+    Expand-Archive -Path $zip -DestinationPath $tmp
+    if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+    Move-Item (Join-Path $tmp 'OpenSSH-ARM64') $dest
+    Remove-Item $tmp -Recurse -Force
+    # Moved files keep the ACL of the temporary folder (Administrators and SYSTEM only), but the
+    # unprivileged per-connection sshd child must read and run sshd.exe: inherit Program Files'.
+    & icacls $dest /reset /T /Q | Out-Null
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest 'install-sshd.ps1')
+    Set-Content -Path $mark -Value $zipHash -Encoding ascii
+    $changed = $true
+}
+
+# Configuration: keys only; the key goes both to the administrators' file and to the user's own.
+New-Item -ItemType Directory -Force -Path $data | Out-Null
+# No "Match Group administrators" block: on a Russian Windows the group is "Администраторы" and
+# the connection was dropped before the banner. Both key files are listed instead. The log goes to
+# C:\ProgramData\ssh\logs\sshd.log (SyslogFacility LOCAL0).
+$config = @"
+Port 22
+PubkeyAuthentication yes
+PasswordAuthentication no
+PermitEmptyPasswords no
+KbdInteractiveAuthentication no
+AuthorizedKeysFile .ssh/authorized_keys __PROGRAMDATA__/ssh/administrators_authorized_keys
+Subsystem sftp sftp-server.exe
+SyslogFacility LOCAL0
+LogLevel DEBUG3
+"@
+$cfgFile = Join-Path $data 'sshd_config'
+if (-not (Test-Path $cfgFile) -or (Get-Content $cfgFile -Raw) -ne $config) {
+    Set-Content -Path $cfgFile -Value $config -NoNewline -Encoding ascii
+    $changed = $true
+}
+$adminKeys = Join-Path $data 'administrators_authorized_keys'
+$user = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon').DefaultUserName
+if (-not $user) { $user = 'Player' }
+$userSsh = "C:\Users\$user\.ssh"
+New-Item -ItemType Directory -Force -Path $userSsh | Out-Null
+foreach ($target in @($adminKeys, (Join-Path $userSsh 'authorized_keys'))) {
+    if (-not (Test-Path $target) -or (Get-FileHash $target).Hash -ne (Get-FileHash $key).Hash) {
+        Copy-Item $key $target -Force
+        $changed = $true
+    }
+}
+# sshd refuses key files that others can write: Administrators (S-1-5-32-544) and SYSTEM only
+# for the shared file, plus the user for the user's own one.
+& icacls $adminKeys /inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F' | Out-Null
+& icacls (Join-Path $userSsh 'authorized_keys') /inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F' /grant "${user}:R" | Out-Null
+
+if (-not (Get-NetFirewallRule -Name 'sshd-local' -ErrorAction SilentlyContinue)) {
+    New-NetFirewallRule -Name 'sshd-local' -DisplayName 'OpenSSH Server (local network only)' -Enabled True `
+        -Direction Inbound -Protocol TCP -LocalPort 22 -RemoteAddress LocalSubnet -Action Allow | Out-Null
+    'ssh: firewall rule added (local subnet)'
+}
+# Host keys readable by SYSTEM and Administrators only: sshd refuses keys others can read.
+& powershell -NoProfile -ExecutionPolicy Bypass -Command "Import-Module '$dest\OpenSSHUtils.psd1' -Force; & '$dest\FixHostFilePermissions.ps1' -Confirm:`$false" 2>&1 | Out-Null
+& icacls $dest /reset /T /Q | Out-Null
+Set-Service sshd -StartupType Automatic
+if ($changed) { Restart-Service sshd -Force; 'ssh: configured, sshd restarted' } else { Start-Service sshd }
+"ssh: sshd $((Get-Service sshd).Status), user $user"
