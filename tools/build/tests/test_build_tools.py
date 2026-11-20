@@ -87,6 +87,56 @@ except SystemExit as e: print("EXIT", e.code)
     check("testsign: a private key is refused", rc != 0 and "key material" in log, log)
     rc, log = run(os.path.join(TOOLS, "make_testsign_kit.py"), "--model", "NOPE", "--out", tout)
     check("testsign: unknown model refused", rc != 0, log)
+    # ---- sync_build.py: place CI artifacts into build/<model>/ (own folder, fake gh, no network) ----
+    def mk_art(root, key=False):
+        os.makedirs(os.path.join(root, "build-HAC-001", "drivers", "Switch-Fan"))
+        open(os.path.join(root, "build-HAC-001", "drivers", "Switch-Fan", "switchfan.sys"), "wb").write(b"MZ-new")
+        open(os.path.join(root, "build-HAC-001", "MANIFEST.json"), "w").write("{}")
+        os.makedirs(os.path.join(root, "build-HDH-001", "drivers"))
+        open(os.path.join(root, "build-HDH-001", "drivers", "lite.sys"), "wb").write(b"MZ-lite")
+        os.makedirs(os.path.join(root, "apps-HAC-001", "SwitchCenter"))
+        open(os.path.join(root, "apps-HAC-001", "SwitchCenter", "SwitchCenter.exe"), "wb").write(b"exe")
+        if key:
+            open(os.path.join(root, "build-HAC-001", "oops.pfx"), "wb").write(b"secret")
+    art = os.path.join(tmp, "art"); mk_art(art)
+    sout = os.path.join(tmp, "sync-out"); os.makedirs(os.path.join(sout, "HAC-001", "drivers"))
+    open(os.path.join(sout, "HAC-001", "drivers", "stale.sys"), "wb").write(b"old")
+    os.makedirs(os.path.join(sout, "HAC-001", "apps")); open(os.path.join(sout, "HAC-001", "apps", "keep.txt"), "w").write("k")
+    rc, log = run(os.path.join(TOOLS, "sync_build.py"), "--artifacts-dir", art, "--models", "HAC-001", "--out", sout)
+    check("sync: drivers placed, stale file gone, other model and apps left alone",
+          rc == 0 and open(os.path.join(sout, "HAC-001", "drivers", "Switch-Fan", "switchfan.sys"), "rb").read() == b"MZ-new"
+          and not os.path.exists(os.path.join(sout, "HAC-001", "drivers", "stale.sys"))
+          and not os.path.exists(os.path.join(sout, "HDH-001")) and os.path.exists(os.path.join(sout, "HAC-001", "apps", "keep.txt"))
+          and os.path.exists(os.path.join(sout, "HAC-001", "MANIFEST.json")), log)
+    rc, log = run(os.path.join(TOOLS, "sync_build.py"), "--artifacts-dir", art, "--models", "all", "--apps", "--out", sout)
+    check("sync: --apps replaces apps/, all models placed",
+          rc == 0 and os.path.exists(os.path.join(sout, "HAC-001", "apps", "SwitchCenter", "SwitchCenter.exe"))
+          and not os.path.exists(os.path.join(sout, "HAC-001", "apps", "keep.txt")) and os.path.exists(os.path.join(sout, "HDH-001", "drivers", "lite.sys")), log)
+    bad = os.path.join(tmp, "art-key"); mk_art(bad, key=True)
+    rc, log = run(os.path.join(TOOLS, "sync_build.py"), "--artifacts-dir", bad, "--out", os.path.join(tmp, "sync-bad"))
+    check("sync: a private key in the artifacts is refused", rc != 0 and "private key" in log, log)
+    rc, log = run(os.path.join(TOOLS, "sync_build.py"), "--artifacts-dir", art, "--models", "NOPE", "--out", sout)
+    check("sync: unknown model refused", rc != 0 and "unknown model" in log, log)
+    fake = os.path.join(tmp, "fakegh")
+    open(fake, "w").write("#!%s\nimport json, os, sys\n"
+        "a = sys.argv[1:]\n"
+        "if a[:2] == ['run', 'list']:\n"
+        "    print(json.dumps([] if os.environ.get('FAKE_NO_RUN') else [{'databaseId': 4242, 'headSha': 'abcdef0123456789', 'createdAt': 'now'}]))\n"
+        "elif a[:3] == ['run', 'download', '4242']:\n"
+        "    d = a[a.index('--dir') + 1]\n"
+        "    for n in ('build-HDH-001',):\n"
+        "        os.makedirs(os.path.join(d, n, 'drivers'))\n"
+        "        open(os.path.join(d, n, 'drivers', 'lite.sys'), 'wb').write(b'from-gh')\n"
+        "else:\n"
+        "    sys.exit('unexpected: %%r' %% (a,))\n" % sys.executable)
+    os.chmod(fake, 0o755)
+    env = dict(os.environ, GH=fake)
+    p = subprocess.run([sys.executable, "-I", os.path.join(TOOLS, "sync_build.py"), "--branch", "test", "--out", os.path.join(tmp, "sync-gh")], capture_output=True, text=True, env=env)
+    check("sync: newest successful run is found and its artifact placed (gh)", p.returncode == 0 and "run 4242" in p.stdout
+          and open(os.path.join(tmp, "sync-gh", "HDH-001", "drivers", "lite.sys"), "rb").read() == b"from-gh", p.stdout + p.stderr)
+    env["FAKE_NO_RUN"] = "1"
+    p = subprocess.run([sys.executable, "-I", os.path.join(TOOLS, "sync_build.py"), "--out", os.path.join(tmp, "sync-none")], capture_output=True, text=True, env=env)
+    check("sync: no successful run gives a clear message", p.returncode != 0 and "no successful" in (p.stdout + p.stderr), p.stdout + p.stderr)
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 print("\n%d failed" % len(fails) if fails else "\nall passed"); sys.exit(1 if fails else 0)

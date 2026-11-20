@@ -3,13 +3,15 @@
 `build/<型番>/` に、その型番向けの**完成したドライバ一式**を置く。ビルド済みバイナリ（`.sys` / `.cat` / `.exe`）はここに置いてよい
 （作者の許可）。**再配布できないファームウェア・鍵は引き続き置かない**（`COPYING.md`、`tools/fwfetch/`）。
 
-> **このフォルダには、まだ `.sys` をコミットしていない。** ただし **GitHub Actions 上のビルドは通っている**
-> （2026-11-19、`build-all-drivers` #21、コミット `2217398`）。成果物は Actions のアーティファクトに出る。
-> 手動実行で `commit_build` を ON にすると、ここにコミットされる。**実機での動作は、どの型番も未確認。**
+> **完成したドライバ一式は、CI が自動でここに置く**(2026-11-20 から)。`build-all-drivers` が成功するたびに、そのブランチの
+> `build/<型番>/` へ `.sys` / `.inf` / `.cat` / 公開 `.cer` / `SHA256SUMS.txt` などをコミットする(`commit-build` ジョブ)。
+> 取り込むには `git pull` するだけ。コミットさせずに取りたいとき・fork などは `python tools/build/sync_build.py`。
+> 手元の Windows で `tools\ci\Build-AllDrivers.ps1 -Model <型番>` を実行した場合も、終わりに自動でここへ置かれる。
+> **実機での動作は、どの型番も未確認。**
 
 | 型番 | 機種 | コードネーム | 状態 | 埋め方 |
 |---|---|---|---|---|
-| `HAC-001` | 初代 Switch（Erista） | Icosa | **CI でビルド成功**（2026-11-19、#21）。実機未確認 | GitHub Actions `build-all-drivers`（手動実行で `commit_build` を ON）→ `build/HAC-001/drivers/` |
+| `HAC-001` | 初代 Switch（Erista） | Icosa | **CI でビルド成功**（2026-11-19、#21）。実機未確認 | GitHub Actions `build-all-drivers`（push で自動）→ `build/HAC-001/drivers/` |
 | `HAC-001-01` | 2019 年版（Mariko） | Iowa | **ドライバ一式が無い** | なし。Erista / Lite の流用はしない（基板・電源・I2C の一致が未証明） |
 | `HDH-001` | Switch Lite | Hoag | **CI でビルド成功**（2026-11-19、#21。実機未確認）。設定は `tools/ci/drivers-t214-hoag.json`（16 ドライバ、うち 4 つは任意） | `build-all-drivers`（`models` に `HDH-001`）→ `build/HDH-001/drivers/` |
 | `HEG-001` | 有機EL | Aula | **既定は CI でソースからビルド**（2026-11-19、#21 で成功。実機未確認。v0.8.0 とバイト一致はしない）。上流のビルド済み（windows-switch v0.8.0）を使うこともできる | 既定: `build-all-drivers`（`models` に `HEG-001`）→ `build/HEG-001/drivers/agent/`。上流版: `heg001_upstream` を ON、または手元で `python tools/build/fill_heg001.py --zip windows-switch-arm64-drivers-v0_8_0.zip` |
@@ -19,9 +21,14 @@
 ## Actions で型番ごとに作る
 
 `build-all-drivers`（Actions → Run workflow）の `models` に型番（`HAC-001,HDH-001` のようにカンマ区切り、または `all`）を入れる。型番ごとに別のジョブが走り、
-`build-<型番>` というアーティファクトができる。`commit_build` を ON にすると `build/<型番>/` にコミットされる。`HAC-001-01` は一式が無いので「スキップ」と表示される。
+`build-<型番>` というアーティファクトができる。**`main` / `master` / `test` への push でも自動で走り、成功した型番の一式が `build/<型番>/` に自動でコミットされる**
+（`commit-build`。失敗した型番のフォルダは前のまま。push の自動コミットにアプリ（SwitchCenter / SwitchPatcher、大きい）は含めない。手動実行は `commit_build`（既定 ON）でアプリも置く）。
+`HAC-001-01` は一式が無いので「スキップ」と表示される。コミットは `GITHUB_TOKEN` で行うので、次の実行は始まらない。
+署名用の証明書を固定したいときはシークレット `SWOA_PFX_BASE64` / `SWOA_PFX_PASSWORD` を入れる（無いと実行ごとに別の自己署名になり、毎回 `.sys` と `.cer` が変わるので、そのたびにコミットが増える）。
 
-`test` ブランチへの push だけでは `commit-build` / `release` / `heg001` はスキップされる（仕様）。pre-release は、`v*` タグを push するか、手動実行で `release_tag`（例: `v0.0.1-test`）を入れると作られる。
+自動でコミットさせずに自分の clone へ取りたいときは `python tools/build/sync_build.py --branch test`（`gh auth login` が要る。`--apps` でアプリも、`--artifacts-dir` で手でダウンロードしたものから）。
+
+`release` と `heg001` は、`test` への push だけではスキップされる（仕様）。pre-release は、`v*` タグを push するか、手動実行で `release_tag`（例: `v0.0.1-test`）を入れると作られる。
 Lite の GPU だけなら `build-lite-gpu` を手動実行して `release_tag` を入れる（`build-all-drivers` から呼ばれたときは動かない）。同名のタグがあると失敗する。
 
 ## 再配布できないファームは外から自動で読み込む

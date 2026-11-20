@@ -1,7 +1,7 @@
 # HAC-001 — 初代 Switch（Erista / Tegra X1、コードネーム Icosa）
 
 ソース: `drivers/t210-icosa/`。ビルド設定: `tools/ci/drivers-t210.json`（16 ドライバ）。
-`drivers/` は、CI が作った一式を `tools/build/assemble_build.py` が置く場所。**リポジトリ内はいまは空**（CI ではビルドできている。手動実行で `commit_build` を ON にすると置かれる）。
+`drivers/` は、CI が作った一式を `tools/build/assemble_build.py` が置く場所。**CI が自動で置く(まだ一度も走っていなければ空)**（CI ではビルドできている。`build-all-drivers` が成功するたびに自動で置かれる(push でも手動実行でも)）。
 
 ## 入れる順番（キット名はビルド後のフォルダ名）
 

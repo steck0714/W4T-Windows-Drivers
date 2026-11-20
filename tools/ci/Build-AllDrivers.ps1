@@ -11,6 +11,10 @@
   -NoWarnAsError and mark it WARN. A hard failure is FAIL (the script exits 1 at the end, after trying everything).
   Drivers marked "optional" in the list never make the run fail.
 
+  When the build is done the finished kit is placed into build\<model>\ automatically (drivers\<kit>\*.sys *.inf *.cat, the public
+  .cer, MANIFEST.json, SHA256SUMS.txt, BUILD-INFO.md) by tools\build\assemble_build.py. -NoAssemble skips that (the GitHub workflow
+  does it in its own step). A failed assemble is a warning, never a failed build.
+
 .EXAMPLE
   .\tools\ci\Build-AllDrivers.ps1 -Model HDH-001                 # Switch Lite -> build\_work\HDH-001
   .\tools\ci\Build-AllDrivers.ps1 -Model HAC-001 -Only switchfan,switchbattery
@@ -21,7 +25,8 @@ param(
   [string]$Config = '',
   [string]$OutRoot = '',
   [string[]]$Only = @(),
-  [switch]$NoSign
+  [switch]$NoSign,
+  [switch]$NoAssemble
 )
 $ErrorActionPreference = 'Stop'
 $Root = (Resolve-Path "$PSScriptRoot\..\..").Path
@@ -145,5 +150,18 @@ Copy-Item (Join-Path $OutRoot 'BUILD-INFO.md') $KitRoot -Force
 
 ConvertTo-Json -InputObject @($results) | Set-Content (Join-Path $OutRoot 'results.json') -Encoding utf8
 $results | Format-Table Name, Status, Optional, Note -AutoSize | Out-String | Write-Host
+
+# --- place the finished kit into build\<model>\ (drivers\<kit>\*.sys *.inf *.cat, .cer, MANIFEST.json, SHA256SUMS.txt) -------
+# Only when the default output folder is used (a custom -OutRoot is a scratch build) and only for a model of build\models.json.
+if (-not $NoAssemble -and $PSBoundParameters.ContainsKey('Model') -and -not $PSBoundParameters.ContainsKey('OutRoot')) {
+  $py = Get-Command python, py -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($py) {
+    & $py.Source (Join-Path $Root 'tools\build\assemble_build.py') --model $Model --kit-dir $KitRoot --build-info (Join-Path $OutRoot 'BUILD-INFO.md')
+    if ($LASTEXITCODE -ne 0) { Write-Host "::warning::assemble_build.py failed (exit $LASTEXITCODE): the kit is in $KitRoot, build\$Model was not updated" }
+    else { Write-Host "placed the kit in build\$Model" }
+  } else {
+    Write-Host "::warning::python was not found: the kit is in $KitRoot, run tools\build\assemble_build.py --model $Model --kit-dir $KitRoot to place it in build\$Model"
+  }
+}
 $hard = @($results | Where-Object { $_.Status -eq 'FAIL' -and -not $_.Optional })
 if ($hard.Count) { Write-Host "FAILED: $($hard.Name -join ', ')"; exit 1 }

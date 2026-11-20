@@ -38,6 +38,7 @@ python3 -I tools/ci/tests/test_verify_build.py >"$tmp/o" 2>&1 && { pass=$((pass+
 # and agreement with the Windows TegraGpu power backends. No EDK II or hardware needed.
 run uefi/tests/gpu_handoff/run.sh sh run.sh
 python3 -I uefi/tools/check_uefi_contract.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS uefi/tools/check_uefi_contract.py"; } || { fail=$((fail+1)); echo "FAIL uefi/tools/check_uefi_contract.py"; tail -8 "$tmp/o"; }
+python3 -I uefi/tools/list_uefi_requirements.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS uefi/tools/list_uefi_requirements.py"; } || { fail=$((fail+1)); echo "FAIL uefi/tools/list_uefi_requirements.py"; tail -8 "$tmp/o"; }
 if [ -n "${MESA_DIR:-}" ]; then
   python3 -I drivers/t210-icosa/drivers/TegraGpu/tools/build.py --mesa "$MESA_DIR" --out "$tmp/gpu" --host-only >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS TegraGpu build.py --host-only"; } || { fail=$((fail+1)); echo "FAIL TegraGpu build.py"; tail -8 "$tmp/o"; }
 else echo "SKIP TegraGpu model tests (set MESA_DIR to a mesa-switch checkout)"; fi
