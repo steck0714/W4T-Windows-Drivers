@@ -37,7 +37,7 @@ cat > "$TMP/setup.reg" <<'REG'
 Windows Registry Editor Version 5.00
 
 [HKEY_LOCAL_MACHINE\SYSTEM\Setup]
-"CmdLine"="C:\\Windows\\System32\\cmd.exe /c C:\\swagent\\setup.cmd"
+"CmdLine"="cmd.exe /c %SystemDrive%\\swagent\\setup.cmd"
 REG
 hivexregedit --merge --prefix 'HKEY_LOCAL_MACHINE\SYSTEM' "$TMP/SYSTEM" "$TMP/setup.reg"
 cp "$TMP/SYSTEM" "$CONFIG/SYSTEM"

@@ -3,6 +3,12 @@ rem Windows 10/11 ARM64 on the Switch: settings, drivers and diagnostics. Starte
 rem boot with the boot partition's drive letter as %1. Logs go to %1:\agent\w64-log.txt.
 set LOG=%1:\agent\w64-log.txt
 echo ==== BOOT %date% %time% >> %LOG%
+rem The running Windows: %SystemRoot% comes from the kernel. Check that the Windows files really are there (ntoskrnl.exe) and
+rem take the drive from it; if not (variable missing or wrong), look for the volume that holds Windows\System32\ntoskrnl.exe
+rem and the swagent folder this script was started from (:findwin). Every %SystemDrive% / %SystemRoot% below, and the
+rem PowerShell scripts started from here, then use the drive of the Windows that is running.
+if exist "%SystemRoot%\System32\ntoskrnl.exe" (set "SystemDrive=%SystemRoot:~0,2%") else call :findwin
+echo -- running Windows: %SystemRoot% (system drive %SystemDrive%) >> %LOG%
 reg query HKLM\SYSTEM\Setup /v SystemSetupInProgress >> %LOG% 2>&1
 reg query HKLM\SYSTEM\Setup /v OOBEInProgress >> %LOG% 2>&1
 rem While Windows Setup is running (specialize/OOBE) only log: installing drivers or changing
@@ -439,6 +445,18 @@ rem findagent.cmd (finds the boot partition even when Windows gave it no letter 
 rem copied from agent\findagent.cmd when it differs; boot.cmd / setup.cmd of the image call it from swagent.
 if not exist %1:\agent\findagent.cmd goto :eof
 fc /b %1:\agent\findagent.cmd %SystemDrive%\swagent\findagent.cmd >nul 2>&1 || copy /y %1:\agent\findagent.cmd %SystemDrive%\swagent\findagent.cmd >> %LOG% 2>&1
+goto :eof
+
+:findwin
+rem No usable %SystemRoot%: the one volume with both Windows\System32\ntoskrnl.exe and swagent\boot.cmd is the running Windows.
+set WINFOUND=
+for %%L in (C D E F G H I J K L M N O P Q R S T U V W X Y Z) do if not defined WINFOUND if exist %%L:\Windows\System32\ntoskrnl.exe if exist %%L:\swagent\boot.cmd set WINFOUND=%%L
+if not defined WINFOUND (
+  echo -- running Windows not found, %SystemRoot% / %SystemDrive% left as they are >> %LOG%
+  goto :eof
+)
+set "SystemDrive=%WINFOUND%:"
+set "SystemRoot=%WINFOUND%:\Windows"
 goto :eof
 
 :tune

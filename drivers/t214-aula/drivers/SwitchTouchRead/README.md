@@ -1,6 +1,6 @@
 # SwitchTouchRead
 
-`touchread.c`: swhid が取り込む FTS4 タッチパネルの I2C3 アクセスと初期化。単体ビルドでは 1 分間タッチを `D:\agent\touch.txt` に記録する試験ドライバ。`swhid.c` が `#include` する(単独の driver ではない)。
+`touchread.c`: swhid が取り込む FTS4 タッチパネルの I2C3 アクセスと初期化。単体ビルドでは 1 分間タッチを `<システムドライブ>:\swagent\touch.txt` に記録する試験ドライバ(以前は `D:\agent\touch.txt` 固定だった)。`swhid.c` が `#include` する(単独の driver ではない)。
 
 - 上流での位置: `drivers/touchread/touchread.c`(DanilKhmyrov/windows-switch `main`)。ここでの位置: `drivers/t214-aula/drivers/SwitchTouchRead/src/touchread.c`
 - 作者・出典: DanilKhmyrov/windows-switch(GPL-2.0)。Switchroot・hekate のタッチ電源手順。 ソースの先頭に**クレジットブロック**を入れた(`W4T-CREDIT-BEGIN` 〜 `END`)。

@@ -22,5 +22,5 @@
 
 ドライブ文字の固定(`C:`・`D〜K`・`W:`・`S:`)をやめるため、`upstream-src/desktop/` の次を**意図して改変した**。上流とバイト一致しない。
 `boot.cmd` `boot64.cmd` `setup.cmd` `setup64.cmd` `findagent64.cmd`(書き直し)、`w32.cmd` `w64.cmd` `copylogs.cmd` `setupwatch.cmd` `vk-triangle.cmd`、
-`tune.ps1` `remove_win10.ps1` `ssh_setup.ps1` `uwp.ps1` `gpu*.ps1` `vk-triangle-preview.ps1`、`build_w32.sh`(`findagent.cmd` を入れる 1 行)。
+`tune.ps1` `remove_win10.ps1` `ssh_setup.ps1` `uwp.ps1` `gpu*.ps1` `vk-triangle-preview.ps1`、`build_w32.sh`(`findagent.cmd` を入れる 1 行と、Setup の `CmdLine`)、`build_w64.sh` `patch_desktop.sh` `setup_mode.sh`(サービスの `ImagePath` と Setup の `CmdLine` を `C:` 固定から `%SystemDrive%` / `%SystemRoot%` に変更。Windows が F: などでも最初の起動から動く)。
 `kit/agent/` の同名ファイルと内容を揃えてある(`findagent.cmd` = `findagent64.cmd`)。上流に戻すときは `windows-switch-main.zip` の同名ファイルで置き換える。

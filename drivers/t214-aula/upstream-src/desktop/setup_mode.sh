@@ -22,7 +22,7 @@ Windows Registry Editor Version 5.00
 "OOBEInProgress"=dword:00000001
 "SetupType"=dword:00000002
 "SetupPhase"=dword:00000004
-"CmdLine"="C:\\Windows\\System32\\cmd.exe /c C:\\swagent\\setup.cmd"
+"CmdLine"="cmd.exe /c %SystemDrive%\\swagent\\setup.cmd"
 REG
 hivexregedit --merge --prefix 'HKEY_LOCAL_MACHINE\SYSTEM' "$TMP/SYSTEM" "$TMP/setup.reg"
 hivexget "$TMP/SYSTEM" '\Setup'

@@ -20,7 +20,7 @@ Windows Registry Editor Version 5.00
 "Start"=dword:00000002
 "ErrorControl"=dword:00000000
 "ObjectName"="LocalSystem"
-"ImagePath"=str(2):"C:\\Windows\\System32\\cmd.exe /c start /b C:\\Windows\\System32\\cmd.exe /c C:\\swagent\\boot.cmd"
+"ImagePath"=str(2):"%SystemRoot%\\System32\\cmd.exe /c start /b %SystemRoot%\\System32\\cmd.exe /c %SystemDrive%\\swagent\\boot.cmd"
 
 [HKEY_LOCAL_MACHINE\SYSTEM\ControlSet001\Services\swhid]
 "Type"=dword:00000001

@@ -65,14 +65,14 @@ Windows Registry Editor Version 5.00
 "Start"=dword:00000002
 "ErrorControl"=dword:00000000
 "ObjectName"="LocalSystem"
-"ImagePath"=str(2):"C:\\swagent\\swagentsvc.exe C:\\Windows\\System32\\cmd.exe /c C:\\swagent\\boot.cmd"
+"ImagePath"=str(2):"%SystemDrive%\\swagent\\swagentsvc.exe %SystemRoot%\\System32\\cmd.exe /c %SystemDrive%\\swagent\\boot.cmd"
 
 [HKEY_LOCAL_MACHINE\SYSTEM\ControlSet001\Control\CrashControl]
 "DisplayParameters"=dword:00000001
 "AutoReboot"=dword:00000000
 
 [HKEY_LOCAL_MACHINE\SYSTEM\Setup]
-"CmdLine"="C:\\Windows\\System32\\cmd.exe /c C:\\swagent\\setup.cmd"
+"CmdLine"="cmd.exe /c %SystemDrive%\\swagent\\setup.cmd"
 
 [HKEY_LOCAL_MACHINE\SYSTEM\ControlSet001\Services\sdbus]
 "Start"=dword:00000000
