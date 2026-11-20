@@ -6,7 +6,7 @@
   -Mode Status  : report the I2C devices (ACPI\SWOA0201) and the driver trace
   -Mode Remove  : remove the driver package
 
-  Log: C:\SwitchWOA-Stage3.txt
+  Log: %SystemDrive%\SwitchWOA-Stage3.txt
 #>
 param([Parameter(Mandatory = $true)][ValidateSet('Install', 'Status', 'Remove')][string]$Mode)
 
@@ -16,7 +16,7 @@ $Sys = Join-Path $env:windir 'Sysnative'
 if (-not (Test-Path (Join-Path $Sys 'pnputil.exe'))) { $Sys = Join-Path $env:windir 'System32' }
 $Pnputil = Join-Path $Sys 'pnputil.exe'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Log = 'C:\SwitchWOA-Stage3.txt'
+$Log = "$env:SystemDrive\SwitchWOA-Stage3.txt"
 function Log([string]$s) { Write-Host $s; Add-Content -Path $Log -Value $s -Encoding UTF8 }
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) { Write-Host 'Run this from an elevated (Administrator) prompt.'; exit 1 }

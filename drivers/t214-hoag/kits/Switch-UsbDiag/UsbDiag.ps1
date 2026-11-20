@@ -6,7 +6,7 @@
 
   -Label <text> : a name for this snapshot (e.g. working, unplugged, replugged)
 
-  Log: C:\SwitchWOA-UsbDiag.txt
+  Log: %SystemDrive%\SwitchWOA-UsbDiag.txt
 #>
 param([string]$Label = 'snapshot')
 
@@ -15,7 +15,7 @@ $ErrorActionPreference = 'Continue'
 $Sys = Join-Path $env:windir 'Sysnative'
 if (-not (Test-Path (Join-Path $Sys 'drivers'))) { $Sys = Join-Path $env:windir 'System32' }
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Log = 'C:\SwitchWOA-UsbDiag.txt'
+$Log = "$env:SystemDrive\SwitchWOA-UsbDiag.txt"
 $Key = 'HKLM:\SYSTEM\CurrentControlSet\Services\SwoaDiag\Parameters'
 function Log([string]$s) { Write-Host $s; Add-Content -Path $Log -Value $s -Encoding UTF8 }
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)

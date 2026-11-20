@@ -7,7 +7,7 @@
   -Mode Status  : report BAT0 (ACPI\SWOA0301), Win32_Battery and the driver trace
   -Mode Remove  : remove the driver package
 
-  Log: C:\SwitchWOA-Battery.txt
+  Log: %SystemDrive%\SwitchWOA-Battery.txt
 #>
 param([Parameter(Mandatory = $true)][ValidateSet('Install', 'Status', 'Remove')][string]$Mode)
 
@@ -17,7 +17,7 @@ $Sys = Join-Path $env:windir 'Sysnative'
 if (-not (Test-Path (Join-Path $Sys 'pnputil.exe'))) { $Sys = Join-Path $env:windir 'System32' }
 $Pnputil = Join-Path $Sys 'pnputil.exe'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Log = 'C:\SwitchWOA-Battery.txt'
+$Log = "$env:SystemDrive\SwitchWOA-Battery.txt"
 function Log([string]$s) { Write-Host $s; Add-Content -Path $Log -Value $s -Encoding UTF8 }
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) { Write-Host 'Run this from an elevated (Administrator) prompt.'; exit 1 }
@@ -34,7 +34,7 @@ function Show-Status {
   foreach ($b in @(Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue)) {
     Log ("Win32_Battery: name='{0}' charge={1}% status={2} (1=discharging 2=AC) chemistry={3} voltage={4}" -f $b.Name, $b.EstimatedChargeRemaining, $b.BatteryStatus, $b.Chemistry, $b.DesignVoltage)
   }
-  $ps = & (Join-Path $Sys 'powercfg.exe') /batteryreport /output C:\SwitchWOA-battery-report.html 2>&1
+  $ps = & (Join-Path $Sys 'powercfg.exe') /batteryreport /output "$env:SystemDrive\SwitchWOA-battery-report.html" 2>&1
   Log ('powercfg /batteryreport: ' + (($ps | Out-String) -replace '\s+', ' '))
   $p = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\switchbattery\Parameters' -ErrorAction SilentlyContinue
   if ($p) {

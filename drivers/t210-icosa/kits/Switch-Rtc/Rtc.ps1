@@ -8,7 +8,7 @@
   -Mode Sync    : w32tm /resync (needs the network); the driver then learns the offset
   -Mode Remove  : remove the driver package
 
-  Log: C:\SwitchWOA-Rtc.txt
+  Log: %SystemDrive%\SwitchWOA-Rtc.txt
 #>
 param([Parameter(Mandatory = $true)][ValidateSet('Install', 'Status', 'Sync', 'Remove')][string]$Mode)
 
@@ -19,7 +19,7 @@ if (-not (Test-Path (Join-Path $Sys 'pnputil.exe'))) { $Sys = Join-Path $env:win
 $Pnputil = Join-Path $Sys 'pnputil.exe'
 $W32tm = Join-Path $Sys 'w32tm.exe'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Log = 'C:\SwitchWOA-Rtc.txt'
+$Log = "$env:SystemDrive\SwitchWOA-Rtc.txt"
 $Key = 'HKLM:\SYSTEM\CurrentControlSet\Services\switchrtc\Parameters'
 function Log([string]$s) { Write-Host $s; Add-Content -Path $Log -Value $s -Encoding UTF8 }
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)

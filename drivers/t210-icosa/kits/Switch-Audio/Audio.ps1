@@ -9,7 +9,7 @@
   -Mode Tone    : (1.0.0.2+) the driver plays one second of 1 kHz from its own buffer, without the
                   Windows audio engine (TestTone=1, then the device restarts), then report
 
-  Log: C:\SwitchWOA-Audio.txt
+  Log: %SystemDrive%\SwitchWOA-Audio.txt
 #>
 param([Parameter(Mandatory = $true)][ValidateSet('Install', 'Status', 'Remove', 'Tone')][string]$Mode)
 
@@ -19,7 +19,7 @@ $Sys = Join-Path $env:windir 'Sysnative'
 if (-not (Test-Path (Join-Path $Sys 'pnputil.exe'))) { $Sys = Join-Path $env:windir 'System32' }
 $Pnputil = Join-Path $Sys 'pnputil.exe'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Log = 'C:\SwitchWOA-Audio.txt'
+$Log = "$env:SystemDrive\SwitchWOA-Audio.txt"
 $Key = 'HKLM:\SYSTEM\CurrentControlSet\Services\switchaudio\Parameters'
 function Log([string]$s) { Write-Host $s; Add-Content -Path $Log -Value $s -Encoding UTF8 }
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)

@@ -43,4 +43,6 @@
 - [x] Rust 単体テスト 5 件 + `run_tests.py` 5 件追加(Linux で全通過)。**Windows 実機・ARM64・PowerShell は未確認**。`build/*/fwfetch/` は CI が作り直す(この修正では触っていない)
 - [x] 2026-11-20: `swagentsvc.c` / `swbatt.c` / `touchread.c` / `w64.cmd` / `tune.ps1` / `remove_win10.ps1` / `gm20bctl.c` の C: 固定を、実行中 Windows のシステムドライブ基準に変更。SD のブート領域は `kit/agent/findagent.cmd` が A〜Z → 文字なしボリューム(GUIDパス → 空き文字を実行時に選んで一時割り当て)の順に探す(Switchroot系の複数パーティションSDを想定、実機未確認・ビルド未実行)
 - [x] 2026-11-20: `upstream-src/desktop` の boot/setup 系・w32/w64・各 ps1 も同様に変更(上流とは意図して不一致。`UPSTREAM-SOURCE.md` 参照)。boot.cmd / setup.cmd も findagent.cmd 経由(D〜K の固定リストをやめた)
-- [ ] 未対応: `tools/testsign`・各 kits のログ(`C:\…`)
+- [x] 2026-11-20: `tools/testsign`・各 kits(t210-icosa / t214-hoag / switchdrivers-kits)のログと Battery のレポート、Wlan の trace の出力先を `%SystemDrive%` / `$env:SystemDrive` 基準に変更(33 ファイル。PowerShell 実行・構文確認は未実施)。`build/*/test-signing/` は CI が作り直す
+- [x] 2026-11-20: hayato41200 の 2 リポジトリを `reference/hayato41200/`(無改変スナップショット)と `build/HAC-001/hayato41200/`(kits の再配布用の写し)に取り込み(上流が非公開になるため)。実機結果が詰まっているのは `Windows-for-Switch-Drivers/kits/Switch-Gpu/`(`COMPARE-B3c-ja.md`)
+- [ ] 未対応: TegraGpu の PDE(64KiB 構成 `(5<<32)` と hayato41200 の 128KiB 構成 `(3<<32)`)と、SMMU 前提(GPU アドレス bit34 を立てない)の照合。どちらも実機で確認してから

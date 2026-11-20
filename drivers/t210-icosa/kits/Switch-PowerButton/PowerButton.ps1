@@ -9,7 +9,7 @@
   -Mode SetAction : -Action Display | Shutdown | Sleep | Nothing  (AC and battery, current power plan)
   -Mode Remove    : remove the driver package
 
-  Log: C:\SwitchWOA-PowerButton.txt
+  Log: %SystemDrive%\SwitchWOA-PowerButton.txt
 #>
 param(
   [Parameter(Mandatory = $true)][ValidateSet('Install', 'Status', 'Watch', 'SetAction', 'Remove')][string]$Mode,
@@ -23,7 +23,7 @@ if (-not (Test-Path (Join-Path $Sys 'pnputil.exe'))) { $Sys = Join-Path $env:win
 $Pnputil = Join-Path $Sys 'pnputil.exe'
 $Powercfg = Join-Path $Sys 'powercfg.exe'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Log = 'C:\SwitchWOA-PowerButton.txt'
+$Log = "$env:SystemDrive\SwitchWOA-PowerButton.txt"
 $Key = 'HKLM:\SYSTEM\CurrentControlSet\Services\switchpwrbtn\Parameters'
 function Log([string]$s) { Write-Host $s; Add-Content -Path $Log -Value $s -Encoding UTF8 }
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)

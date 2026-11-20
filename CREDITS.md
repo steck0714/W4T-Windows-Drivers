@@ -62,6 +62,7 @@
 - 統合・整理、HWID/DSDT 静的検査、windows-switch 互換メモ、電源ボタン長押し(HoldSasMs)の移植、Erista GPU の取り込みと GPCPLL ロック検出修正、電源コールバック検査（Claude による作業。ユーザー steck0714 の指示と所有物に基づく）。
 
 - 2026-11-19: ファームウェアを「ビルドに入れず、あとから読み込む」方式に変更。`tools/fwfetch/`(利用者自身の SD からファームウェアを取り出して照合・配置するツール)は、Switchroot(L4T / Android 系)のファームウェア取得の仕組みが元(Switchroot: https://gitlab.com/switchroot 、ミラー https://github.com/switchroot 。単体のリポジトリは無く、どのリポジトリのどのスクリプトかは未特定。ユーザーの申告に基づく)。このリポジトリの Rust 版への書き直しと拡張は steck0714 ([steck0714/W4T-Windows-Drivers](https://github.com/steck0714/W4T-Windows-Drivers))。`fwfetch --deploy-drivers`、GPU プローブ/レンダー INF からのファームウェア同梱の除去、Erista/Lite の GPU ワークフローで `.sys` を常にビルド・署名する変更、起動時タスクの `-DriverDir` 対応を追加(Claude による作業、ユーザー steck0714 の指示)。
+- 2026-11-20: `reference/hayato41200/`(hayato41200/Windows-for-Switch `2e818b8` と Windows-for-Switch-Drivers `28ff74c` の全体を、上流のまま無改変でスナップショット。GPL-2.0)と、`build/HAC-001/hayato41200/`(Drivers の `kits/` の再配布用の写し。上流の `.cer` は除外)を追加。上流が頻繁に非公開になるため(Claude による作業。ユーザー steck0714 の指示)。
 
 ## 含めないもの
 Broadcom ファームウェア、NVIDIA の GPU / XUSB ファームウェア、`bl31.bin`、秘密鍵。ファームウェアは `tools/fwfetch/` が利用者の実機（Switchroot を入れた SD）から取り出す。ビルド済みの `.sys` / `.exe` は 2026-11-18 から `build/` に置いてよい。
@@ -86,3 +87,4 @@ Broadcom ファームウェア、NVIDIA の GPU / XUSB ファームウェア、`
 | KMDF / NetAdapterCx の参照（コードなし） | [microsoft/Windows-Driver-Frameworks](https://github.com/microsoft/Windows-Driver-Frameworks)、[microsoft/Network-Adapter-Class-Extension](https://github.com/microsoft/Network-Adapter-Class-Extension)（Microsoft） | MIT |
 | SwitchWOA の ACPI 前提、Vulkan 進捗 | [ruje0504-2/winx](https://github.com/ruje0504-2/winx)（ruje0504-2） | 各リポジトリに従う |
 | OLED 上流のビルド時取得物（本リポジトリには含めない） | [mstorsjo/llvm-mingw](https://github.com/mstorsjo/llvm-mingw)、[KhronosGroup/Vulkan-Headers・Vulkan-Loader](https://github.com/KhronosGroup)、[PowerShell/Win32-OpenSSH](https://github.com/PowerShell/Win32-OpenSSH) | 各自のライセンス |
+| 上流スナップショット(無改変) | `reference/hayato41200/`、`build/HAC-001/hayato41200/` | hayato41200/Windows-for-Switch `2e818b8`、hayato41200/Windows-for-Switch-Drivers `28ff74c` | hayato41200 / GPL-2.0(各 `LICENSE`、ファイルごとの SPDX) |

@@ -13,7 +13,7 @@
                   from a Switchroot Linux or Android install) to System32\drivers\SwitchWOA, where
                   switchbt 1.0.0.8+ loads it at start. The file is Broadcom's and is not shipped here.
 
-  Log: C:\SwitchWOA-Bluetooth.txt
+  Log: %SystemDrive%\SwitchWOA-Bluetooth.txt
 #>
 param([Parameter(Mandatory = $true)][ValidateSet('Install', 'Status', 'Remove', 'Retry', 'Firmware')][string]$Mode,
       [string]$Path)
@@ -24,7 +24,7 @@ $Sys = Join-Path $env:windir 'Sysnative'
 if (-not (Test-Path (Join-Path $Sys 'pnputil.exe'))) { $Sys = Join-Path $env:windir 'System32' }
 $Pnputil = Join-Path $Sys 'pnputil.exe'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Log = 'C:\SwitchWOA-Bluetooth.txt'
+$Log = "$env:SystemDrive\SwitchWOA-Bluetooth.txt"
 $Key = 'HKLM:\SYSTEM\CurrentControlSet\Services\switchbt\Parameters'
 function Log([string]$s) { Write-Host $s; Add-Content -Path $Log -Value $s -Encoding UTF8 }
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)

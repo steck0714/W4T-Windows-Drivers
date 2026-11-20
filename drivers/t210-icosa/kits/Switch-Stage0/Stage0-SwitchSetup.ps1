@@ -8,7 +8,7 @@
                   that it wrote its registry value, stop and remove it again.
   -Mode Status  : show test-signing / certificate / SwoaHello state only.
 
-  Log: C:\SwitchWOA-Stage0.txt
+  Log: %SystemDrive%\SwitchWOA-Stage0.txt
 #>
 param([Parameter(Mandatory = $true)][ValidateSet('Prepare', 'Hello', 'Status')][string]$Mode)
 
@@ -21,7 +21,7 @@ $Sys = Join-Path $env:windir 'Sysnative'
 if (-not (Test-Path (Join-Path $Sys 'bcdedit.exe'))) { $Sys = Join-Path $env:windir 'System32' }
 $Bcdedit = Join-Path $Sys 'bcdedit.exe'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Log = 'C:\SwitchWOA-Stage0.txt'
+$Log = "$env:SystemDrive\SwitchWOA-Stage0.txt"
 function Log([string]$s) { Write-Host $s; Add-Content -Path $Log -Value $s -Encoding UTF8 }
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) { Write-Host 'Run this from an elevated (Administrator) PowerShell.'; exit 1 }

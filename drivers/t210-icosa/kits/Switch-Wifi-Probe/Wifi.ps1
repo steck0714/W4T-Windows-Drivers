@@ -13,7 +13,7 @@
   The firmware is not included (it may not be redistributed): copy it from the
   Linux on your Switch (/lib/firmware/brcm/) or from linux-firmware.
 
-  Log: C:\SwitchWOA-Wifi.txt
+  Log: %SystemDrive%\SwitchWOA-Wifi.txt
 #>
 param([Parameter(Mandatory = $true)][ValidateSet('Install', 'Status', 'Retry', 'Remove', 'Firmware')][string]$Mode)
 
@@ -23,7 +23,7 @@ $Sys = Join-Path $env:windir 'Sysnative'
 if (-not (Test-Path (Join-Path $Sys 'pnputil.exe'))) { $Sys = Join-Path $env:windir 'System32' }
 $Pnputil = Join-Path $Sys 'pnputil.exe'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Log = 'C:\SwitchWOA-Wifi.txt'
+$Log = "$env:SystemDrive\SwitchWOA-Wifi.txt"
 $Key = 'HKLM:\SYSTEM\CurrentControlSet\Services\switchwprobe\Parameters'
 $Hwid = 'ACPI\SWOA0D01'
 function Log([string]$s) { Write-Host $s; Add-Content -Path $Log -Value $s -Encoding UTF8 }

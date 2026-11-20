@@ -11,7 +11,7 @@
   -Mode Watch    : clock, voltage and temperature every second (Ctrl+C to stop)
   -Mode Remove   : remove the driver package (the driver puts the default clock back)
 
-  Log: C:\SwitchWOA-CpuClock.txt
+  Log: %SystemDrive%\SwitchWOA-CpuClock.txt
 #>
 param(
   [Parameter(Mandatory = $true)][ValidateSet('Install', 'Status', 'Set', 'Bench', 'Test', 'Watch', 'Remove')][string]$Mode,
@@ -24,7 +24,7 @@ $Sys = Join-Path $env:windir 'Sysnative'
 if (-not (Test-Path (Join-Path $Sys 'pnputil.exe'))) { $Sys = Join-Path $env:windir 'System32' }
 $Pnputil = Join-Path $Sys 'pnputil.exe'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Log = 'C:\SwitchWOA-CpuClock.txt'
+$Log = "$env:SystemDrive\SwitchWOA-CpuClock.txt"
 $Key = 'HKLM:\SYSTEM\CurrentControlSet\Services\switchcpu\Parameters'
 function Log([string]$s) { Write-Host $s; Add-Content -Path $Log -Value $s -Encoding UTF8 }
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)

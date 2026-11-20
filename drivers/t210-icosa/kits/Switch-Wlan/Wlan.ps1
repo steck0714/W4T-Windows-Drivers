@@ -11,7 +11,7 @@
   -Mode Retry   : clear Busy (left by an attempt that stopped Windows), restart the device
   -Mode Remove  : remove switchwlan
 
-  Log: C:\SwitchWOA-Wlan.txt
+  Log: %SystemDrive%\SwitchWOA-Wlan.txt
 #>
 param([Parameter(Mandatory = $true)][ValidateSet('Install', 'Status', 'Retry', 'Remove')][string]$Mode)
 
@@ -22,7 +22,7 @@ if (-not (Test-Path (Join-Path $Sys 'pnputil.exe'))) { $Sys = Join-Path $env:win
 $Pnputil = Join-Path $Sys 'pnputil.exe'
 $Netsh = Join-Path $Sys 'netsh.exe'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Log = 'C:\SwitchWOA-Wlan.txt'
+$Log = "$env:SystemDrive\SwitchWOA-Wlan.txt"
 $Key = 'HKLM:\SYSTEM\CurrentControlSet\Services\switchwlan\Parameters'
 $Hwid = 'ACPI\SWOA0D01'
 $FwDir = Join-Path $Sys 'drivers\switchwifi'
