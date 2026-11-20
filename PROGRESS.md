@@ -45,4 +45,5 @@
 - [x] 2026-11-20: `upstream-src/desktop` の boot/setup 系・w32/w64・各 ps1 も同様に変更(上流とは意図して不一致。`UPSTREAM-SOURCE.md` 参照)。boot.cmd / setup.cmd も findagent.cmd 経由(D〜K の固定リストをやめた)
 - [x] 2026-11-20: `tools/testsign`・各 kits(t210-icosa / t214-hoag / switchdrivers-kits)のログと Battery のレポート、Wlan の trace の出力先を `%SystemDrive%` / `$env:SystemDrive` 基準に変更(33 ファイル。PowerShell 実行・構文確認は未実施)。`build/*/test-signing/` は CI が作り直す
 - [x] 2026-11-20: hayato41200 の 2 リポジトリを `reference/hayato41200/`(無改変スナップショット)と `build/HAC-001/hayato41200/`(kits の再配布用の写し)に取り込み(上流が非公開になるため)。実機結果が詰まっているのは `Windows-for-Switch-Drivers/kits/Switch-Gpu/`(`COMPARE-B3c-ja.md`)
-- [ ] 未対応: TegraGpu の PDE(64KiB 構成 `(5<<32)` と hayato41200 の 128KiB 構成 `(3<<32)`)と、SMMU 前提(GPU アドレス bit34 を立てない)の照合。どちらも実機で確認してから
+- [x] 2026-11-20: 照合用の上流を `reference/` に無改変で追加: `l4t-nvgpu-extra/`(fb_gm20b.c・flcn_gk20a.c・mm_gk20a.c ほか)、`linux-nouveau-v6.12/`(`vmmgf100.c` の `gf100_vmm_pgd_pde()` ほか)、`ruje0504-2/mesa-switch-woa/tegra-x1-wddm/`(`b1596cc`)、`ruje0504-2/winx/`(バイナリ除く)
+- [ ] 未対応: TegraGpu の PDE(64KiB 構成 `(5<<32)` と hayato41200 の 128KiB 構成 `(3<<32)`)と、SMMU 前提(GPU アドレス bit34 を立てない)の照合。原典は `reference/linux-nouveau-v6.12/`・`reference/l4t-nvgpu-extra/` に揃った。照合してから(実機での確認も別に必要)
