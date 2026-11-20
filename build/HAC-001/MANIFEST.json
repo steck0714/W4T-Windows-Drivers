@@ -6,12 +6,12 @@
   {
    "path": "SwitchWOA-Test.cer",
    "size": 804,
-   "sha256": "af5cf7e36a78e6bcd455932406f77f81da670d099e6181018e787b0b82ff5c49"
+   "sha256": "da54fe99705e5fbf9615de67b63cbc3eb83fce89b6ebeb02f4076effaf46a8c1"
   },
   {
    "path": "drivers/Switch-Audio/switchaudio.cat",
    "size": 2443,
-   "sha256": "e0ae156f145814182e995736d76dba9eb5bc9c3eca4b0aa50c4ae75116ded3e0"
+   "sha256": "7d734d21309a1e7084cbf5471a0da8a88029787b133d6f6e2eda818bd0868b4d"
   },
   {
    "path": "drivers/Switch-Audio/switchaudio.inf",
@@ -25,12 +25,12 @@
   {
    "path": "drivers/Switch-Audio/switchaudio.sys",
    "size": 23464,
-   "sha256": "c8d068301fa2216cbe215aebb50021ac2958e1e2c8db3e2a4232fa296cabd188"
+   "sha256": "11025881faba3483760e106f396b6cf68888b5795f86cc4371a1cccec8ab793f"
   },
   {
    "path": "drivers/Switch-Battery/switchbattery.cat",
    "size": 2459,
-   "sha256": "795922776961e23dcd719b8dbeea573b48abeef04e6ec6942e5b75a2995647f2"
+   "sha256": "d734f4566e40493d0c2d31b7db32625488c55ff998b2a459d43b182351593d77"
   },
   {
    "path": "drivers/Switch-Battery/switchbattery.inf",
@@ -44,12 +44,12 @@
   {
    "path": "drivers/Switch-Battery/switchbattery.sys",
    "size": 27560,
-   "sha256": "ee8b6021a7865ce6ff807fbe9752ab1e08a68b330869391fd225ddb5ae784b7c"
+   "sha256": "9239c706c5ed399d122b63e03f9c270349757391591e0d55d015e6a647345304"
   },
   {
    "path": "drivers/Switch-Bluetooth/switchbt.cat",
    "size": 2419,
-   "sha256": "ecd30890132979980f79fabfd02e75b46869aab02195f5ac54bea07782bfc970"
+   "sha256": "9313122f57d3e873eb1ec8bfea37d4679d4d962d75a97268412aca04f82b2d61"
   },
   {
    "path": "drivers/Switch-Bluetooth/switchbt.inf",
@@ -63,12 +63,12 @@
   {
    "path": "drivers/Switch-Bluetooth/switchbt.sys",
    "size": 43432,
-   "sha256": "13b1f541dab6c90d1836c78b5df943abc7c9cbfc7511d8282af3bf7d33868443"
+   "sha256": "b457350957ea4e2a54798fd51f9049616e3d22246491db7ad968012771e36802"
   },
   {
    "path": "drivers/Switch-CpuClock/switchcpu.cat",
    "size": 2427,
-   "sha256": "03a0112c4f9e331bb67fca7b2daca38928e197447e9c239619adc3261e998839"
+   "sha256": "c01a04df2133b68a284ced2316031ca3dfa31920c486ba12ec687d1c99743db0"
   },
   {
    "path": "drivers/Switch-CpuClock/switchcpu.inf",
@@ -82,12 +82,12 @@
   {
    "path": "drivers/Switch-CpuClock/switchcpu.sys",
    "size": 23464,
-   "sha256": "0659bb1e893fb3fa3ea8e78ee3293802dc184877845819291a6fddd13483e590"
+   "sha256": "21f15598e733a9adaa6609fc33295c86c1fbfb2fb0a786439f65c8b8df66ddc4"
   },
   {
    "path": "drivers/Switch-Fan/switchfan.cat",
    "size": 2427,
-   "sha256": "f54232828ed6d4bd4fc927c0104505916d2c686be991ccaca2e25b91628f6e40"
+   "sha256": "9715ec10efcf946c3617313f960ab09a6c7e4c1ff329d9f1f9e12369d122eef4"
   },
   {
    "path": "drivers/Switch-Fan/switchfan.inf",
@@ -101,12 +101,12 @@
   {
    "path": "drivers/Switch-Fan/switchfan.sys",
    "size": 18344,
-   "sha256": "8cb82a222f98b61f02f403ebdd9d95be1b5df48c279bc7d086838c3a913400c4"
+   "sha256": "a521b5d67565266b5f18bb0b42ae1d328de3a13471d1a9deadff6f90321c589c"
   },
   {
    "path": "drivers/Switch-PowerButton/switchpwrbtn.cat",
    "size": 2451,
-   "sha256": "3a1d9f9d4efcb78ba10b6e040af01422b000fd1ebb2429cfea084524a23410a9"
+   "sha256": "08a0cb299072a4450c33aca06a364a4a0e2e127243ca251ce5e273541687924d"
   },
   {
    "path": "drivers/Switch-PowerButton/switchpwrbtn.inf",
@@ -120,12 +120,12 @@
   {
    "path": "drivers/Switch-PowerButton/switchpwrbtn.sys",
    "size": 25000,
-   "sha256": "6f6fc65a5e110b5d6a64d885e6e4395dd8629ef1293e70b5c602001c337cf532"
+   "sha256": "334ee0955b46954d778648daed445127095db755250c138dd2f6b641b6b3e8f5"
   },
   {
    "path": "drivers/Switch-Rtc/switchrtc.cat",
    "size": 2427,
-   "sha256": "407ca9ba5b255c829f6825c5eb851429f6014dcce0b3eb766fd8a6aa7a4cea2e"
+   "sha256": "ccc4b48ce76c5b379dc16e5f4d9b1128cd202f5186d41733199a898ee124db0e"
   },
   {
    "path": "drivers/Switch-Rtc/switchrtc.inf",
@@ -139,12 +139,12 @@
   {
    "path": "drivers/Switch-Rtc/switchrtc.sys",
    "size": 16808,
-   "sha256": "c9595e8bfc90d3b73a91ceed7ee8c13ac066d1b20baa6c4a1f3f1a6fe710ca1c"
+   "sha256": "30669b7011aad5832f81d1bd4214e419621ebca561458ae1ef1fc4783f91ed10"
   },
   {
    "path": "drivers/Switch-Sd/nvtsdhc.cat",
    "size": 2411,
-   "sha256": "2b1f94e5451cfaae8b59e46cba3e7ea68eab3b51a1c6d7cb8c5f4dbca2b12952"
+   "sha256": "daf80ba3259dceafb5c541a278d1ecaab949a0de3ff4aee2da1e997577e1f779"
   },
   {
    "path": "drivers/Switch-Sd/nvtsdhc.inf",
@@ -158,12 +158,12 @@
   {
    "path": "drivers/Switch-Sd/nvtsdhc.sys",
    "size": 18856,
-   "sha256": "605bf501cb2af506e91f83ed68bb991116c80fd1b53eb6098ed8c4a7bd6f8dad"
+   "sha256": "110771b3deaa1f12cf663b619d8808b7a3d330d545ebb2b08a39bb75f75c4259"
   },
   {
    "path": "drivers/Switch-Sensor/switchsensor.cat",
    "size": 2451,
-   "sha256": "b50cb8f66d7aa8677f16b2ffb17bbf81af112898dff1aea685203dae59c1facd"
+   "sha256": "596231143608271a6be1105df0583ac18db5910682b96f6ee20bb5aaa6322039"
   },
   {
    "path": "drivers/Switch-Sensor/switchsensor.inf",
@@ -177,17 +177,17 @@
   {
    "path": "drivers/Switch-Sensor/switchsensor.sys",
    "size": 20392,
-   "sha256": "3ddca1674d3e180ec53ee0610ef76759bb312948c621c9a5fa8a942826b4855c"
+   "sha256": "8d2f2f686e52fb911901ad0859087e29e0c9e3ba5bace22a262d4374228bcedf"
   },
   {
    "path": "drivers/Switch-Stage0/swoahello.sys",
    "size": 9128,
-   "sha256": "819eda55978c97db5bdb2b093c73c56be7a5ac317943c7aefa487943fc23f663"
+   "sha256": "3cf8a45f5ee6137461bf4732f526e8ddd09ca2bead2d5a1d7ed5d5609affb7d6"
   },
   {
    "path": "drivers/Switch-Stage1/tegra210gpio.cat",
    "size": 2451,
-   "sha256": "1f9dd4d6bada3c178ff48bbe5fbb1cdb0d78205a5b2a2814d81c1599215bfd4a"
+   "sha256": "e61fdbc50d7718b1b675dfbd1151e30c528fca8f55ae75f224f88de70696dae6"
   },
   {
    "path": "drivers/Switch-Stage1/tegra210gpio.inf",
@@ -201,12 +201,12 @@
   {
    "path": "drivers/Switch-Stage1/tegra210gpio.sys",
    "size": 16296,
-   "sha256": "2ca220d48cff6addcca617edee43bb850bed412680010469012778df7f893062"
+   "sha256": "ccc6ae6dc0d79fa068b1389a16144da48c5eadf23bb62e4a38d3cb3747bcdb1e"
   },
   {
    "path": "drivers/Switch-Stage3/tegra210i2c.cat",
    "size": 2443,
-   "sha256": "c4aa35359ce26a94ba921f3f46ebe3d79afcc291047bcb377cf541e3268f7d6d"
+   "sha256": "5423105d5424e1ccc0578dcc9c83b227f5faf6e8cdfd8f2e5573c1cd49beb91f"
   },
   {
    "path": "drivers/Switch-Stage3/tegra210i2c.inf",
@@ -220,12 +220,12 @@
   {
    "path": "drivers/Switch-Stage3/tegra210i2c.sys",
    "size": 19880,
-   "sha256": "a48cba854d48a15024dddc2a7b3dde0d09df0eed52429daed1dd9217578ab4df"
+   "sha256": "00ccf3026aad4b42a1f69e4f81cc3ed4b701aa47d7e46284e5f8fefbc0801c5e"
   },
   {
    "path": "drivers/Switch-Touch/switchtouch.cat",
    "size": 2443,
-   "sha256": "61714c3fd62ed01966f3ead55e0b04a3f8528b0ee09b78a546a8ffda492f4731"
+   "sha256": "12d10a270ee15c0cbf04ab5d2957c3b82e95927465a08496bd8e876748cb9f23"
   },
   {
    "path": "drivers/Switch-Touch/switchtouch.inf",
@@ -239,17 +239,17 @@
   {
    "path": "drivers/Switch-Touch/switchtouch.sys",
    "size": 27560,
-   "sha256": "83cd900e225ce31d05f56fe4d074faef2dd9ce554d83a31d85865f14700d7fa9"
+   "sha256": "7bbf2906e38c847de729d45f320bf31ea7076ace21584710b3258c31f09130a4"
   },
   {
    "path": "drivers/Switch-UsbDiag/swoadiag.sys",
    "size": 13736,
-   "sha256": "99f53f58ed576fae3f56add41a0a20f6e99bf845ddd5c0db424436650a15f697"
+   "sha256": "f7bc37b14d1fc4c713d80e32cc12ff68fe0c0b7e8683224279dd080bdd5ed03a"
   },
   {
    "path": "drivers/Switch-Wifi-Probe/switchwprobe.cat",
    "size": 2451,
-   "sha256": "8f31655e23cafc6d07df26d6763eba1a4c810512e1c50304e2a3b0d75742d936"
+   "sha256": "4f193169208c9709140d4dc100d121f17ba30e43b135bb06505bb8086d9d4469"
   },
   {
    "path": "drivers/Switch-Wifi-Probe/switchwprobe.inf",
@@ -263,12 +263,12 @@
   {
    "path": "drivers/Switch-Wifi-Probe/switchwprobe.sys",
    "size": 61352,
-   "sha256": "c0cb4e750c8cce8c5b20db963a5a302781932e619070853a47895ffaa4482bfe"
+   "sha256": "fe601fca4983eaeed9be76cf44aa3d114955573dba7f46f8a918d2687761d7db"
   },
   {
    "path": "drivers/Switch-Wlan/switchwlan.cat",
    "size": 2435,
-   "sha256": "74eb4989a167af4732c2be260d445fdfdd29f7084ca43ebc4ad8911abc7b6ab7"
+   "sha256": "d50db01367f5b2c1d1bb77ca6457419219c01b513c9e33ece611fbcb615de1fa"
   },
   {
    "path": "drivers/Switch-Wlan/switchwlan.inf",
@@ -282,7 +282,7 @@
   {
    "path": "drivers/Switch-Wlan/switchwlan.sys",
    "size": 154024,
-   "sha256": "b60db1f6c88e1bb698314bb0918c43b1c64a6ba9d278e7b90e13fe75da0ede91"
+   "sha256": "d7eff390ac860e3979898a491de31bf4feba281ff4d6386d803b30a44f828e75"
   }
  ]
 }

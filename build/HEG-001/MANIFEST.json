@@ -6,17 +6,17 @@
   {
    "path": "SwitchWOA-Test.cer",
    "size": 804,
-   "sha256": "c1af134c9cff2ddaffaf02b5cd10d800958a1d54f4e41b74c99d33f995c4e33f"
+   "sha256": "7284fc4b8725b38afc663bca72f5214d1cb4f845d70e343ab236e81325b1701e"
   },
   {
    "path": "drivers/agent/arm64/swbatt.sys",
    "size": 40360,
-   "sha256": "8b9739679dd32312db78ae51a9aa70fff73d5e0cd671697c6139beabbdd64911"
+   "sha256": "6a406c3631014b895d6bc65fe44672d78373741b8e71edbd39ec73a7cba41ecf"
   },
   {
    "path": "drivers/agent/arm64/swhid.sys",
    "size": 28584,
-   "sha256": "c59c0c90c3c3d83a193b133d9a8702801e304e952954411b5feab272b4240743"
+   "sha256": "df35841bfff32da242e726e84e4ba9da4e20269da0aeab7a9a86ee6e9c1cb4e2"
   },
   {
    "path": "drivers/agent/audio/switchaudio.inf",
@@ -30,7 +30,7 @@
   {
    "path": "drivers/agent/audio/switchaudio.sys",
    "size": 27048,
-   "sha256": "7b0da704aae5c8024405db1e12ca09039dc350a3fd53ed79230abfd4d2f83441"
+   "sha256": "6d8a058ad5b81d761c1ab95eecf364d95b6eae72fe93cdc60522aec8b473f88e"
   },
   {
    "path": "drivers/agent/bt/switchbt.inf",
@@ -44,7 +44,7 @@
   {
    "path": "drivers/agent/bt/switchbt.sys",
    "size": 43432,
-   "sha256": "f8ce492f80d3231e83b08be9ed8c8daa0ebc50f67c82627bab31823adba493ef"
+   "sha256": "f9116b6ac812e85c96291b10fc9e6de98f5d87143fd5f46a60d36983c433e760"
   },
   {
    "path": "drivers/agent/wifi/switchwifi.inf",
@@ -58,7 +58,7 @@
   {
    "path": "drivers/agent/wifi/switchwifi.sys",
    "size": 178088,
-   "sha256": "5391ec5ff3e79565701c2dc662e9c3f9f68f4eaac401f8602a3a78c162d6d5f4"
+   "sha256": "c55781d9d627bc3c214486f210345a3eb50a5add16af6396301eda7e38d45cf7"
   }
  ]
 }
