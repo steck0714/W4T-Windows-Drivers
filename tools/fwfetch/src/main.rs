@@ -10,23 +10,27 @@ mod part;
 mod reader;
 mod run;
 mod util;
+mod winvol;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 const HELP: &str = "\
-fwfetch 1.0 - read firmware you may not redistribute from YOUR OWN Switch SD card (read-only), verify, stage.
+fwfetch 1.1 - read firmware you may not redistribute from YOUR OWN Switch SD card (read-only), verify, stage.
 
 USAGE: fwfetch [OPTIONS]
   --profile <aula|lite|erista|all>   what to collect (default: aula)
   --search-root <DIR>                folder to search (FAT32 'switchroot' parent, rootfs copy, kernel tree); repeatable
   --disk <FILE|\\\\.\\PhysicalDriveN>    raw disk / partition image to scan for an ext4 volume (read-only); repeatable
-  --auto                             Windows: also every ready drive letter, and (administrator) every physical disk
+  --auto                             Windows: also every ready drive letter, every volume WITHOUT a drive letter (the Switch's FAT32
+                                     'switchroot' partition often has none), and (administrator) every physical disk
   --out-dir <DIR>                    staging directory (default %LOCALAPPDATA%\\W4T\\fw-cache). Refused inside a git work tree
   --deploy <DIR>                     copy the windows-switch files into this boot-partition root
-  --deploy-gpu <DIR>                 copy the GPU firmware into this directory
-  --deploy-drivers <DIR>             copy the Wi-Fi / Bluetooth firmware to the places the installed drivers read it from
-                                     (DIR = %SystemRoot%\\System32\\drivers -> SwitchWOA\\..., switchwifi\\...)
+  --deploy-gpu <DIR|auto>            copy the GPU firmware into this directory
+                                     auto = <SystemRoot>\\System32\\drivers\\TegraGpu of the RUNNING Windows (any drive letter)
+  --deploy-drivers <DIR|auto>        copy the Wi-Fi / Bluetooth firmware to the places the installed drivers read it from
+                                     (DIR = <SystemRoot>\\System32\\drivers -> SwitchWOA\\..., switchwifi\\...; auto = that folder)
+  Paths may contain %VAR% (e.g. %SystemRoot%). Windows on a Switch is rarely on C: - use auto, do not type a letter.
   --require-known-hash               refuse files that have no published SHA-256
   --manifest <FILE>                  use this manifest instead of the built-in one
   --quiet                            print only warnings and errors
@@ -71,12 +75,12 @@ fn parse() -> Result<Option<run::Opts>, String> {
                 return Ok(None);
             }
             "--profile" => o.profile = val("--profile")?,
-            "--out-dir" => o.out_dir = Some(PathBuf::from(val("--out-dir")?)),
+            "--out-dir" => o.out_dir = Some(winvol::resolve_dir(&val("--out-dir")?, None)?),
             "--search-root" => o.search_roots.push(PathBuf::from(val("--search-root")?)),
             "--disk" => o.disks.push(PathBuf::from(val("--disk")?)),
-            "--deploy" => o.deploy = Some(PathBuf::from(val("--deploy")?)),
-            "--deploy-gpu" => o.deploy_gpu = Some(PathBuf::from(val("--deploy-gpu")?)),
-            "--deploy-drivers" => o.deploy_drivers = Some(PathBuf::from(val("--deploy-drivers")?)),
+            "--deploy" => o.deploy = Some(winvol::resolve_dir(&val("--deploy")?, None)?),
+            "--deploy-gpu" => o.deploy_gpu = Some(winvol::resolve_dir(&val("--deploy-gpu")?, Some("TegraGpu"))?),
+            "--deploy-drivers" => o.deploy_drivers = Some(winvol::resolve_dir(&val("--deploy-drivers")?, Some(""))?),
             "--manifest" => o.manifest = Some(PathBuf::from(val("--manifest")?)),
             "--auto" => o.auto = true,
             "--require-known-hash" => o.require_known_hash = true,

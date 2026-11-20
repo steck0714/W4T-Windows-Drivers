@@ -35,3 +35,10 @@
 ## 注意
 - 取得できなかったもの: switchroot/* の一部と CTCaer/switch-l4t-kernel-nvdisplay(認証要求)。
 - 配布不可: NVIDIA/Broadcom ファーム、bl31.bin、sc7entry/exit.bin。
+
+## 2026-11-20: fwfetch のドライブ文字まわりを修正(Switch の Windows は C: とは限らない)
+- [x] `--deploy-gpu auto` / `--deploy-drivers auto` = 動いている Windows の `%SystemRoot%\System32\drivers[\TegraGpu]`。`%SystemRoot%` が無ければエラー(C: に決め打ちしない)。パスの `%VAR%` 展開(未定義はエラー)
+- [x] `--auto` が、ドライブ文字の無いボリューム(FAT32 `switchroot` 領域など)も `mountvol` の一覧から `\\?\Volume{GUID}\` で探す。探索先の重複を大文字小文字・末尾 `\` 無視で除去
+- [x] `Install-FwFetchStartup.ps1` はドライブ文字をタスクに書かない(`auto` で保存、スクリプトは実行時に `$env:ProgramData` から探す)。`FwFetchStartup.ps1` は古い文字のパスをいまの Windows に読み替え、存在しないドライブにはフォルダを作らずに止まる
+- [x] Rust 単体テスト 5 件 + `run_tests.py` 5 件追加(Linux で全通過)。**Windows 実機・ARM64・PowerShell は未確認**。`build/*/fwfetch/` は CI が作り直す(この修正では触っていない)
+- [ ] 未対応: `drivers/t214-aula` の `w64.cmd` / `swagentsvc.c` / `swbatt.c`、`tools/testsign`・各 kits のログ(`C:\…`)は C: 前提のまま

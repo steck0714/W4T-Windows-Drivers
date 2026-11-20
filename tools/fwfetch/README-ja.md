@@ -10,15 +10,28 @@ Switchroot 系のやり方に倣い、**利用者自身の SD カード(Switchro
 
 ```
 fwfetch --profile aula|lite|erista|all  [--auto] [--search-root DIR]... [--disk FILE|\\.\PhysicalDriveN]...
-        [--out-dir DIR] [--deploy BOOT_ROOT] [--deploy-gpu DIR] [--require-known-hash] [--manifest FILE] [--quiet]
+        [--out-dir DIR] [--deploy BOOT_ROOT] [--deploy-gpu DIR|auto] [--deploy-drivers DIR|auto] [--require-known-hash] [--manifest FILE] [--quiet]
 ```
 
-例（Windows、SD を挿した管理者ターミナル。`E:` は windows-switch を展開したブート領域）:
+例（Windows、SD を挿した管理者ターミナル。`E:` は windows-switch を展開したブート領域。**ドライブ文字は環境しだい**なので自分の文字に読み替える）:
 
 ```
 fwfetch.exe --profile aula --auto --deploy E:\
-fwfetch.exe --profile erista --auto --deploy-gpu C:\Windows\System32\drivers\TegraGpu
+fwfetch.exe --profile erista --auto --deploy-gpu auto
 ```
+
+### ドライブ文字について（2026-11-20 修正）
+
+Switch の Windows は SD カード上にあるので、**システムドライブが C: とは限らない**（逆に C: のほうが珍しいこともある）。次の前提を外した。
+
+- `--deploy-gpu auto` / `--deploy-drivers auto` は、**いま動いている Windows の `%SystemRoot%\System32\drivers[\TegraGpu]`** に置く（文字を打たない）。
+  `%SystemRoot%` が無い環境（Linux など）では `auto` は**エラー**にする（`C:` に決め打ちして別のディスクへ書くことはしない）。
+- パスには `%VAR%` が使える（例 `--deploy-gpu %SystemRoot%\System32\drivers\TegraGpu`）。**未定義の変数はエラー**（空文字にしない）。`--out-dir` / `--deploy` も同じ。`auto` は `--out-dir` / `--deploy` では使えない。
+- `--auto` は、文字が付いた全ドライブ（A:〜Z:）に加えて、**ドライブ文字が付いていないボリューム**（Switchroot の FAT32 `switchroot` 領域は文字が無いことが多い）も、
+  `mountvol.exe`（`%SystemRoot%\System32` のもの、引数なし）の一覧から `\\?\Volume{GUID}\` として探す。ログに `N volume(s) without a drive letter` と各 `search root` が出る。
+  文字の無いブート領域へ `--deploy` したいときは、その `\\?\Volume{GUID}\` をそのまま渡せる。
+- 同じ探索先（同じ文字、大文字小文字違い、末尾の `\` 違い）は 1 回だけ見る。
+- 起動タスク（下記）は、ドライブ文字をタスクに書き込まない（`-GpuDir auto -DriverDir auto`）。文字が変わっても動き続ける。
 
 - 探す場所: 各ドライブの `switchroot\*\`（bl31.bin、initramfs）、`--search-root`（rootfs のコピー、カーネルツリー）、
   ext4 パーティション（`--disk`、または `--auto` + 管理者で全物理ディスク。**読み取りのみ**）。
@@ -73,13 +86,17 @@ fwfetch.exe --profile erista --auto --deploy-gpu C:\Windows\System32\drivers\Teg
 **実機（Windows 起動時）**: `startup/Install-FwFetchStartup.ps1` を、`fwfetch.exe`（ARM64 版）と同じフォルダで、管理者 PowerShell から 1 回実行する。
 
 ```
-.\Install-FwFetchStartup.ps1 -Profile lite -GpuDir C:\Windows\System32\drivers\TegraGpu
+.\Install-FwFetchStartup.ps1 -Profile lite -GpuDir auto -DriverDir auto
 .\Install-FwFetchStartup.ps1 -Remove
 ```
 
-SYSTEM で動くスケジュールタスクが、Windows の起動 1 分後に `fwfetch --profile <p> --auto --out-dir C:\ProgramData\W4T\fw-cache` を実行する。
+`-GpuDir` / `-DriverDir` は `auto`（= いまの Windows の `System32\drivers\TegraGpu` / `System32\drivers`）を勧める。
+自分で書いたパスが**いまの Windows の `System32\drivers` 配下なら `auto` として保存**する（後で文字が変わっても追従）。
+別の文字の `…\System32\drivers` を書いた場合は、いまの Windows に読み替えて警告を出す。
+
+SYSTEM で動くスケジュールタスクが、Windows の起動 1 分後に `fwfetch --profile <p> --auto --out-dir %ProgramData%\W4T\fw-cache` を実行する（`%ProgramData%` はシステムドライブ上。タスク自身も `$env:ProgramData` から実行時にスクリプトを探す）。
 全部見つかる（終了コード 0）と印を付けて以後は何もしない。足りない（2）・エラー（1）なら次の起動でまた試す。SD には書かない。通信もしない。
-ログ: `C:\ProgramData\W4T\logs\fwfetch-startup.log`。
+ログ: `%ProgramData%\W4T\logs\fwfetch-startup.log`（先頭付近に `Windows is on <SystemRoot>; GpuDir=… DriverDir=…` が出る）。
 
 **CI（Actions）**: `.github/actions/fwfetch-import` が、非公開 zip（シークレット `FW_BUNDLE_URL`）をジョブの最初に自動で取得・展開し（`tools/ci/fw_bundle.py`。
 `..`・絶対パス・シンボリックリンク・巨大展開は拒否）、`fwfetch --search-root` で照合する。ダウンロードはこの action 側で行い、fwfetch は今までどおりオフライン。
@@ -93,7 +110,7 @@ SYSTEM で動くスケジュールタスクが、Windows の起動 1 分後に `
 
 `FwFetchStartup.ps1` は起動のたび（と毎日 03:30）、まず SD なしで次を検査する。
 
-1. キャッシュ（`C:\ProgramData\W4T\fw-cache`）の各ファイルの SHA-256 を `fw-lock.json` と照合
+1. キャッシュ（`%ProgramData%\W4T\fw-cache`）の各ファイルの SHA-256 を `fw-lock.json` と照合
 2. `-GpuDir` を渡していれば、ドライバフォルダの GPU ファイル 9 個も照合
 
 結果に応じて、

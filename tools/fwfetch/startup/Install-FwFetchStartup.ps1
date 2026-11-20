@@ -3,19 +3,24 @@
   Registers a scheduled task that runs FwFetchStartup.ps1 at every Windows start (as SYSTEM), so the firmware that cannot
   be shipped with the drivers is loaded from your own SD card automatically. Run once, in an administrator PowerShell.
 
-  The files stay where they are: this script copies fwfetch.exe + FwFetchStartup.ps1 to C:\ProgramData\W4T\fwfetch
+  The files stay where they are: this script copies fwfetch.exe + FwFetchStartup.ps1 to <ProgramData>\W4T\fwfetch
   (the task must not depend on a folder that may disappear), and the task runs them from there.
 
+  Windows on a Switch is on the SD card and is often NOT C: - nothing here assumes a letter:
+    * -GpuDir auto / -DriverDir auto  = this Windows' <SystemRoot>\System32\drivers\TegraGpu / <SystemRoot>\System32\drivers (recommended).
+    * A path you type that is inside this Windows' System32\drivers is stored as 'auto', so the task keeps working if the letter changes.
+    * The task finds its own script through %ProgramData% when it runs (no letter is written into the task).
+
 .EXAMPLE
-  .\Install-FwFetchStartup.ps1 -Profile lite -GpuDir C:\Windows\System32\drivers\TegraGpu
-  .\Install-FwFetchStartup.ps1 -Profile lite -GpuDir C:\Windows\System32\drivers\TegraGpu -DriverDir C:\Windows\System32\drivers
+  .\Install-FwFetchStartup.ps1 -Profile lite -GpuDir auto
+  .\Install-FwFetchStartup.ps1 -Profile lite -GpuDir auto -DriverDir auto
   .\Install-FwFetchStartup.ps1 -Profile aula
   .\Install-FwFetchStartup.ps1 -Remove
 #>
 param(
   [ValidateSet('erista', 'lite', 'aula')][string]$Profile,
   [string]$GpuDir = '',
-  [string]$DriverDir = '',   # e.g. C:\Windows\System32\drivers (Wi-Fi / Bluetooth firmware for the SwitchWOA drivers)
+  [string]$DriverDir = '',   # 'auto' = this Windows' System32\drivers (Wi-Fi / Bluetooth firmware for the SwitchWOA drivers)
   [string]$Exe = (Join-Path $PSScriptRoot 'fwfetch.exe'),
   [switch]$Remove
 )
@@ -38,9 +43,30 @@ New-Item -ItemType Directory -Force $dest | Out-Null
 Copy-Item $Exe (Join-Path $dest 'fwfetch.exe') -Force
 Copy-Item (Join-Path $PSScriptRoot 'FwFetchStartup.ps1') $dest -Force
 
-$arg = "-NoProfile -ExecutionPolicy Bypass -File `"$dest\FwFetchStartup.ps1`" -Profile $Profile"
-if ($GpuDir) { $arg += " -GpuDir `"$GpuDir`"" }
-if ($DriverDir) { $arg += " -DriverDir `"$DriverDir`"" }
+# Paths inside THIS Windows' System32\drivers are stored as 'auto': a letter written into the task would break as soon as the SD card's
+# Windows gets another one (it is rarely C:). Anything else is kept as typed (single-quoted for PowerShell).
+$sysDrivers = Join-Path $env:SystemRoot 'System32\drivers'
+function ConvertTo-TaskDir([string]$p, [string]$sub) {
+  if (-not $p) { return '' }
+  if ($p -eq 'auto') { return 'auto' }
+  $full = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($p)).TrimEnd('\')
+  $want = $sysDrivers; if ($sub) { $want = Join-Path $sysDrivers $sub }
+  if ($full -ieq $want) { return 'auto' }
+  if ($full -imatch '^[A-Za-z]:\\.*?\\System32\\drivers(\\.*)?$' -and $full -notlike "$env:SystemRoot*") {
+    Write-Warning "'$p' is not on the Windows that is running now ($env:SystemRoot); the task will use this Windows instead ('auto')."
+    return 'auto'
+  }
+  return "'" + $full.Replace("'", "''") + "'"
+}
+$gpuArg = ConvertTo-TaskDir $GpuDir 'TegraGpu'
+$drvArg = ConvertTo-TaskDir $DriverDir ''
+
+# The task runs a PowerShell command that locates the script through $env:ProgramData at run time (no drive letter is stored).
+$cmd = '& (Join-Path $env:ProgramData ''W4T\fwfetch\FwFetchStartup.ps1'') -Profile ' + $Profile   # single quotes: $env:ProgramData must NOT be expanded now
+if ($gpuArg) { $cmd += " -GpuDir $gpuArg" }
+if ($drvArg) { $cmd += " -DriverDir $drvArg" }
+$cmd += '; exit $LASTEXITCODE'
+$arg = '-NoProfile -ExecutionPolicy Bypass -Command "' + $cmd.Replace('"', '\"') + '"'
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arg
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $trigger.Delay = 'PT1M'    # give the SD / storage stack time to come up

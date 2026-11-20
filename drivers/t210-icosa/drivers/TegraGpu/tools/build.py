@@ -260,7 +260,7 @@ FIRMWARE_NOTE = """This package contains NO NVIDIA firmware (it may not be redis
 The driver reads these nine files when it runs, from %SystemRoot%\\System32\\drivers\\TegraGpu\\ :
   """ + " ".join(gr_names + acr_names) + """
 fwfetch puts them there from your own Switchroot SD card, after the driver is installed (or before it; see the two drivers below for what a missing file does):
-  fwfetch.exe --profile <erista|lite> --auto --deploy-gpu C:\\Windows\\System32\\drivers\\TegraGpu
+  fwfetch.exe --profile <erista|lite> --auto --deploy-gpu auto
 or once: Install-FwFetchStartup.ps1 -Profile <erista|lite>   (re-checks and repairs them at every Windows start).
 tegragpuprobe: installs and loads without them; the firmware is read only when a GPU diagnostic is requested, and then the request
 stops early with the firmware status, before the GPU is powered.

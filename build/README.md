@@ -39,7 +39,7 @@ URL に置き、リポジトリのシークレット `FW_BUNDLE_URL` に入れ�
 ファームはランナーの一時領域にだけ置かれ、アーティファクトにもコミットにも入らない（`check_no_proprietary.py` が毎回確認）。
 
 実機では、各 `build/<型番>/fwfetch/` の `Install-FwFetchStartup.ps1` を管理者 PowerShell で 1 回実行すると、**Windows の起動のたびに** fwfetch が自分の SD から不足分を読み込む
-（全部見つかったら止まる。ログは `C:\ProgramData\W4T\logs\fwfetch-startup.log`）。
+（全部見つかったら止まる。ログは `%ProgramData%\W4T\logs\fwfetch-startup.log`。Switch の Windows は C: とは限らないので、`-GpuDir auto -DriverDir auto` を使う）。
 
 ## 各フォルダの中身（埋まったあと）
 

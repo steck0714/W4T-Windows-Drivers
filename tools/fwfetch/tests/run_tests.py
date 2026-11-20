@@ -55,9 +55,9 @@ def ihex(data, base=0):
     lines.append(":00000001FF")
     return "\n".join(lines) + "\n"
 
-def run(args, cwd=None, manifest=None):
+def run(args, cwd=None, manifest=None, env=None):
     extra = ["--manifest", manifest] if manifest else []
-    p = subprocess.run([BIN] + extra + args, capture_output=True, text=True, cwd=cwd)
+    p = subprocess.run([BIN] + extra + args, capture_output=True, text=True, cwd=cwd, env=env)
     return p.returncode, p.stdout + p.stderr
 
 def mkdisk(path, part_img, scheme):
@@ -174,6 +174,29 @@ try:
     gt = os.path.join(tmp, "gittree"); os.makedirs(gt); subprocess.run(["git", "init", "-q", gt], check=True)
     rc, log = run(["--profile", "lite", "--search-root", sd, "--out-dir", os.path.join(tmp, "out3c"), "--deploy-drivers", os.path.join(gt, "drivers")], manifest=mp)
     check("--deploy-drivers inside a git work tree is refused", rc == 1, log[-400:])
+
+
+    # 3c. Windows on a Switch is rarely on C: -> 'auto' / %VAR% must follow the RUNNING Windows (%SystemRoot%), whatever its letter is.
+    #     Here "G:\\Windows" is played by a temp folder; nothing may be written anywhere else.
+    sysroot = os.path.join(tmp, "G-drive", "Windows")
+    envr = dict(os.environ, SystemRoot=sysroot)
+    envr.pop("windir", None); envr.pop("WINDIR", None)
+    out3c = os.path.join(tmp, "out3c")
+    rc, log = run(["--profile", "lite", "--search-root", sd, "--disk", gpt_img, "--out-dir", out3c, "--deploy-gpu", "auto", "--deploy-drivers", "auto"], manifest=mp, env=envr)
+    tg = os.path.join(sysroot, "System32", "drivers", "TegraGpu")
+    check("--deploy-gpu auto goes to <SystemRoot>/System32/drivers/TegraGpu", rc == 0 and all(os.path.exists(os.path.join(tg, n)) and open(os.path.join(tg, n), "rb").read() == b for n, b in GPU.items()), log[-600:])
+    check("--deploy-drivers auto goes to <SystemRoot>/System32/drivers", os.path.exists(os.path.join(sysroot, "System32", "drivers", "SwitchWOA", "BCM4356A3.hcd")) and os.path.exists(os.path.join(sysroot, "System32", "drivers", "switchwifi", "brcmfmac4356-pcie.bin")))
+    out3d = os.path.join(tmp, "out3d"); gdir2 = os.path.join(tmp, "gpu-env")
+    envr2 = dict(envr, W4T_GPU_PARENT=gdir2)
+    rc, log = run(["--profile", "lite", "--search-root", sd, "--disk", gpt_img, "--out-dir", out3d, "--deploy-gpu", "%W4T_GPU_PARENT%/TegraGpu"], manifest=mp, env=envr2)
+    check("%VAR% in --deploy-gpu is expanded", rc == 0 and os.path.exists(os.path.join(gdir2, "TegraGpu", "NETB_img.bin")), log[-400:])
+    noenv = {k: v for k, v in os.environ.items() if k.lower() not in ("systemroot", "windir")}
+    rc, log = run(["--profile", "lite", "--search-root", sd, "--out-dir", os.path.join(tmp, "out3e"), "--deploy-gpu", "auto"], manifest=mp, env=noenv)
+    check("auto without a running Windows is refused (nothing is guessed, no 'C:' fallback)", rc == 1 and "SystemRoot" in log and not os.path.exists(os.path.join(tmp, "out3e", "fw-lock.json")), log[-400:])
+    rc, log = run(["--profile", "lite", "--search-root", sd, "--out-dir", os.path.join(tmp, "out3f"), "--deploy-gpu", "%NO_SUCH_VAR_W4T%/x"], manifest=mp, env=envr)
+    check("an unknown %VAR% in a path is an error, not an empty string", rc == 1 and "NO_SUCH_VAR_W4T" in log, log[-400:])
+    rc, log = run(["--profile", "lite", "--search-root", sd, "--out-dir", "auto"], manifest=mp, env=envr)
+    check("'auto' is not accepted for --out-dir", rc == 1 and "auto" in log, log[-300:])
 
     # 4. Intel-HEX route (kernel tree), no ext4 at all
     kt = os.path.join(tmp, "ktree/firmware/brcm"); os.makedirs(kt)

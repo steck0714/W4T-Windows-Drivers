@@ -4,7 +4,7 @@
 use crate::ext4::Ext4;
 use crate::manifest::{self, Entry, Expect};
 use crate::reader::Aligned;
-use crate::{ihex, initramfs, part, util};
+use crate::{ihex, initramfs, part, util, winvol};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -253,17 +253,25 @@ pub fn run(o: Opts) -> Result<i32, String> {
     }
     if o.auto {
         if cfg!(windows) {
+            // every ready drive letter - the Switch's SD partitions get arbitrary letters (Windows itself is rarely on C:)
             for l in b'A'..=b'Z' {
                 let p = PathBuf::from(format!("{}:\\", l as char));
                 if std::fs::metadata(&p).map(|m| m.is_dir()).unwrap_or(false) {
                     roots.push(p);
                 }
             }
+            // ...and volumes that have NO letter at all (typically the FAT32 'switchroot' partition), reached by volume GUID
+            let hidden = winvol::unlettered_volumes();
+            log.say(&format!("  {} volume(s) without a drive letter", hidden.len()));
+            roots.extend(hidden);
         } else {
             log.say("  (--auto lists drive letters on Windows only; give --search-root / --disk)");
         }
     }
-    roots.dedup();
+    let roots = winvol::dedup_roots(roots);
+    for r in &roots {
+        log.say(&format!("  search root: {}", r.display()));
+    }
 
     let mut vols: Vec<Volume> = Vec::new();
     for d in &o.disks {

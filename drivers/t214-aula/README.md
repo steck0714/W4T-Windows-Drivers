@@ -62,7 +62,7 @@ windows-switch の `main`(ユーザー提供の `windows-switch-main.zip`)から
 
 ```powershell
 # 本体(Windows/PC どちらでも)。SD カードを挿して管理者ターミナルで(fwfetch.exe は build-fwfetch.yml が作る。手元なら cargo build --release):
-fwfetch.exe --profile aula --auto --deploy E:\    # E: = windows-switch を展開したブート領域
+fwfetch.exe --profile aula --auto --deploy E:\    # E: = windows-switch を展開したブート領域(自分の文字に読み替える。C: とは限らない)
 ```
 
 `bl31.bin` / XUSB ファーム / BCM4356 の Wi-Fi・BT ファームを、Switchroot が入った**自分の SD** から探して照合し、
