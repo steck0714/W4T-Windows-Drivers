@@ -1,3 +1,146 @@
+diff --git a/Drivers/GpuHandoffApp/GpuHandoffApp.c b/Drivers/GpuHandoffApp/GpuHandoffApp.c
+new file mode 100644
+index 0000000..38b793c
+--- /dev/null
++++ b/Drivers/GpuHandoffApp/GpuHandoffApp.c
+@@ -0,0 +1,97 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* GpuHandoff.efi - bring-up tool for the GM20B hand-off, run from the UEFI Shell.
++ *
++ *   fs0:\> GpuHandoff.efi          read-only: print the GPU isolation state
++ *   fs0:\> GpuHandoff.efi -fix     apply gpu_handoff_prepare() and print before/after
++ *
++ * Use it while developing the Windows TegraGpu driver or the hand-off logic: no BL33
++ * rebuild is needed, and it shows exactly what the Windows driver's tg_gpu_power_up()
++ * will see (it needs RESET_X bit 24 and CLAMP bit 0 both set, otherwise it returns BUSY).
++ * The SoC (Erista T210 / Lite and OLED T210B01) is detected from HIDREV.
++ * It never powers the GPU. Not run on hardware yet.
++ */
++#include <Uefi.h>
++#include <Library/BaseLib.h>
++#include <Library/BaseMemoryLib.h>
++#include <Library/IoLib.h>
++#include <Library/UefiLib.h>
++#include <Library/UefiBootServicesTableLib.h>
++#include <Protocol/ShellParameters.h>
++#include "../../Library/PlatformBootManagerLib/GpuHandoff.h"
++
++STATIC UINT32 AppRead32 (VOID *Context, UINT32 Address)
++{
++  (VOID)Context;
++  return MmioRead32 (Address);
++}
++
++STATIC VOID AppWrite32 (VOID *Context, UINT32 Address, UINT32 Value)
++{
++  (VOID)Context;
++  MmioWrite32 (Address, Value);
++  MemoryFence ();
++}
++
++STATIC VOID AppDelay (VOID *Context, UINT32 Microseconds)
++{
++  (VOID)Context;
++  gBS->Stall (Microseconds);
++}
++
++STATIC BOOLEAN
++HasArgument (IN EFI_HANDLE ImageHandle, IN CONST CHAR16 *Name)
++{
++  EFI_SHELL_PARAMETERS_PROTOCOL  *Parameters = NULL;
++  UINTN                          Index;
++
++  if (EFI_ERROR (gBS->HandleProtocol (ImageHandle, &gEfiShellParametersProtocolGuid,
++                                      (VOID **)&Parameters)) || Parameters == NULL) {
++    return FALSE;
++  }
++  for (Index = 1; Index < Parameters->Argc; ++Index) {
++    if (StrCmp (Parameters->Argv[Index], Name) == 0) {
++      return TRUE;
++    }
++  }
++  return FALSE;
++}
++
++STATIC VOID
++PrintState (IN CONST CHAR16 *Title)
++{
++  UINT32  Reset = MmioRead32 (GH_CAR_RESET_X);
++  UINT32  Clamp = MmioRead32 (GH_PMC_GPU_CLAMP);
++  UINT32  Clock = MmioRead32 (GH_CAR_CLOCK_X);
++
++  Print (L"%s: RESET_X %08x  CLAMP %08x  CLOCK_X %08x  -> %s\r\n", Title, Reset, Clamp, Clock,
++         gh_is_cold (Reset, Clamp) ? L"cold (driver can take it)" : L"NOT cold (driver returns BUSY)");
++}
++
++EFI_STATUS
++EFIAPI
++UefiMain (
++  IN EFI_HANDLE        ImageHandle,
++  IN EFI_SYSTEM_TABLE  *SystemTable
++  )
++{
++  CONST struct gpu_handoff_io  Io = { NULL, AppRead32, AppWrite32, AppDelay };
++  struct gpu_handoff_report    Report;
++  UINT32                       Hid = MmioRead32 (GH_APB_MISC_HIDREV);
++  UINT32                       Expected = Hid & GH_HIDREV_MASK;
++
++  (VOID)SystemTable;
++  Print (L"GpuHandoff: HIDREV %08x (%s)\r\n", Hid,
++         Expected == GH_HIDREV_T210 ? L"T210 / Erista" :
++         Expected == GH_HIDREV_T210B01 ? L"T210B01 / Lite, OLED" : L"unknown SoC");
++  if (Expected != GH_HIDREV_T210 && Expected != GH_HIDREV_T210B01) {
++    return EFI_SUCCESS;   /* unknown chip: read nothing else, write nothing */
++  }
++  PrintState (L"before");
++  if (HasArgument (ImageHandle, L"-fix")) {
++    enum gpu_handoff_result  Result = gpu_handoff_prepare (&Io, Expected, &Report);
++    Print (L"gpu_handoff_prepare = %u (0 cold, 1 restored, 2 bad arg, 3 wrong SoC, 4 bus error, 5 MC drain timeout, 6 not isolated)\r\n",
++           (UINT32)Result);
++    PrintState (L"after ");
++  }
++  return EFI_SUCCESS;
++}
+diff --git a/Drivers/GpuHandoffApp/GpuHandoffApp.inf b/Drivers/GpuHandoffApp/GpuHandoffApp.inf
+new file mode 100644
+index 0000000..9a85f67
+--- /dev/null
++++ b/Drivers/GpuHandoffApp/GpuHandoffApp.inf
+@@ -0,0 +1,34 @@
++## @file
++#  GpuHandoff.efi - UEFI Shell tool that checks / restores the GM20B hand-off state.
++#  Shell app only (not in the FDF): built when SWITCH_ERISTA_GPU / SWITCH_LITE_GPU / SWITCH_OLED_GPU
++#  is set; copy GpuHandoff.efi from the build output to the SD card, like XusbInit.efi.
++#  Shares Library/PlatformBootManagerLib/GpuHandoff.h with the boot manager. Not a BL33 / firmware image.
++#
++#  SPDX-License-Identifier: GPL-2.0-only
++##
++
++[Defines]
++  INF_VERSION                    = 0x00010005
++  BASE_NAME                      = GpuHandoff
++  FILE_GUID                      = 6C0E4B5A-5D3F-4B7B-9E7A-2F1D8A4C7E21
++  MODULE_TYPE                    = UEFI_APPLICATION
++  VERSION_STRING                 = 1.0
++  ENTRY_POINT                    = UefiMain
++
++[Sources]
++  GpuHandoffApp.c
++  ../../Library/PlatformBootManagerLib/GpuHandoff.h
++
++[Packages]
++  MdePkg/MdePkg.dec
++
++[LibraryClasses]
++  UefiApplicationEntryPoint
++  UefiLib
++  UefiBootServicesTableLib
++  BaseLib
++  BaseMemoryLib
++  IoLib
++
++[Protocols]
++  gEfiShellParametersProtocolGuid
 diff --git a/Library/PlatformBootManagerLib/GpuHandoff.c b/Library/PlatformBootManagerLib/GpuHandoff.c
 new file mode 100644
 index 0000000..f87cb6c
@@ -371,7 +514,7 @@ index ba77440..2960cd0 100644
          if (IsShellOption (Option)) {
            WinxVisualsPrepareShell ();
 diff --git a/NintendoSwitch.dsc b/NintendoSwitch.dsc
-index 506dbb2..c05c68a 100644
+index 506dbb2..2753594 100644
 --- a/NintendoSwitch.dsc
 +++ b/NintendoSwitch.dsc
 @@ -36,6 +36,7 @@
@@ -431,6 +574,25 @@ index 506dbb2..c05c68a 100644
  
  ################################################################################
  #
+@@ -852,6 +877,18 @@
+       gEfiShellPkgTokenSpaceGuid.PcdShellLibAutoInitialize|FALSE
+   }
+ !endif
++!ifdef SWITCH_ERISTA_GPU
++  # GM20B hand-off check/restore tool for the UEFI Shell (not in the FDF; copy GpuHandoff.efi to the SD card).
++  NintendoSwitchPkg/Drivers/GpuHandoffApp/GpuHandoffApp.inf
++!endif
++!ifdef SWITCH_LITE_GPU
++  # GM20B hand-off check/restore tool for the UEFI Shell (not in the FDF; copy GpuHandoff.efi to the SD card).
++  NintendoSwitchPkg/Drivers/GpuHandoffApp/GpuHandoffApp.inf
++!endif
++!ifdef SWITCH_OLED_GPU
++  # GM20B hand-off check/restore tool for the UEFI Shell (not in the FDF; copy GpuHandoff.efi to the SD card).
++  NintendoSwitchPkg/Drivers/GpuHandoffApp/GpuHandoffApp.inf
++!endif
+ !ifdef SWITCH_XUSB
+   # DRAFT: Tegra210 XUSB (xHCI / USB 3.0) bring-up experiment. Shell app only; not in the FDF (copy XusbInit.efi to the SD card).
+   NintendoSwitchPkg/Drivers/XusbInitApp/XusbInit.inf {
 diff --git a/Tools/host-tests/gpu-handoff/run.sh b/Tools/host-tests/gpu-handoff/run.sh
 new file mode 100755
 index 0000000..4927fe8

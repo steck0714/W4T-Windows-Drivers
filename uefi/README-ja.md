@@ -19,8 +19,8 @@ OLED の先行実装(DanilKhmyrov/windows-switch の `...gpu-gputestonly.patch`)
 |---|---|
 | `edk2/GpuHandoff/GpuHandoff.h` | EDK II 非依存の中核(レジスタ操作のみ)。ホストでそのままテストできる |
 | `edk2/GpuHandoff/GpuHandoff.c` | EDK II 側(winx の `PlatformBootManagerLib` に入る)。Windows 起動直前の確認と `ExitBootServices` での再確認 |
-| `edk2/GpuHandoffApp/` | UEFI Shell 用ツール `GpuHandoff.efi`(開発時に BL33 を作り直さず状態を見る・直す) |
-| `patches/winx-gpu-handoff.patch` | steck0714/winx の `usually` に当たるパッチ(上の 2 ファイルの配置、DSC フラグ、呼び出し 3 か所、ホストテスト) |
+| `edk2/GpuHandoffApp/` | UEFI Shell 用ツール `GpuHandoff.efi`(開発時に BL33 を作り直さず状態を見る・直す)。winx では `Drivers/GpuHandoffApp/` としてパッチに入っている |
+| `patches/winx-gpu-handoff.patch` | steck0714/winx の `usually` に当たるパッチ(`GpuHandoff.c/.h` の配置、DSC フラグ、呼び出し 3 か所、ホストテスト、Shell ツール `Drivers/GpuHandoffApp/` と DSC への追加) |
 | `tests/gpu_handoff/` | 偽レジスタモデルのテスト(冷えた状態 / 稼働中 / MC が詰まる / 別 SoC / バスエラー / 引数不正)と、EDK II 向け `.c` の構文チェック |
 | `tests/shim/` | 構文チェック専用の最小ヘッダ(EDK II の代わりではない) |
 | `tools/check_uefi_contract.py` | ドライバ側の電源バックエンドとレジスタ・ビット・HIDREV・BUSY 条件が一致するかの静的検査。patch と `edk2/` の複製が一致するかも見る |
@@ -51,7 +51,7 @@ build ... -D SWITCH_LITE_GPU=1     # Lite(既存フラグ。LiteHomeBoot から�
 fs0:\> GpuHandoff.efi        読み取りだけ。cold なら Windows のドライバが引き取れる
 fs0:\> GpuHandoff.efi -fix   復元してから前後を表示
 ```
-ビルドは `edk2/GpuHandoffApp/GpuHandoffApp.inf` を NintendoSwitchPkg の `[Components]` に足す。
+`GpuHandoff.efi` は上のどれかの GPU フラグを付けたときだけビルドされる(FDF には入れない。XusbInit.efi と同じく、ビルド出力から SD カードにコピーする)。フラグなしのビルドは何も変わらない。
 
 ## 挙動の約束(GpuHandoff.h)
 
@@ -66,7 +66,7 @@ fs0:\> GpuHandoff.efi -fix   復元してから前後を表示
 
 - 確認済み: ホストテスト、EDK II 向け `.c` の構文チェック(Erista / Lite / OLED の 3 設定)、
   ドライバ側とのレジスタ・HIDREV・BUSY 条件の一致、パッチが winx `usually` に当たること。
-  整合チェックは、ドライバ側の値を壊すと実際に失敗することを確かめてある。
-- 未確認: **EDK II(ARM64)でのビルド、実機での動作**。OLED の呼び出し位置は winx の `SwitchBootMenu.c` 経由を前提にしていて、
+  整合チェックは、ドライバ側の値を壊すと実際に失敗することを確かめてある(Shell ツールのコピーや DSC 追加がパッチからずれた場合も失敗する)。
+- 未確認: **EDK II(ARM64)でのビルド(`GpuHandoff.efi` の DSC 追加を含む)、実機での動作**。OLED の呼び出し位置は winx の `SwitchBootMenu.c` 経由を前提にしていて、
   DanilKhmyrov 版の構成では位置が違う可能性がある。
 - 入れていないもの: 準備できたときだけ ACPI の GPU0 を見せる処理(Wi-Fi の `WifiPrepareBoot.c` 方式)、GPU レールの UEFI 側制御。

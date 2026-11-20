@@ -1,9 +1,9 @@
 ## @file
 #  GpuHandoff.efi - UEFI Shell tool that checks / restores the GM20B hand-off state.
-#  Drop into NintendoSwitchPkg/Drivers/GpuHandoffApp/ (keep ../GpuHandoff/GpuHandoff.h
-#  next to it, or copy the header here and fix the include) and add
-#    NintendoSwitchPkg/Drivers/GpuHandoffApp/GpuHandoffApp.inf
-#  to [Components] in NintendoSwitch.dsc. Not a BL33 / firmware image.
+#  In winx this is Drivers/GpuHandoffApp/ (added by uefi/patches/winx-gpu-handoff.patch, built when
+#  SWITCH_ERISTA_GPU / SWITCH_LITE_GPU / SWITCH_OLED_GPU is set; copy GpuHandoff.efi to the SD card).
+#  Here the header sits in ../GpuHandoff/; in winx it is Library/PlatformBootManagerLib/GpuHandoff.h.
+#  Not a BL33 / firmware image.
 #
 #  SPDX-License-Identifier: GPL-2.0-only
 ##

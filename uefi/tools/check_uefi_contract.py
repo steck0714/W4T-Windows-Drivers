@@ -11,6 +11,9 @@ Checks (all static, no hardware, no EDK II):
      the UEFI side exists to satisfy has not been loosened or changed.
   4. uefi/edk2/GpuHandoff/GpuHandoff.{h,c} are byte-identical to the files carried in
      uefi/patches/winx-gpu-handoff.patch (so the patch and the dev copy cannot drift apart).
+  5. uefi/edk2/GpuHandoffApp/GpuHandoffApp.{c,inf} equal the winx copies in the patch
+     (Drivers/GpuHandoffApp/) except for the one path that points at GpuHandoff.h, and the patch
+     really builds the app (DSC entry for each of the three GPU flags).
 """
 import pathlib, re, sys
 
@@ -97,6 +100,26 @@ for rel, dev in (("Library/PlatformBootManagerLib/GpuHandoff.h", hdr),
     body = "".join(l[1:] + "\n" for l in sec.group(1).split("\n") if l.startswith("+"))
     if body != dev.read_text():
         errors.append(f"{dev.relative_to(root)} differs from the copy in uefi/patches/winx-gpu-handoff.patch")
+
+# the shell app: same source in winx, only the header path differs
+HDR_DEV, HDR_WINX = "../GpuHandoff/GpuHandoff.h", "../../Library/PlatformBootManagerLib/GpuHandoff.h"
+for rel, dev in (("Drivers/GpuHandoffApp/GpuHandoffApp.c", root / "uefi/edk2/GpuHandoffApp/GpuHandoffApp.c"),
+                 ("Drivers/GpuHandoffApp/GpuHandoffApp.inf", root / "uefi/edk2/GpuHandoffApp/GpuHandoffApp.inf")):
+    sec = re.search(r"^diff --git a/%s b/%s\n.*?^@@[^\n]*\n(.*?)(?=^diff --git |\Z)" % (re.escape(rel), re.escape(rel)),
+                    ptxt, re.S | re.M)
+    if not sec:
+        errors.append(f"patch does not add {rel}")
+        continue
+    body = "".join(l[1:] + "\n" for l in sec.group(1).split("\n") if l.startswith("+"))
+    if HDR_WINX not in body:
+        errors.append(f"{rel} in the patch does not point at {HDR_WINX}")
+    strip = lambda t: "\n".join(l for l in t.replace(HDR_DEV, "@HDR@").replace(HDR_WINX, "@HDR@").splitlines()
+                                 if not l.startswith("#  ")) + "\n"   # comment text differs by layout
+    if strip(body) != strip(dev.read_text()):
+        errors.append(f"{dev.relative_to(root)} differs from {rel} in uefi/patches/winx-gpu-handoff.patch beyond the header path / comments")
+for flag in ("SWITCH_ERISTA_GPU", "SWITCH_LITE_GPU", "SWITCH_OLED_GPU"):
+    if not re.search(r"^\+!ifdef %s\n\+[^\n]*\n\+  NintendoSwitchPkg/Drivers/GpuHandoffApp/GpuHandoffApp\.inf\n\+!endif$" % flag, ptxt, re.M):
+        errors.append(f"patch: NintendoSwitch.dsc does not build GpuHandoffApp under {flag}")
 
 if errors:
     print("MISMATCH", *errors, sep="\n  ", file=sys.stderr)
