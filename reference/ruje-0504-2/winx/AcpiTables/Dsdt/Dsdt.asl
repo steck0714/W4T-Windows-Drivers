@@ -1,0 +1,1066 @@
+/** @file
+  Differentiated System Description Table Fields (DSDT)
+
+  Copyright (c) 2014-2018, ARM Ltd. All rights reserved.<BR>
+  Copyright (c) 2019-2020, Bingxing Wang. All rights reserved.<BR>
+  Portion retrieved from Surface RT 2 DSDT dump
+
+  This program and the accompanying materials are licensed and made available under 
+  the terms and conditions of the BSD License which accompanies this distribution.  
+  The full text of the license may be found at
+  http://opensource.org/licenses/bsd-license.php
+
+  THE PROGRAM IS DISTRIBUTED UNDER THE BSD LICENSE ON AN "AS IS" BASIS,
+  WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
+
+**/
+
+#include "Platform.h"
+#ifdef SWITCH_WIFI_RUNTIME
+#include "../../WindowsDrivers/drivers/SwitchWifi/platform/tegra_resources.h"
+#endif
+
+DefinitionBlock("DsdtTable.aml", "DSDT", 1, "NVIDIA", "TEGRA210", EFI_ACPI_ARM_OEM_REVISION) 
+{
+    Scope(_SB) 
+    {
+
+        Device(CPU0) 
+        {
+            Name(_HID, "ACPI0007")
+            Name(_UID, 0)
+        }
+
+        Device(CPU1) 
+        {
+            Name(_HID, "ACPI0007")
+            Name(_UID, 1)
+        }
+
+        Device(CPU2) 
+        {
+            Name(_HID, "ACPI0007")
+            Name(_UID, 2)
+        }
+
+        Device(CPU3) 
+        {
+            Name(_HID, "ACPI0007")
+            Name(_UID, 3)
+        }
+
+        // Helper functions
+        Method (GCRS, 3, NotSerialized)
+        {
+            Name (RSRC, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite,
+                    0x00000000,         // Address Base
+                    0x00000000,         // Address Length
+                    _Y00)
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive, ,, _Y01)
+                {
+                    0x00000000,
+                }
+            })
+            CreateDWordField (RSRC, \_SB.GCRS._Y00._BAS, MBAS)  // _BAS: Base Address
+            CreateDWordField (RSRC, \_SB.GCRS._Y00._LEN, MBLE)  // _LEN: Length
+            CreateWordField (RSRC, \_SB.GCRS._Y01._INT, INTN)  // _INT: Interrupts
+            MBAS = Arg0
+            MBLE = Arg1
+            INTN = Arg2
+            Return (RSRC)
+        }
+
+        Method (CRSD, 2, NotSerialized)
+        {
+            Name (RSRC, ResourceTemplate ()
+            {
+                FixedDMA (0x0000, 0x0000, Width32bit, _Y07)
+                FixedDMA (0x0001, 0x0001, Width32bit, _Y08)
+            })
+            CreateWordField (RSRC, One, REQ1)
+            CreateWordField (RSRC, \_SB.CRSD._Y07._TYP, CHN1)  // _TYP: Type
+            CreateWordField (RSRC, \_SB.CRSD._Y08._DMA, REQ2)  // _DMA: Direct Memory Access
+            CreateWordField (RSRC, \_SB.CRSD._Y08._TYP, CHN2)  // _TYP: Type
+            REQ1 = Arg0
+            REQ2 = (Arg0 | 0x20)
+            CHN1 = Arg1
+            CHN2 = Arg1++
+            Return (RSRC)
+        }
+
+        Method (CRS3, 5, NotSerialized)
+        {
+            Local0 = GCRS (Arg0, Arg1, Arg2)
+            Local1 = CRSD (Arg3, Arg4)
+            Return (ConcatenateResTemplate (Local0, Local1))
+        }
+
+        // UART 2: Right Joy-Con
+        Device (UAR2)
+        {
+            Method (_HID, 0, NotSerialized)
+            {
+                Return ("NVDA0100")
+            }
+
+            Name (_UID, One)
+            Method (_CRS, 0, NotSerialized)
+            {
+                Return (CRS3 (0x70006040, 0x40, 0x45, 0x09, 0x02))
+            }
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+        // SD Host Controller: removable microSD slot (SDMMC1)
+        // Base/length/IRQ verified against Include/Device/NvAddressMap.h
+        // (TEGRA_SDMMC1_BASE) and public Tegra210 device-tree sources.
+        // The 2019 da0dd9a attempt used base 0x78000000 here, which
+        // does not match any known Tegra210 address map and was most
+        // likely never functional; corrected to 0x700B0000 below.
+        // UNTESTED ON HARDWARE - compiles cleanly, PNP0D40 binding
+        // and clock/power state at ExitBootServices are unverified.
+        Device (SDM1)
+        {
+#ifdef SWITCH_ACPI_SD_AUTO
+            // One ROM for Windows 10 and Windows 11. SdAutoDxe looks for \Windows\System32\drivers\nvtsdhc.sys on the
+            // SD card just before the boot option starts and patches SDMD (AML: 08 'SDMD' 0A 10):
+            //   0x02 nvtsdhc found -> NVDA0101 / NVD0D40 (nvtsdhc), 0x01 Windows without it -> NVDA0212 / PNP0D40 (sdbus),
+            //   0x10 nothing found -> _OSI ("Windows 2021"): Windows 11 (build 22000+) yes, Windows 10 no.
+            Name (SDMD, 0x10)
+            Method (SDNV, 0, NotSerialized)
+            {
+                If ((SDMD == 0x02))
+                {
+                    Return (One)
+                }
+
+                If ((SDMD == 0x01))
+                {
+                    Return (Zero)
+                }
+
+                If (_OSI ("Windows 2021"))
+                {
+                    Return (One)
+                }
+
+                Return (Zero)
+            }
+
+            Method (_HID, 0, NotSerialized)
+            {
+                If (SDNV ())
+                {
+                    Return ("NVDA0101")
+                }
+
+                Return ("NVDA0212")
+            }
+
+            Method (_CID, 0, NotSerialized)
+            {
+                If (SDNV ())
+                {
+                    Return ("NVD0D40")
+                }
+
+                Return ("PNP0D40")
+            }
+
+            Method (_CCA, 0, NotSerialized)
+            {
+                If (SDNV ())
+                {
+                    Return (Zero)
+                }
+
+                Return (One)
+            }
+
+            Name (_RMV, One)
+#elif defined(SWITCH_ACPI_SD_NVTSDHC)
+            // Windows 11 (22621+): the inbox sdbus cannot boot from this SD host, so bind the
+            // Windows-for-Switch nvtsdhc miniport (ACPI\NVDA0101) instead. The compatible ID is NVD0D40 so
+            // that sdbus does not claim it. Same description as SDLOADAA64-NOCID.EFI's SSDT (\_SB.SDH0):
+            // do NOT also use that loader, it would describe the same host twice. nvtsdhc is test-signed.
+            Name (_HID, "NVDA0101")
+            Name (_CID, "NVD0D40")
+            Name (_CCA, Zero)
+#ifdef SWITCH_LITE_BOOT_SD
+            Name (_RMV, Zero)
+#else
+            Name (_RMV, One)
+#endif
+#else
+            Method (_HID, 0, NotSerialized)
+            {
+                Return ("NVDA0212")
+            }
+
+            Name (_CID, "PNP0D40" /* SDA Standard Compliant SD Host Controller */)
+#endif
+            Name (_UID, Zero)
+            Method (_CRS, 0, NotSerialized)
+            {
+                Return (GCRS (0x700B0000, 0x0200, 0x2E))
+            }
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+#ifdef SWITCH_LITE_BOOT_SD
+            // SDPORT evaluates the slot child, not just the controller _RMV.
+            // Home's boot card stays installed for the entire Windows session.
+            // Slot 0 / memory function 0. Physical removal is shutdown-only.
+            Device (CARD)
+            {
+                Name (_ADR, Zero)
+                Name (_RMV, Zero)
+            }
+#endif
+        }
+
+        // eMMC (internal storage, SDMMC4). Base/length/IRQ cross-
+        // checked against three independent sources: this repo's
+        // NvAddressMap.h, coreboot's own tegra210/addressmap.h, and
+        // public Tegra210 device-tree sources (sdhci@700b0600,
+        // interrupts = <0 31 0x04>). All three agree.
+        // UNTESTED ON HARDWARE. eMMC is also 8-bit/HS200-capable
+        // where the microSD slot is 4-bit only; PNP0D40/sdport.sys
+        // is expected to self-negotiate this from the SDHCI
+        // capabilities register, but that negotiation itself is
+        // unverified here, same as SDM1.
+        Device (SDM4)
+        {
+            Method (_HID, 0, NotSerialized)
+            {
+                Return ("NVDA0213")
+            }
+
+            Name (_CID, "PNP0D40" /* SDA Standard Compliant SD Host Controller */)
+            Name (_UID, One)
+            Method (_CRS, 0, NotSerialized)
+            {
+                Return (GCRS (0x700B0600, 0x0200, 0x3F))
+            }
+
+            Method (_STA, 0, NotSerialized)
+            {
+#ifdef SWITCH_ACPI_EMMC_ENABLE
+                Return (0x0F)
+#else
+                // The eMMC holds PRODINFO (console-unique calibration/keys), BOOT0/1 and the
+                // Horizon system partitions. A Windows disk stack that sees it can write to
+                // it by mistake (auto-initialise, "format disk", bad-block scan...).
+                // Hidden unless the firmware is built with -D SWITCH_ACPI_EMMC=1.
+                Return (Zero)
+#endif
+            }
+        }
+
+
+#if defined(SWITCH_ACPI_XHCI_ENABLE) && defined(SWITCH_ACPI_EHCI_ENABLE)
+        // Both controllers are described but they share the one physical USB-C port, so only one may be
+        // visible to the OS. The firmware picks it at ExitBootServices by patching this byte in the loaded
+        // DSDT (AML encoding 08 'U' 'B' 'S' 'L' 00 -> 01): 0 = EHC0 (default), 1 = XHC0 (xusb firmware is
+        // running, see Drivers/XusbInitApp `xusbinit acpi`).
+        Name (UBSL, Zero)
+#define SWITCH_ACPI_USB_SELECT 1
+#endif
+
+#ifdef SWITCH_ACPI_XHCI_ENABLE
+        // XUSB xHCI (usb@70090000, 32 KiB; SPI 39 = INTID 71, level high; values from
+        // tegra210.dtsi). Only valid AFTER the firmware has loaded xusb.bin and the host
+        // mailbox is serviced (see Drivers/XusbInitApp) - otherwise the controller is dead.
+        // Enabled with -D SWITCH_ACPI_XHCI=1. UNTESTED ON HARDWARE.
+        Device (XHC0)
+        {
+#if defined(SWITCH_ACPI_SWOA_ENABLE) || defined(SWITCH_LITE_XUSB)
+            // Layout verified on hardware by hayato41200/Windows-for-Switch (R378):
+            // PNP0D10 binds the inbox USBXHCI, _CCA = 0 declares the controller
+            // non-cache-coherent (the xHCI DMA buffers are not snooped), and the FPCI
+            // (0x70098000) / IPFS (0x70099000) windows plus SPI 39/40/49 are listed
+            // together with the host registers. The previous winx entry listed only
+            // 0x70090000 and SPI 39 and had no _CCA.
+            Name (_HID, "PNP0D10")
+            Name (_CID, "PNP0D10")
+            Name (_UID, Zero)
+            Name (_CCA, Zero)
+
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x70090000, 0x00008000)
+#ifdef SWITCH_LITE_XUSB
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 71 }
+#else
+                Memory32Fixed (ReadWrite, 0x70098000, 0x00001000)
+                Memory32Fixed (ReadWrite, 0x70099000, 0x00001000)
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Shared)
+                {
+                    0x00000047, // GIC SPI 39
+                    0x00000048, // GIC SPI 40
+                    0x00000051  // GIC SPI 49
+                }
+#endif
+            })
+
+#else
+            // Preserve usually's original xHCI description outside the WOA/Lite profiles.
+            Name (_HID, "NVDA0210")
+            Name (_CID, "PNP0D10")
+            Name (_UID, Zero)
+            Method (_CRS, 0, NotSerialized)
+            {
+                Return (GCRS (0x70090000, 0x8000, 0x47))
+            }
+#endif
+#if !defined(SWITCH_ACPI_USB_SELECT) && (defined(SWITCH_ACPI_SWOA_ENABLE) || defined(SWITCH_LITE_XUSB))
+            // R389 (hayato41200/Windows-for-Switch): hidden unless UsbPowerAuditDxe brought XUSB up.
+            // It patches this byte (AML 08 'XSTA' 0A 10) to 0x0F and fixes the DSDT checksum.
+            // usbxhci touching an XUSB that was never started froze Windows at the logo.
+            Name (XSTA, 0x10)
+#endif
+
+            Method (_STA, 0, NotSerialized)
+            {
+#ifdef SWITCH_ACPI_USB_SELECT
+                If ((UBSL == One))
+                {
+                    Return (0x0F)
+                }
+
+                Return (Zero)
+#elif defined(SWITCH_ACPI_SWOA_ENABLE) || defined(SWITCH_LITE_XUSB)
+                Return (XSTA)
+#else
+                Return (0x0F)
+#endif
+            }
+        }
+#ifdef SWITCH_LITE_XUSB
+        // The inbox host driver owns the xHCI aperture and SPI 39. XFW0
+        // services the Falcon mailbox on SPI 40 and the B01 lane-5 LFPS field.
+        Device (XFW0)
+        {
+            Name (_HID, "SWOA0D02")
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate () {
+                Memory32Fixed (ReadWrite, 0x70098000, 0x1000)
+                Memory32Fixed (ReadWrite, 0x7009F5A0, 4)
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 72 }
+            })
+            Method (_STA, 0) { Return (\_SB.XHC0.XSTA) }
+        }
+#endif
+#endif
+#ifdef SWITCH_ACPI_EHCI_ENABLE
+        // Tegra210 USB1 (ChipIdea dual-role EHCI, usb@7d000000, SPI 20 = INTID 52, level high).
+        // Windows binds its inbox EHCI driver through _CID PNP0D20. The capability registers start at
+        // 0x7D000100 (the same window the firmware's EHCI emulation uses); the operational registers sit
+        // at +0x30, i.e. USBMODE is at 0x7D0001F8.
+        // _HRV = 2: integrated TT, port speed in HOSTPC (HOSTPC1_DEVLC.PSPD on this controller).
+        // _DSM function 1 (UUID ce2ee385-00e6-48cb-9f05-2edb927c4899) is the documented "post-reset" hook for
+        // dual-role controllers: every HCRESET drops ChipIdea back to idle mode, so set USBMODE.CM = host.
+        // UNTESTED ON HARDWARE.
+        Device (EHC0)
+        {
+            Name (_HID, "NVDA0211")
+            Name (_CID, "PNP0D20" /* EHCI USB controller */)
+            Name (_UID, Zero)
+            Name (_HRV, 2)
+            Method (_CRS, 0, NotSerialized)
+            {
+                Return (GCRS (0x7D000100, 0x740, 0x34))
+            }
+
+            OperationRegion (UMOD, SystemMemory, 0x7D0001F8, 0x04)
+            Field (UMOD, DWordAcc, NoLock, Preserve)
+            {
+                USMD,   32
+            }
+
+            // USB_SUSP_CTRL (abs 0x400, op + 0x2D0). Bit 7 = USB_PHY_CLK_VALID. Linux keeps this register
+            // readable on its own while the AHB clock of the controller is gated (ci_hdrc_tegra.c).
+            OperationRegion (USPC, SystemMemory, 0x7D000400, 0x04)
+            Field (USPC, DWordAcc, NoLock, Preserve)
+            {
+                SCTL,   32
+            }
+
+#ifdef SWITCH_ACPI_EHCI_TXFILL
+            // TXFILLTUNING (abs 0x154, op + 0x24). Linux (ci_hdrc_tegra.c, CI_HDRC_CONTROLLER_RESET_EVENT)
+            // rewrites it after every controller reset with txfifothresh << 16 (16 for the Tegra30 class).
+            // The right value for Tegra210 is NOT confirmed, so this is opt-in (-D SWITCH_ACPI_EHCI_TXFILL=1).
+            OperationRegion (UTXF, SystemMemory, 0x7D000154, 0x04)
+            Field (UTXF, DWordAcc, NoLock, Preserve)
+            {
+                TXFT,   32
+            }
+#endif
+
+            // Windows USB _DSM (UUID ce2ee385-00e6-48cb-9f05-2edb927c4899, Arg1 = 0).
+            //   function 0: query. function 1: post-reset for dual-role controllers, called after every
+            //   controller reset (Microsoft: bringup/usb-device-specific-method---dsm-).
+            //   function 6: "register access type" (Windows 11 / Server 2022 and later): 1 = 32-bit only.
+            // ChipIdea clears USBMODE.CM on every HCRESET and the write only sticks once the PHY clock is
+            // valid again, so wait for it (bounded, 100 ms) and verify the mode afterwards (bounded).
+            Method (_DSM, 4, Serialized)
+            {
+                If ((Arg0 == ToUUID ("ce2ee385-00e6-48cb-9f05-2edb927c4899")))
+                {
+                    If ((Arg2 == Zero))
+                    {
+                        Return (Buffer (One) { 0x43 })   // functions 0, 1 and 6
+                    }
+
+                    If ((Arg2 == One))
+                    {
+                        Local0 = 1000
+                        While (Local0)
+                        {
+                            If ((SCTL & 0x80))
+                            {
+                                Break
+                            }
+
+                            Stall (100)
+                            Local0--
+                        }
+
+                        USMD = ((USMD & 0xFFFFFFFC) | 0x03)   // CM = host
+                        Local0 = 1000
+                        While (Local0)
+                        {
+                            If (((USMD & 0x03) == 0x03))
+                            {
+                                Break
+                            }
+
+                            Stall (100)
+                            Local0--
+                        }
+
+#ifdef SWITCH_ACPI_EHCI_TXFILL
+                        TXFT = 0x00100000                     // 16 << 16
+#endif
+                        Return (Zero)
+                    }
+
+                    If ((Arg2 == 6))
+                    {
+                        Return (One)                          // must use 32-bit register access
+                    }
+                }
+
+                Return (Buffer (One) { 0x00 })
+            }
+
+            Method (_STA, 0, NotSerialized)
+            {
+#ifdef SWITCH_ACPI_USB_SELECT
+                If ((UBSL == Zero))
+                {
+                    Return (0x0F)
+                }
+
+                Return (Zero)
+#else
+                Return (0x0F)
+#endif
+            }
+        }
+#endif
+#ifdef SWITCH_LITE_DISPLAY
+        // Display-only ownership of Hekate's existing POST framebuffer.
+        // The Windows miniport obtains the active address/stride through
+        // DxgkCbAcquirePostDisplayOwnership; no Tegra GPU engines are exposed.
+        Device (DISP)
+        {
+            Name (_HID, "WINX0001")
+            Name (_UID, Zero)
+            Name (_CLS, Package () { 0x03, Zero, Zero })
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0xF5A00000, 0x01000000)
+            })
+            Method (_STA, 0, NotSerialized) { Return (0x0F) }
+        }
+#endif
+#if defined(SWITCH_ACPI_SWOA_ENABLE) || defined(SWITCH_LITE_TOUCH)
+        // ---- Windows-for-Switch (hayato41200) SWOA devices -------------------------------
+        // ACPI\SWOA0101..0801: GPIO, I2C, battery/USB-C, fan/backlight, touch, power
+        // button, CPU clock, RTC. They are only useful together with the matching kernel
+        // drivers (Windows-for-Switch-Drivers) AND a UEFI that has already powered/clocked
+        // the hardware (see docs/SWOA-PORT-ja.md). Opt-in: -D SWITCH_ACPI_SWOA=1.
+        // R367: Tegra210 GPIO controller (Windows driver tegra210gpio.sys,
+        // GpioClx). MMIO 0x6000D000, 8 banks x 32 pins; one GIC SPI per bank
+        // in bank order: SPI 32, 33, 34, 35, 55, 87, 89, 125 (Linux
+        // tegra210 gpio node) = GSI 64, 65, 66, 67, 87, 119, 121, 157.
+        // GPIO number = port * 8 + bit (PX6 = 190, PX7 = 191).
+        Device (GPI0)
+        {
+            Name (_HID, "SWOA0101")
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x6000D000, 0x00001000)
+#ifdef SWITCH_LITE_TOUCH
+                // One assigned GIC interrupt per bank in _CRS.
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 0x40 }
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 0x41 }
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 0x42 }
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 0x43 }
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 0x57 }
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 0x77 }
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 0x79 }
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 0x9D }
+#else
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive)
+                {
+                    0x00000040, 0x00000041, 0x00000042, 0x00000043,
+                    0x00000057, 0x00000077, 0x00000079, 0x0000009D
+                }
+#endif
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+#endif
+#if defined(SWITCH_ACPI_SWOA_ENABLE) || defined(SWITCH_LITE_SYSTEM)
+        // R368: hardware buttons for Windows (inbox HID button driver).
+        // R369: R368 used PNP0C40, which no inbox INF on Windows 10 matches
+        // (problem 28); hidinterrupt.inf binds ACPI0011 with this _DSD.
+        // Volume up = PX6 (GPIO 190), volume down = PX7 (GPIO 191), both
+        // active low with pull-ups (L4T gpio-keys). The power button is on
+        // the MAX77620 PMIC (and maybe PX5); it is not listed here yet.
+        // GpioInt must be edge ActiveBoth so press and release are both seen.
+        Device (BTNS)
+        {
+            Name (_HID, "ACPI0011")    // R369: ACPI 6.0 Generic Buttons Device (hidinterrupt.inf)
+#ifdef SWITCH_LITE_SYSTEM
+            // HDH-001 shares PX6/PX7; Hekate configures both as inputs.
+            Name (_DEP, Package () { \_SB.GPI0 })
+#endif
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                GpioInt (Edge, ActiveBoth, Exclusive, PullUp, 0x07D0, "\\_SB.GPI0", 0x00, ResourceConsumer, ,)
+                {
+                    190     // PX6: volume up
+                }
+                GpioInt (Edge, ActiveBoth, Exclusive, PullUp, 0x07D0, "\\_SB.GPI0", 0x00, ResourceConsumer, ,)
+                {
+                    191     // PX7: volume down
+                }
+            })
+
+            // Map GpioInt index -> HID usage (Windows 10 button array _DSD).
+            Name (_DSD, Package (0x02)
+            {
+                ToUUID ("fa6bd625-9ce8-470d-a2c7-b3ca36c4282e"),
+                Package (0x03)
+                {
+                    Package (0x05) { Zero, One, Zero, One, 0x0D },          // Portable Device Control collection
+                    Package (0x05) { One, Zero, One, 0x0C, 0xE9 },          // GpioInt 0: Volume Increment
+                    Package (0x05) { One, One, One, 0x0C, 0xEA }            // GpioInt 1: Volume Decrement
+                }
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+        // R371: system battery for switchbattery.sys (ACPI\SWOA0301, battc).
+        // Connection 0 = MAX17050 fuel gauge, 1 = BQ24193 charger, both on I2C1.
+        Device (BAT0)
+        {
+#ifdef SWITCH_LITE_XUSB
+            Name (_HID, "SWOA0314")
+#else
+            Name (_HID, "SWOA0301")
+#endif
+#ifdef SWITCH_LITE_SYSTEM
+            Name (_DEP, Package () { \_SB.I2C1 })
+#endif
+            Name (_UID, Zero)
+#ifdef SWITCH_LITE_XUSB
+            Name (BRES, ResourceTemplate ()
+#else
+            Name (_CRS, ResourceTemplate ()
+#endif
+            {
+                I2cSerialBusV2 (0x0036, ControllerInitiated, 100000, AddressingMode7Bit, "\\_SB.I2C1", 0x00, ResourceConsumer, , Exclusive, )
+                I2cSerialBusV2 (0x006B, ControllerInitiated, 100000, AddressingMode7Bit, "\\_SB.I2C1", 0x00, ResourceConsumer, , Exclusive, )
+#ifndef SWITCH_LITE_SYSTEM
+                // R378: connection 2 = BM92T USB-C PD controller, for VBUS / charge
+                // role switching on hot-plug (switchbattery.sys v4).
+                I2cSerialBusV2 (0x0018, ControllerInitiated, 100000, AddressingMode7Bit, "\\_SB.I2C1", 0x00, ResourceConsumer, , Exclusive, )
+#else
+                // The Lite battery gauge and charger work before XUSB preparation.
+                // The optional host profile appends the Type-C controller below.
+#endif
+            })
+#ifdef SWITCH_LITE_XUSB
+            Name (PRES, ResourceTemplate () {
+                I2cSerialBusV2 (0x0018, ControllerInitiated, 100000, AddressingMode7Bit, "\\_SB.I2C1", 0x00, ResourceConsumer, , Exclusive, )
+            })
+            Method (_CRS, 0) {
+                If (\_SB.XHC0.XSTA == 0x0F) { Return (ConcatenateResTemplate (BRES, PRES)) }
+                Return (BRES)
+            }
+#endif
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+
+#endif
+#if defined(SWITCH_ACPI_SWOA_ENABLE) || defined(SWITCH_LITE_TOUCH)
+        // R373: I2C3 (GEN3_I2C) for the touch panel. UEFI R373 powers the
+        // panel (LDO6 2.9 V, reset PJ7 high) and enables the I2C3 clock.
+        Device (I2C3)
+        {
+            Name (_HID, "SWOA0201")
+            Name (_UID, 0x03)
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x7000C500, 0x00000100)
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 0x0000007C }
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+#endif
+#ifdef SWITCH_ACPI_SWOA_ENABLE
+        // R379: I2C2 (GEN2_I2C, 0x7000C400) for the BH1730FVC light sensor. UEFI R379 clocks it.
+        Device (I2C2)
+        {
+            Name (_HID, "SWOA0201")
+            Name (_UID, 0x02)
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x7000C400, 0x00000100)
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 0x00000074 }
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+        // R379: sensors for switchsensor.sys (ACPI\SWOA0901). SPI4 controller (the driver runs it in
+        // PIO mode; IMU LSM6DS3H on CS0, UEFI R379 clocks it) and the BH1730FVC light sensor 0x29 on I2C2.
+        // Needs UsbPowerAuditDxe >= R379: SPI4 reads stall while its clock is gated.
+        Device (SENS)
+        {
+            Name (_HID, "SWOA0901")
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x7000DA00, 0x00000200)
+                I2cSerialBusV2 (0x0029, ControllerInitiated, 400000, AddressingMode7Bit, "\\_SB.I2C2", 0x00, ResourceConsumer, , Exclusive, )
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+#endif
+#ifdef SWITCH_WIFI_RUNTIME
+        // Composite AFI host + BCM4356 endpoint. Not an ECAM/pci.sys bridge.
+        // SPI 98 / GSI 130 carries legacy INTx and AFI host notifications.
+        // Home only exposes this device after WifiPrepare succeeds; touching
+        // an unpowered host controller from Windows is not permitted.
+        Device (WFI0)
+        {
+            Name (_HID, SWIFI_ACPI_HID)
+            Name (_UID, Zero)
+            Name (_CCA, Zero)
+            Name (WSTA, 0x10) // BytePrefix marker patched to 0x0F by Home BDS.
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, SWIFI_HOST_BASE, SWIFI_HOST_LENGTH)
+                Memory32Fixed (ReadWrite, SWIFI_CONFIG_BASE, SWIFI_CONFIG_LENGTH)
+                Memory32Fixed (ReadWrite, SWIFI_APERTURE_BASE, SWIFI_APERTURE_SIZE)
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { SWIFI_LEGACY_GSI }
+            })
+            // Tegra CAR reset-group U: status and write-one-to-set aliases.
+            // Restrict this method to the PCIe controller's three reset lines.
+            OperationRegion (WCRS, SystemMemory, 0x6000600C, 4)
+            Field (WCRS, DWordAcc, NoLock, Preserve) { WRST, 32 }
+            OperationRegion (WCRW, SystemMemory, 0x60006310, 4)
+            Field (WCRW, DWordAcc, NoLock, WriteAsZeros) { WSET, 32 }
+            Method (WIRS, 1, Serialized)
+            {
+                If (WSTA != 0x0F) { Return (Zero) }
+                If (Arg0 == Zero) {
+                    If ((WRST & 0x540) == Zero) { Return (One) }
+                    Return (Zero)
+                }
+                If (Arg0 != One) { Return (Zero) }
+                // Switchroot asserts PCIEX, then PEX, then AFI. Do not
+                // cycle the shared radio supply or the USB pad controller.
+                WSET = 0x400
+                WSET = 0x040
+                WSET = 0x100
+                Sleep (20)
+                Local0 = WRST
+                If (Local0 == 0xFFFFFFFF) { Return (Zero) }
+                If ((Local0 & 0x540) == 0x540) { Return (One) }
+                Return (Zero)
+            }
+            Method (_STA, 0, NotSerialized)
+            {
+                If ((WSTA == 0x0F)) { Return (0x0F) }
+                Return (Zero)
+            }
+        }
+#endif
+#ifdef SWITCH_LITE_SIO
+#include "t214/Sio.asl"
+#endif
+#if defined(SWITCH_ACPI_SWOA_ENABLE) || defined(SWITCH_LITE_BLUETOOTH)
+        // R390 (hayato41200/Windows-for-Switch): Bluetooth for switchbt.sys (ACPI\SWOA0B01).
+        // BCM4356A3 on UART-D (GIC SPI 90 = GSI 122, level high). UEFI R390 sets the pins,
+        // clocks the UART and powers the chip (PH4). Lite uses the same wiring;
+        // its dedicated entry does not enable the Erista SPI4 sensor path.
+        Device (BTH0)
+        {
+            Name (_HID, "SWOA0B01")
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x70006300, 0x00000040)
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 0x0000007A }
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+#endif
+#if defined(SWITCH_ACPI_SWOA_ENABLE) || defined(SWITCH_LITE_TOUCH)
+        // R373: STM FTM4 touch controller (ACPI\SWOA0501), 0x49 on I2C3,
+        // interrupt PX1 (GPIO 185) level low.
+        Device (TCH0)
+        {
+#ifdef SWITCH_LITE_TOUCH
+            Name (_HID, "SWOA0502")
+            Name (_DEP, Package () { \_SB.GPI0, \_SB.I2C3 })
+#else
+            Name (_HID, "SWOA0501")
+#endif
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                I2cSerialBusV2 (0x0049, ControllerInitiated, 400000, AddressingMode7Bit, "\\_SB.I2C3", 0x00, ResourceConsumer, , Exclusive, )
+                GpioInt (Level, ActiveLow, Exclusive, PullUp, 0x0000, "\\_SB.GPI0", 0x00, ResourceConsumer, , ) { 185 }
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+#endif
+#if defined(SWITCH_ACPI_SWOA_ENABLE) || defined(SWITCH_LITE_AUDIO)
+        // R402: audio for switchaudio.sys (ACPI\SWOA0C01). AHUB (ADMAIF, XBAR,
+        // I2S1 at 0x702D1000), ADMA, and the ALC5639 codec on I2C1. UEFI turns
+        // on the APE clocks, sets up the codec and starts I2S1.
+        Device (AUD0)
+        {
+            Name (_HID, "SWOA0C01")
+#ifdef SWITCH_LITE_AUDIO
+            Name (_DEP, Package () { \_SB.I2C1 })
+#endif
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x702D0000, 0x00002000)
+                Memory32Fixed (ReadWrite, 0x702E2000, 0x00001000)
+                I2cSerialBusV2 (0x001C, ControllerInitiated, 100000, AddressingMode7Bit, "\\_SB.I2C1", 0x00, ResourceConsumer, , Exclusive, )
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+#endif
+#ifdef SWITCH_ACPI_SWOA_ENABLE
+        // R375: CPU clock control for switchcpu.sys (ACPI\SWOA0701). CAR window
+        // (PLLX, CCLK burst policy), MAX77621 VDD_CPU on I2C5, TMP451 on I2C1
+        // (shared with the fan driver) for the thermal guard.
+        Device (CPUC)
+        {
+            Name (_HID, "SWOA0701")
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x60006000, 0x00001000)
+                I2cSerialBusV2 (0x001B, ControllerInitiated, 400000, AddressingMode7Bit, "\\_SB.I2C5", 0x00, ResourceConsumer, , Exclusive, )
+                I2cSerialBusV2 (0x004C, ControllerInitiated, 100000, AddressingMode7Bit, "\\_SB.I2C1", 0x00, ResourceConsumer, , Shared, )
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+#endif
+#if defined(SWITCH_ACPI_SWOA_ENABLE) || defined(SWITCH_LITE_SYSTEM)
+        // R377: real-time clock for switchrtc.sys (ACPI\SWOA0801). MAX77620 RTC
+        // block at I2C5 0x68. The driver only reads it and keeps its own offset,
+        // so the time Horizon keeps in the RTC is left alone.
+        Device (RTC0)
+        {
+            Name (_HID, "SWOA0801")
+#ifdef SWITCH_LITE_SYSTEM
+            Name (_DEP, Package () { \_SB.I2C5 })
+#endif
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                I2cSerialBusV2 (0x0068, ControllerInitiated, 400000, AddressingMode7Bit, "\\_SB.I2C5", 0x00, ResourceConsumer, , Exclusive, )
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+#endif
+
+#if defined(SWITCH_ACPI_SWOA_ENABLE) || defined(SWITCH_LITE_POWER)
+        Device (I2C5)
+        {
+            Name (_HID, "SWOA0201")
+            Name (_UID, 0x05)
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x7000D000, 0x00000100)
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 0x00000055 }
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+        // R374: power button for switchpwrbtn.sys (ACPI\SWOA0601). The button
+        // drives MAX77620 EN0; the driver polls ONOFFSTAT/ONOFFIRQ on I2C5.
+        Device (PWRB)
+        {
+            Name (_HID, "SWOA0601")
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                I2cSerialBusV2 (0x003C, ControllerInitiated, 400000, AddressingMode7Bit, "\\_SB.I2C5", 0x00, ResourceConsumer, , Exclusive, )
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+#endif
+
+
+#if defined(SWITCH_ACPI_SWOA_ENABLE) || defined(SWITCH_LITE_FAN)
+        // TMP451 temperature sensor bus. Firmware enables I2C1 before Windows.
+        Device (I2C1)
+        {
+            Name (_HID, "SWOA0201")
+            Name (_UID, One)
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x7000C000, 0x00000100)
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 0x00000046 }
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+        // R372: fan control for switchfan.sys (ACPI\SWOA0401). PWM controller
+        // (the driver only writes PWM_CSR_1 = fan) and the TMP451 sensor on I2C1.
+        Device (FAN0)
+        {
+            #ifdef SWITCH_LITE_FAN
+            Name (_HID, "SWOA0402")
+#else
+            Name (_HID, "SWOA0401")
+#endif
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                #ifdef SWITCH_LITE_FAN
+                // Dedicated PWM1 keeps Lite identification and fan control stable.
+                Memory32Fixed (ReadWrite, 0x7000A010, 0x00000004)
+#ifdef SWITCH_LITE_BACKLIGHT
+                // Lite LCD brightness: PWM0/PV0, separate from the fan register.
+                Memory32Fixed (ReadWrite, 0x7000A000, 0x00000004)
+#endif
+#ifdef SWITCH_LITE_PERFORMANCE
+                Memory32Fixed (ReadWrite, 0x60006000, 0x00000100)
+                Memory32Fixed (ReadOnly,  0xA9FB0000, 0x00001000)
+                // DFLL resources are separate so older SwitchFan drivers keep
+                // their existing 0x100-byte PLLX resource and baseline behavior.
+                Memory32Fixed (ReadWrite, 0x70110000, 0x00000300)
+                Memory32Fixed (ReadWrite, 0x6000662C, 0x00000008)
+                Memory32Fixed (ReadWrite, 0x600062F4, 0x00000004)
+                Memory32Fixed (ReadOnly,  0x6000635C, 0x0000000C)
+                Memory32Fixed (ReadWrite, 0x60006438, 0x00000008)
+                Memory32Fixed (ReadWrite, 0x60006448, 0x00000008)
+                Memory32Fixed (ReadOnly,  0x60006128, 0x00000004)
+                // Windows EMC uses its reserved threaded BPMP channel 7.
+                // BPMP may publish a mailbox in IRAM or the reserved SECFW
+                // carveout. The driver maps only its validated 128-byte channel
+                // within the matching resource, never either entire aperture.
+                Memory32Fixed (ReadWrite, 0x60001000, 0x0000000C)
+                Memory32Fixed (ReadWrite, 0x60004018, 0x00000004)
+                Memory32Fixed (ReadWrite, 0xFFE00000, 0x00100000)
+                Memory32Fixed (ReadWrite, 0x40000000, 0x00040000)
+                // MC_ALL activity counter; its private clock/reset 119 controls.
+                Memory32Fixed (ReadWrite, 0x6000C800, 0x00000400)
+                // T210 central ACTMON: GIC SPI45 => ACPI GSIV 32+45=77.
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 0x4D }
+                Memory32Fixed (ReadWrite, 0x600063E8, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x60006430, 0x00000008)
+                Memory32Fixed (ReadWrite, 0x60006440, 0x00000008)
+                Memory32Fixed (ReadOnly,  0x60006358, 0x00000004)
+                // V-bank gate status 0x60006360 is within the DFLL CRS above.
+                // Display QoS plus bounded PTSA bootstrap; no translation aperture.
+                Memory32Fixed (ReadWrite, 0x7001941C, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019420, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019424, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x7001947C, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019480, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019484, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019960, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x7001944C, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x7001950C, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019428, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019434, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019494, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x700194A0, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019440, 0x00000004)
+                Memory32Fixed (ReadOnly,  0x700192E8, 0x00000004)
+                Memory32Fixed (ReadOnly,  0x70019690, 0x00000004)
+                Memory32Fixed (ReadOnly,  0x7001B104, 0x00000004)
+                // Reset-only PTSA bootstrap: exact registers, never an MC aperture.
+                Memory32Fixed (ReadWrite, 0x700190FC, 0x00000004)
+                Memory32Fixed (ReadOnly, 0x700192AC, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x7001942C, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019430, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019438, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x7001943C, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019444, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019448, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019450, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019454, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019458, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x7001945C, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019460, 0x00000004)
+                Memory32Fixed (ReadOnly, 0x70019488, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x7001948C, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019490, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019498, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x7001949C, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x700194A4, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x700194A8, 0x00000004)
+                Memory32Fixed (ReadOnly, 0x700194AC, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x700194B0, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x700194B4, 0x00000004)
+                Memory32Fixed (ReadOnly, 0x700194B8, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x700194BC, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x700194C0, 0x00000004)
+                Memory32Fixed (ReadOnly, 0x700194C4, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x700194C8, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x700194CC, 0x00000004)
+                Memory32Fixed (ReadOnly, 0x700194D0, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x700194D4, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x700194D8, 0x00000004)
+                Memory32Fixed (ReadOnly, 0x700194DC, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x700194E0, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x700194E4, 0x00000004)
+                Memory32Fixed (ReadOnly, 0x700194E8, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x700194EC, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x700194F0, 0x00000004)
+                Memory32Fixed (ReadOnly, 0x700194F4, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x700194F8, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x700194FC, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019510, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019514, 0x00000004)
+                Memory32Fixed (ReadOnly, 0x70019518, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x7001951C, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019520, 0x00000004)
+                Memory32Fixed (ReadOnly, 0x70019524, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019528, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x7001952C, 0x00000004)
+                Memory32Fixed (ReadOnly, 0x70019530, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019534, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019538, 0x00000004)
+                Memory32Fixed (ReadOnly, 0x7001953C, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019540, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019544, 0x00000004)
+                Memory32Fixed (ReadOnly, 0x70019548, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x7001954C, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019550, 0x00000004)
+                Memory32Fixed (ReadOnly, 0x70019554, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x70019558, 0x00000004)
+                Memory32Fixed (ReadWrite, 0x7001955C, 0x00000004)
+#endif
+#else
+                Memory32Fixed (ReadWrite, 0x7000A000, 0x00000100)
+#endif
+                I2cSerialBusV2 (0x004C, ControllerInitiated, 100000, AddressingMode7Bit, "\\_SB.I2C1", 0x00, ResourceConsumer, , Exclusive, )
+#ifdef SWITCH_LITE_PERFORMANCE
+                // Only the detected phase variant is opened by switchlitefan.
+                I2cSerialBusV2 (0x0031, ControllerInitiated, 400000, AddressingMode7Bit, "\\_SB.I2C5", 0x00, ResourceConsumer, , Exclusive, )
+                I2cSerialBusV2 (0x0033, ControllerInitiated, 400000, AddressingMode7Bit, "\\_SB.I2C5", 0x00, ResourceConsumer, , Exclusive, )
+#endif
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+#endif
+
+    } // Scope(_SB)
+}
