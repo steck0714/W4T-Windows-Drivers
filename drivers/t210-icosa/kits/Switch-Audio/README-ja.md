@@ -20,6 +20,8 @@ powershell -ExecutionPolicy Bypass -File .\Audio.ps1 -Mode Install
 設定 > システム > サウンド に「スピーカー」が出れば、ドライバは動いている。
 
 - 状態を見る: `-Mode Status`（ログは `C:\SwitchWOA-Audio.txt`）
+- Windows の通知音を鳴らし、音声のエラーの記録（直近 1 時間）も表示する: `-Mode Check`
+- ドライバだけで 1 秒「ピー」と鳴らす（Windows の音声エンジンを通さない）: `-Mode Tone`
 - 外す: `-Mode Remove`
 
 ## しくみ（段階 1）
@@ -28,9 +30,17 @@ powershell -ExecutionPolicy Bypass -File .\Audio.ps1 -Mode Install
 - Windows が書き込む再生用のバッファを、ADMA のチャンネル 0 が ADMAIF1 に送る。そこから XBAR、I2S1、コーデック、スピーカーの順に流れる。
 - 音量はコーデックで -18 dB に固定している。Windows の音量は、Windows がソフトウェアで調整する。
 
+## ヘッドホン（1.0.0.7 以降、UEFI R403 以降）
+
+- ヘッドホンを差すとヘッドホンから、抜くとスピーカーから鳴る（0.2〜0.4 秒で切り替わる）。
+- Windows に見える出力は「スピーカー」の 1 つのまま。
+- ヘッドホンの音量はコーデックで -24 dB に固定している。
+- UEFI が R402 のときは、スピーカーだけで動く。
+- `-Mode Status` の `JACK:` の行に、いまの出力先が出る。
+
 ## まだできていないこと
 
-- ヘッドホン（差したときの切り替え）
+- ヘッドホンを Windows で別の出力として見せること
 - マイク
 - 音量をコーデック側で調整すること
 - スリープ

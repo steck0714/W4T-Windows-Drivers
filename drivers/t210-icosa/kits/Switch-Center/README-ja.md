@@ -1,5 +1,48 @@
 # Switch コントロールセンター
 
+## v0.9.1（2026-11-20）: ベータ版のチャンネルをなくした
+
+- ドライバーのタブの「更新の種類」（安定版・ベータ版）をなくした。リリースは 1 種類だけになったので、いつもいちばん新しいリリース（GitHub の releases/latest）と比べる。
+- 更新の確認の画面から、「ベータ版（プレリリース）です」の注意をなくした。
+- 0.9.0 までにベータ版を選んでいた人も、0.9.1 からはいちばん新しいリリースを使う（レジストリの `DriverChannel` は読まない）。
+
+## v0.9.0（2026-11-20）: hekate 用の UEFI（bl33）の更新
+
+- リリースに hekate 用の UEFI（manifest の `uefi`、`bl33-<版>.bin`）があると、「更新を確認」のあとに「UEFI を <版> にする（hekate から起動のとき）…」のボタンが出る。
+- 押すと管理者として次のことをする。
+  - リリースを自分で読み直し、bl33 をダウンロードして、SHA-256 と形（UEFI のファームウェアボリューム）を確かめる。
+  - ESP を開く（`mountvol /s`）。`switchroot\switchwoa\bl33.bin` がなければ、hekate から起動していないとみなして、何も変えずに終わる。RCM（coreboot）の ROM は PC にあり、配布もしないので、ここでは更新しない。
+  - 同じ中身なら何もしない（「もう最新」）。
+  - 今の `bl33.bin` と `bl31.bin` を `switchroot\switchwoa-prev\` にコピーし、`hekate_ipl.ini` に「Windows (previous UEFI)」（`boot_prefixes=switchroot/switchwoa-prev/`、`id=SWOAPRV`）を一度だけ足す。古い ini は `.bak-<日時>` で残す。
+  - 新しい bl33 を `bl33.bin.new` に置いて確かめてから、`bl33.bin` と入れ替える。
+- 今の UEFI の版を出す。UEFI R442 から、SMBIOS の BIOS の版（`1.09 R442H (<commit>)`、Windows では `HKLM\HARDWARE\DESCRIPTION\System\BIOS\BIOSVersion`）に版が入る。末尾の `H` は hekate 用、ないものは RCM（coreboot）用。
+  - 版が分かるときは「UEFI: R442H（hekate から起動）」と出し、ボタンも「R442H から R4xxH にする」「最新です」になる。RCM で起動しているときは、ボタンを出さない。
+  - R442 より前の UEFI は版を出さないので、今までどおり DSDT のデバイスからの推定を出す。
+- 新しい UEFI は、次に hekate から Windows を起動したときから使われる。起動しなかったら、hekate で「Windows (previous UEFI)」を選ぶと前の UEFI で起動できる（PC はいらない）。
+- 試したこと: PC 上のフォルダーを ESP に見立てて、bl33 がないときに止まること、R422H から R423H への入れ替え、2 回目は何もしないこと、前の UEFI の項目とファイルを確かめた。
+- 未確認: Switch の上での `mountvol /s`（hekate で起動したときに SD の ESP が開くか）、実際の入れ替えと、そのあとの起動。
+
+## v0.8.1（2026-11-08）: Bluetooth・音声・Wi-Fi を最初から一覧に出す
+
+- ドライバーのタブのデバイス一覧に、「更新を確認」を押す前から Bluetooth（SWOA0B01）、音声（SWOA0C01）、Wi-Fi（SWOA0D01）を出すようにした。0.8.0 までは、リリースの manifest を読んだあとにしか出なかった。
+- デバイスはあるがドライバーが入っていないときは「ドライバー無し」、UEFI が古くてデバイスが無いときは「デバイスが無い（UEFI が古い？）」と出る（ほかのデバイスと同じ）。
+- Wi-Fi の「動作中」の欄に、動いているドライバーの版（例 0.6）を出す。
+- 「困ったときの情報を保存」に、switchbt・switchaudio・switchwlan の記録も入れる。
+
+## v0.8.0（2026-11-08）: Wi-Fi ドライバーの OTA と、ファームウェアの用意
+
+- Wi-Fi ドライバー（switchwlan、`ACPI\SWOA0D01`、UEFI R405 以降）を OTA で入れられるようにした。最初はベータ版のチャンネルだけ。
+  - 入れ替えの前に WLAN AutoConfig（wlansvc）を止め、終わったら起動する。止めないと古いドライバーが外れず、pnputil が 480（query-remove の時間切れ）で止まる。
+  - それでも 480 になったときは、失敗にせず「再起動で入れ替わる」として扱う。
+- ドライバーのタブに「ファームウェア（Wi-Fi・BT）…」を足した。ファームウェア、NVRAM、Bluetooth のパッチ、本体の MAC はリリースに入れない。ユーザーが自分の Switchroot Linux の `/lib/firmware/brcm` からコピーしたファイル（`brcmfmac4356A3-pcie.bin`、`.txt`、`BCM4356A3.hcd`）があるフォルダーを選ぶと、管理者として次の場所にコピーする（どちらもドライバーストアの外なので、ドライバーを更新しても消えない）。
+  - Wi-Fi：`System32\drivers\switchwifi`（そのあと Wi-Fi のデバイスを再起動する）
+  - Bluetooth：`System32\drivers\SwitchWOA\BCM4356A3.hcd`（次の Windows の再起動から使われる）
+  - 同じフォルダーに `wifi-mac.txt`（`xx:xx:xx:xx:xx:xx` の 1 行）があれば、`Services\switchwlan\Parameters\MacAddress` に書く（ドライバーが NVRAM の macaddr に入れる）。
+  - Wi-Fi のファームウェアが動作を確かめた版（7.35.252.108）かどうかを SHA-256 で比べて知らせる（ファイルそのものは入っていない）。
+  - USB（XUSB）のファームウェアは ESP に置くもので、SwitchPatcher で入れる。
+  - ファイルを探す処理と確かめる処理は `app/Shared/SwitchFirmware.cs` にあり、SwitchPatcher と共通。
+- 未確認：Switch での OTA の入れ替えと、ファームウェアのボタン（PC でビルドが通ったところまで）。
+
 ## v0.6.3（2026-10-31）: 横長のウィンドウでの配置、CPU の試験的プロファイル
 
 - **横画面で、概要のグラフが見えなかった（ユーザー報告）:** 概要は、タイル、詳しい状態、グラフを縦に並べていた。横画面ではウィンドウの高さが足りず、グラフの場所がなくなっていた。
