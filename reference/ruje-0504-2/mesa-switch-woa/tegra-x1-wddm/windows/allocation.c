@@ -254,14 +254,23 @@ static NTSTATUS APIENTRY describe_allocation(HANDLE adapter,DXGKARG_DESCRIBEALLO
     if(buffer && ((desc->Buffer.flags&TG_GPU_ALLOCATION_DISPLAY_PRIMARY) ||
         args->Flags.CheckDisplayMode || desc->Buffer.bytes>UINT32_MAX))
         return STATUS_NOT_SUPPORTED;
-    /* Geometry is storage; Rotation is the primary's DISPLAY MODE (WDK).
-     * Dxgkrnl compares it with the active display-mode rotation when
-     * CheckDisplayMode is set. NONPREROTATED changes the stored pixels, not
-     * this mode metadata. Keep it immutable: old and new primaries coexist. */
+    UINT width=buffer?(UINT)desc->Buffer.bytes:linear?allocation->Desc.Linear.Width:desc->Width;
+    UINT height=buffer?1:linear?allocation->Desc.Linear.Height:desc->Height;
+    /* A display-mode query describes the mode, not the application's rotated
+     * storage extent. Dxgkrnl compares width/height BEFORE mode rotation; its
+     * cached mode stays panel-oriented while DXGI exposes rotated dimensions.
+     * Undo only the storage quarter-turn here. NONPREROTATED storage already
+     * has identity orientation. Ordinary allocation queries, pitch, backing
+     * and the DC's real scan direction remain unchanged. */
+    if(args->Flags.CheckDisplayMode && !linear && !buffer &&
+       (desc->Buffer.flags&TG_GPU_ALLOCATION_DISPLAY_PRIMARY) &&
+       (desc->Rotation==D3DDDI_ROTATION_90 || desc->Rotation==D3DDDI_ROTATION_270)) {
+        const UINT swap=width;width=height;height=swap;
+    }
     *args=(DXGKARG_DESCRIBEALLOCATION){
         .hAllocation=args->hAllocation,
-        .Width=buffer?(UINT)desc->Buffer.bytes:linear?allocation->Desc.Linear.Width:desc->Width,
-        .Height=buffer?1:linear?allocation->Desc.Linear.Height:desc->Height,
+        .Width=width,
+        .Height=height,
         .Format=(D3DDDIFORMAT)desc->Format,
         .MultisampleMethod={.NumSamples=1},
         .RefreshRate=(linear||buffer)?(D3DDDI_RATIONAL){0}:
@@ -405,16 +414,23 @@ NTSTATUS APIENTRY TgGpuDdiCloseAllocation(HANDLE device,const DXGKARG_CLOSEALLOC
     KeAcquireSpinLock(&e->Lock,&irql);--d->OpenAllocations;--e->Creating;KeReleaseSpinLock(&e->Lock,irql);
     return STATUS_SUCCESS;
 }
+static NTSTATUS validate_open_access(TG_GPU_DEVICE *device, const TG_GPU_OPEN_ALLOCATION *open, BOOLEAN write)
+{
+    if (open->Device != device || !open->Allocation || open->Allocation->Engine != device->Engine)
+        return STATUS_INVALID_PARAMETER;
+    if (write && open->ReadOnly)
+        return STATUS_ACCESS_DENIED;
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS TgGpuValidateOpenAllocationRange(TG_GPU_DEVICE *d,HANDLE handle,
                                          UINT64 offset,UINT64 bytes,BOOLEAN write)
 {
     TG_GPU_OPEN_ALLOCATION *open=handle;NTSTATUS status=STATUS_SUCCESS;KIRQL irql;
     if(!d || !open || !bytes) return STATUS_INVALID_PARAMETER;
     KeAcquireSpinLock(&d->Engine->Lock,&irql);
-    if(open->Device!=d || !open->Allocation || open->Allocation->Engine!=d->Engine)
-        status=STATUS_INVALID_PARAMETER;
-    else if(write && open->ReadOnly) status=STATUS_ACCESS_DENIED;
-    else if(offset>open->Allocation->Bytes || bytes>open->Allocation->Bytes-offset)
+    status=validate_open_access(d,open,write);
+    if(NT_SUCCESS(status) && (offset>open->Allocation->Bytes || bytes>open->Allocation->Bytes-offset))
         status=STATUS_INVALID_BUFFER_SIZE;
     KeReleaseSpinLock(&d->Engine->Lock,irql);return status;
 }
@@ -426,18 +442,57 @@ void TgGpuRegisterAllocationDdis(DRIVER_INITIALIZATION_DATA *d)
     d->DxgkDdiOpenAllocation=TgGpuDdiOpenAllocation;
     d->DxgkDdiCloseAllocation=TgGpuDdiCloseAllocation;
 }
-NTSTATUS TgGpuGetPresentSurface(TG_GPU_DEVICE *d,HANDLE handle,BOOLEAN write,
-    TG_GPU_PRIMARY_ALLOCATION_REQUEST *desc)
+/* A copy may use a window-sized linear RGB allocation. Direct scanout has
+ * its own stricter format, orientation and extent validation below. */
+static NTSTATUS copy_surface_layout(const TG_GPU_ALLOCATION *allocation,
+                                    TG_GPU_PRIMARY_ALLOCATION_REQUEST *desc)
 {
-    NTSTATUS status=TgGpuValidateOpenAllocationRange(d,handle,0,T214_GPU_POST_FB_SIZE,write);
-    if(!NT_SUCCESS(status) || !desc)return NT_SUCCESS(status)?STATUS_INVALID_PARAMETER:status;
-    const TG_GPU_OPEN_ALLOCATION *open=handle;
-    *desc=open->Allocation->Desc.Primary;
-    if((desc->Buffer.flags&TG_GPU_ALLOCATION_LINEAR_SURFACE) ||
-       desc->Buffer.bytes!=T214_GPU_POST_FB_SIZE ||
-       (desc->Format!=D3DDDIFMT_X8R8G8B8 && desc->Format!=D3DDDIFMT_A8R8G8B8))
+    const TG_GPU_ALLOCATION_DESC *layout = &allocation->Desc;
+    if (layout->Buffer.flags & TG_GPU_ALLOCATION_LINEAR_SURFACE) {
+        const TG_GPU_LINEAR_ALLOCATION_REQUEST *linear = &layout->Linear;
+        if (linear->Buffer.flags != (TG_GPU_ALLOCATION_CPU_VISIBLE | TG_GPU_ALLOCATION_LINEAR_SURFACE))
+            return STATUS_NOT_SUPPORTED;
+        if (linear->Buffer.bytes > allocation->Bytes ||
+            (UINT64)linear->Pitch * linear->Height > linear->Buffer.bytes ||
+            (UINT64)linear->Width * sizeof(UINT32) > linear->Pitch)
+            return STATUS_INVALID_BUFFER_SIZE;
+        *desc = (TG_GPU_PRIMARY_ALLOCATION_REQUEST) {
+            .Buffer = linear->Buffer, .Format = linear->Format,
+            .Rotation = D3DDDI_ROTATION_IDENTITY, .Width = linear->Width,
+            .Height = linear->Height, .Pitch = linear->Pitch
+        };
+    } else {
+        if (allocation->Bytes < T214_GPU_POST_FB_SIZE)
+            return STATUS_INVALID_BUFFER_SIZE;
+        if (layout->Buffer.bytes != T214_GPU_POST_FB_SIZE)
+            return STATUS_NOT_SUPPORTED;
+        *desc = layout->Primary;
+    }
+    if (desc->Format != D3DDDIFMT_X8R8G8B8 && desc->Format != D3DDDIFMT_A8R8G8B8)
         return STATUS_NOT_SUPPORTED;
     return STATUS_SUCCESS;
+}
+
+NTSTATUS TgGpuGetPresentSurfaces(TG_GPU_DEVICE *device,HANDLE source,HANDLE destination,
+    TG_GPU_PRIMARY_ALLOCATION_REQUEST *source_layout,TG_GPU_PRIMARY_ALLOCATION_REQUEST *destination_layout)
+{
+    const TG_GPU_OPEN_ALLOCATION *src = source, *dst = destination;
+    if (!device || !src || !dst || !source_layout || !destination_layout)
+        return STATUS_INVALID_PARAMETER;
+    KIRQL irql;
+    KeAcquireSpinLock(&device->Engine->Lock, &irql);
+    NTSTATUS status = validate_open_access(device, src, FALSE);
+    if (NT_SUCCESS(status))
+        status = validate_open_access(device, dst, TRUE);
+    /* Two device handles and disjoint VAs can still refer to the same backing. */
+    if (NT_SUCCESS(status) && src->Allocation == dst->Allocation)
+        status = STATUS_NOT_SUPPORTED;
+    if (NT_SUCCESS(status))
+        status = copy_surface_layout(src->Allocation, source_layout);
+    if (NT_SUCCESS(status))
+        status = copy_surface_layout(dst->Allocation, destination_layout);
+    KeReleaseSpinLock(&device->Engine->Lock, irql);
+    return status;
 }
 NTSTATUS TgGpuValidatePagingAllocation(TG_GPU_CONTEXT_ENGINE *e,HANDLE handle,UINT64 offset,UINT64 bytes)
 {
@@ -473,6 +528,27 @@ NTSTATUS APIENTRY TgGpuDdiGetStandardAllocationDriverData(HANDLE context,
     PAGED_CODE();
     if (!adapter || !args || args->PhysicalAdapterIndex)
         return STATUS_INVALID_PARAMETER;
+    if (args->StandardAllocationType == D3DKMDT_STANDARDALLOCATION_STAGINGSURFACE) {
+        /* A windowed blit may stage the back buffer for a CPU read. WDDM
+         * fixes the staging format to X8R8G8B8 and supplies its dimensions. */
+        args->AllocationPrivateDriverDataSize = sizeof(TG_GPU_LINEAR_ALLOCATION_REQUEST);
+        args->ResourcePrivateDriverDataSize = 0;
+        if (!args->pAllocationPrivateDriverData)
+            return STATUS_SUCCESS;
+        D3DKMDT_STAGINGSURFACEDATA *surface = args->pCreateStagingSurfaceData;
+        if (!surface)
+            return STATUS_INVALID_PARAMETER;
+        TG_GPU_LINEAR_ALLOCATION_REQUEST desc = {
+            .Buffer = {TG_GPU_ALLOCATION_ABI, TG_GPU_ALLOCATION_CPU_VISIBLE | TG_GPU_ALLOCATION_LINEAR_SURFACE, 0},
+            .Format = D3DDDIFMT_X8R8G8B8, .Width = surface->Width, .Height = surface->Height,
+        };
+        NTSTATUS status = linear_layout(desc.Width, desc.Height, desc.Format, &desc.Pitch, &desc.Buffer.bytes);
+        if (!NT_SUCCESS(status))
+            return status;
+        RtlCopyMemory(args->pAllocationPrivateDriverData, &desc, sizeof(desc));
+        surface->Pitch = desc.Pitch;
+        return STATUS_SUCCESS;
+    }
     if(args->StandardAllocationType==D3DKMDT_STANDARDALLOCATION_GDISURFACE) {
         D3DKMDT_GDISURFACEDATA *gdi=args->pCreateGdiSurfaceData;
         if(!gdi || gdi->Flags.Value)return STATUS_INVALID_PARAMETER;

@@ -77,6 +77,7 @@ core = [root / "core/gm20b_mmu.c", root / "core/report.c", root / "core/gpfifo.c
         root / "core/gr_firmware.c", root / "core/acr_firmware.c", root / "core/gr_image.c",
         root / "core/gr_submit.c", root / "core/gr_clear.c", root / "core/gr_draw.c",
         root / "platform/t214_gr_context.c", root / "platform/t214_interrupt.c", encoder]
+subprocess.run(["python3", str(root / "tests/test_debug_report.py")], check=True)
 host = args.out / "test-gm20b-core"
 subprocess.run([args.cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
                 *[f"-I{p}" for p in mesa_includes], *map(str, core), str(root / "tests/test_core.c"),
@@ -277,7 +278,8 @@ for source in [*core, power, clock, *nvdec_core, root / "platform/t214_nvdec.c",
                root / "windows/diagnostic_events.c",
                root / "windows/platform_io.c",root / "windows/host1x_clock.c",root / "windows/dvfs.c",root / "windows/worker.c",
                root / "windows/platform_adapter.c",root / "windows/gr_firmware_io.c",
-               root / "windows/reset_backend.c",root / "windows/adapter_reset.c"]:
+               root / "windows/reset_backend.c",root / "windows/adapter_reset.c",
+               root / "windows/startup_diagnostic.c"]:
     obj = args.out / (source.stem + ".obj")
     subprocess.run([args.clang_cl, *flags, f"/Fo{obj}", "--", str(source)], check=True)
     objects.append(obj)
@@ -381,7 +383,7 @@ if args.windows_tests:
                     f"/out:{args.out / 'test-worker.exe'}",str(worker_test),
                     str(args.out / "worker.obj"),str(sdk_lib)],check=True)
     dvfs_test=args.out / "test_dvfs_windows.obj"
-    subprocess.run([args.clang_cl,*flags,"/clang:-funwind-tables",f"/Fo{dvfs_test}","--",
+    subprocess.run([args.clang_cl,*flags,f"/I{root}","/clang:-funwind-tables",f"/Fo{dvfs_test}","--",
                     str(root / "tests/test_dvfs_windows.c")],check=True)
     subprocess.run([args.link,"/nologo","/machine:arm64","/subsystem:console,10.0","/entry:start",
                     "/include:_load_config_used","/nodefaultlib","/release","/opt:ref","/timestamp:0",
@@ -400,6 +402,17 @@ if args.windows_tests:
     subprocess.run([args.link,"/nologo","/machine:arm64","/subsystem:console,10.0","/entry:start",
                     "/include:_load_config_used","/nodefaultlib","/release","/opt:ref","/timestamp:0",
                     f"/out:{args.out / 'test-native-start.exe'}",str(native_start_test),str(sdk_lib)],check=True)
+    startup_diagnostic_test=args.out / "test_startup_diagnostic_windows.obj"
+    subprocess.run([args.clang_cl,*flags,"/clang:-funwind-tables",f"/Fo{startup_diagnostic_test}","--",
+                    str(root / "tests/test_startup_diagnostic_windows.c")],check=True)
+    startup_diagnostic_model=args.out / "startup_diagnostic_model.obj"
+    subprocess.run([args.clang_cl,*flags,"/UDBG","/clang:-funwind-tables",
+                    f"/Fo{startup_diagnostic_model}","--",
+                    str(root / "windows/startup_diagnostic.c")],check=True)
+    subprocess.run([args.link,"/nologo","/machine:arm64","/subsystem:console,10.0","/entry:start",
+                    "/include:_load_config_used","/nodefaultlib","/release","/opt:ref","/timestamp:0",
+                    f"/out:{args.out / 'test-startup-diagnostic.exe'}",str(startup_diagnostic_test),
+                    str(startup_diagnostic_model),str(sdk_lib)],check=True)
 
 def copy_firmware(dest):
     for filename in gr_names:
@@ -459,6 +472,12 @@ if build_miniport:
             display_inf = re.sub(r"^Device=.*$",
                 f'Device="Tegra X1 (GM20B) .{args.native_test_version} {build_id}"',
                 display_inf, flags=re.MULTILINE)
+        # Keep the driver version and device identity for a firmware-only trial.
+        # Windows deduplicates the old package if its INF is byte-identical.
+        hs_acr = args.acr_firmware / "nv_acr_ucode_prod.bin"
+        if hashlib.sha256(hs_acr.read_bytes()).hexdigest() == "f948c259ca1c9fc8aad3013fe67372243be025b2790016f0ad9e60f7f4534841":
+            display_inf = display_inf.replace('Disk="T214 render driver"',
+                                              'Disk="T214 render driver - ACR f948c259ca1c"')
         (dest / inf.name).write_text(display_inf)
     else:
         shutil.copyfile(inf, dest / inf.name)
