@@ -15,12 +15,12 @@
 | `reference/l4t/` | hekate・platform-t210-nx・Linux 由来は GPL-2.0、nvgpu の gm20b は MIT | 上流のままコピー（`MANIFEST.sha256`、`NOTICE.md`） |
 | `reference/windows-switch/` | GPL-2.0 | DanilKhmyrov/windows-switch の抜粋 |
 | `reference/windows-for-switch-drivers/` | MIT（ファイル先頭の SPDX） | ruje0504-2/Windows-for-Switch-Drivers `c5ae935` の `core_voltage.h` 1 ファイルのみ。上流のまま無改変 |
-| `reference/hayato41200/` | GPL-2.0(各リポジトリの `LICENSE` と、ファイルごとの SPDX / 著作権表示) | hayato41200/Windows-for-Switch(`2e818b8`)と Windows-for-Switch-Drivers(`28ff74c`)を、上流のまま無改変でスナップショット(`.git` のみ除く)。上流が非公開になっても参照できるように置いた。コミットと SHA-256 は同 `README.md` / `MANIFEST.sha256` |
+| `reference/hayato41200/` | GPL-2.0(各リポジトリの `LICENSE` と、ファイルごとの SPDX / 著作権表示) | hayato41200/Windows-for-Switch(`ba7def6`)と Windows-for-Switch-Drivers(`3d32f29`)を、上流のまま無改変でスナップショット(`.git` のみ除く)。上流が非公開になっても参照できるように置いた。コミットと SHA-256 は同 `README.md` / `MANIFEST.sha256` |
 | `build/HAC-001/hayato41200/` | GPL-2.0(`LICENSE` 同梱) | 上の Drivers の `kits/` の再配布用の写し(`.EFI` を含む。上流の `.cer` は除外)。`.EFI` の対応ソースは `reference/hayato41200/` の `sd-acpi-chainloader.zig`。CI が入れ替えない場所 |
 | `reference/l4t-nvgpu-extra/` | MIT(NVIDIA。各ファイル先頭の許諾文) | CTCaer/switch-l4t-kernel-nvgpu `1ae0167` の追加分(`common/fb`・`falcon`・`mm`・`pmu`・`priv_ring` ほかと `gk20a/` の一部)。上流のまま無改変。`reference/l4t/` の MANIFEST には触っていない |
 | `reference/linux-nouveau-v6.12/` | GPL-2.0(`COPYING`)。nouveau の各ファイルは先頭の SPDX / 許諾文(多くは MIT) | torvalds/linux `v6.12`(`adc2186`)の nouveau(fb / mmu / falcon / acr / pmu ほか)。上流のまま無改変 |
-| `reference/ruje0504-2/mesa-switch-woa/` | ファイルごとの SPDX(MIT 大半、GPL-2.0-only、BSD-2-Clause-Patent)。`tegra-x1-wddm/LICENSE.md`・`LICENSES/`・`NOTICE` 同梱 | ruje0504-2/mesa-switch-woa `b1596cc` の `tegra-x1-wddm/` のみ(Mesa 本体は置かない)。上流のまま無改変 |
-| `reference/ruje0504-2/winx/` | GPL-2.0-only(`LICENSE`、`NOTICE.winx.md`。EDK2 由来は BSD-2-Clause-Patent) | ruje0504-2/winx `0d797d1`。ビルド済み(`.bin` `.efi` `.fsdrv` `.img`)は除外し、パスと SHA-256 を `EXCLUDED-BINARIES.sha256` に記録。ほかは上流のまま無改変 |
+| `reference/ruje0504-2/mesa-switch-woa/` | ファイルごとの SPDX(MIT 大半、GPL-2.0-only、BSD-2-Clause-Patent)。`tegra-x1-wddm/LICENSE.md`・`LICENSES/`・`NOTICE` 同梱 | ruje0504-2/mesa-switch-woa `16e0b75` の `tegra-x1-wddm/` のみ(Mesa 本体は置かない)。上流のまま無改変 |
+| `reference/ruje0504-2/winx/` | GPL-2.0-only(`LICENSE`、`NOTICE.winx.md`。EDK2 由来は BSD-2-Clause-Patent) | ruje0504-2/winx `36197a3`。ビルド済み(`.bin` `.efi` `.fsdrv` `.img`)は除外し、パスと SHA-256 を `EXCLUDED-BINARIES.sha256` に記録。ほかは上流のまま無改変 |
 | `drivers/t214-aula/` | GPL-2.0（windows-switch 由来、`LICENSE` 同梱） | v0.8.0 リリース zip のテキスト部分と、`main` のソース一式(`upstream-src/`、バイナリ・画像は除く)。`patches/` は NintendoSwitchPkg(edk2、BSD-2-Clause-Patent 系)への差分で、ファイルごとの確認結果は `drivers/t214-aula/LICENSE-AUDIT.md`、帰属表示は `drivers/t214-aula/NOTICE.md`(`FbFont.h` に Intel の著作権表示が無い等の問題を記載)。INF の出自（hayato41200 / ruje0504-2）のファイル別ライセンスは**未確認** |
 | `tools/fwfetch/`, `tools/build/`, `tools/check_no_proprietary.py` | GPL-2.0-only（SPDX 表記） | 新規作成。fwfetch の Rust 依存は MIT で使う（`tools/fwfetch/THIRD-PARTY.md`） |
 | `build/` | 中身のソースに従う（上と同じ）。`build/HEG-001/` は windows-switch 由来（GPL-2.0） | ビルド済みバイナリ置き場（`build/README.md`） |
