@@ -394,7 +394,7 @@ d2130d922982135d2cec05d9e1e205c3b2eff74a887188ca949cb81965b05b59  ./docs/hdh001-
 4c35f4b4e527865ab8f5a88bbc19e553ac35d936eae48977539370f1b51838cb  ./docs/hdh001-lab/README.md
 f59f1b461fd6fc71bac0a6786aea36828d11aa8de5f47298b11af9ac560446de  ./docs/hdh001-lab/build-miniport.sh
 35e3c496487f1af4d8003bc4af853279a40fc38394121307faaf8e8d1f9a4002  ./docs/hdh001-lab/hdh001-winpe-read.jpg
-0408dbad62f8d132d0bbddd98e107f98eb3aa20f768d2dbe6c2a8513836b884c  ./docs/hdh001-lab/smbios-r402-acceptance.json
+fc9ffd25a767480c418e1a692f1bda9e69185487fe38d7d4e48a2af31b4d494a  ./docs/hdh001-lab/smbios-r402-acceptance.json
 cd3137926c0601c501cc40e485c91f008e4df8d5494d3b82594e9cb80a055a72  ./docs/hdh001-lab/startnet.cmd
 dfede8a61c07daa29afbda9ff8eeaad4ef31ad04e18ee53e07990955563f502b  ./docs/hdh001-lab/woa-lite-nvsd.ini
 3228af0c832b56054cf4949e316b757f991742886e65a074c4a5860a75c9e04a  ./docs/hdh001-winarm-r3/README.md
@@ -447,13 +447,11 @@ c8051d0d5072039c9df25fa16963f61c459bc646a676252a12c0f77a60684ae9  ./uefi/ehci_re
 60509a30a2dd0c6857a9b4adb568e9c480d43f4e33643adaa7b4cff027bf7db5  ./winpe/startnet.cmd
 4e1efb88a5279398c45359ac428e3ecbc827df69718371168b5bf351fc75e79a  ./winx-bl33.patch
 e7218b587d94c2c15e2dd4b5efd59c471f0003aabfbe20f7967bc241e791c984  ./winx-display/SHA256SUMS.txt
-49d8453243726d0e852eb132c6920beb6d14309f41b249c23d5501f17b0bb5e1  ./winx-display/SampleDisplay.sys
 14a3256edd7198e6d015cd8ac73c8bfa23bad2975ff85561d48f7261ef72d9db  ./winx-display/SwitchWOA-CI-Test.cer
 a860ec60c94584066e4c06dee542a47681b92b92453686ac8871d94a3e6a227a  ./winx-display/build-arm64.sh
 d588242fd986e6e98b837cb7c23bfdf12eceffac15880e10e9fd97c2a0f9bc82  ./winx-display/build-landscape.sh
 f3782fd12b4fdfd1543c11f5cf5fbb6a05808c4a0057c641370147f45a959563  ./winx-display/display-smoke.c
 67a15491ceb4fa63895ac9e4d584315cfe6e27d2dea157169e1cb93b220a3021  ./winx-display/landscape.c
-4011a17916102ca4bf2facaf45d76804dc6d324ec1df1a437dd0acc83dabb0ef  ./winx-display/sampledisplay.cat
 fc220c93e562c6e6ca8fef5147846db33e6b653aba6ab39962cfc6f94389d51e  ./winx-display/winx-display/KMDOD.sln
 07639618c7b94ab9953cc61715f6325877e1854dca611ed9b1bd54497cf5e93a  ./winx-display/winx-display/LICENSE.MIT-Microsoft
 48adc67811b46a13534ac257444e7ea3129c6c2c4875839f19545c85a47844f7  ./winx-display/winx-display/README.md
