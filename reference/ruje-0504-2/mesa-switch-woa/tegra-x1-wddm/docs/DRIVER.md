@@ -3,6 +3,14 @@
 Native Windows ARM64 backend components for the GM20B in Switch Lite (HDH-001,
 T214). See the [hardware status](STATUS.md) for the latest physical results. This document retains the earlier driver contracts and bring-up history.
 
+## NVK builds and hardware qualification on Switch Windows
+
+For changes to shared NVK code, build ARM64, ARM64EC and x86 from the same source revision and qualify all three on the Switch. For architecture-specific changes, build, test and update only the affected implementation. Promote each implementation after its hardware qualification and the applicable baseline checks pass.
+
+Test native ARM64 with an ARM64 client. For ARM64EC, run both a pure x64 client and an ARM64EC client. Both use the same ARM64EC implementation through the existing `tg_nvk_x64.dll` forwarding slot. The release has three NVK implementations. For x86, use the qualified application-private ICD route and record system-wide WOW64 registration separately. For each client, record the actual loaded DLL path and full SHA-256, verify hardware-drawn output, and check normal process exit.
+
+[Selected NVK baselines and hardware receipts](SWITCH_GRAPHICS_HANDOFF.md#nvk-各架构选定基线)
+
 The default build produces a kernel static library. `--probe` also builds a
 System-class KMDF test driver and its SwitchFan PMIC bridge. These are **not**
 a display miniport or Vulkan ICD. They keep the working POST display driver.
@@ -15,7 +23,7 @@ callbacks. `GR_FIRMWARE` is a local directory containing NVIDIA's external
 are supplied by the operator, not stored in this repository. `ACR_FIRMWARE`
 contains the external NVIDIA 32.7.6 `nv_acr_ucode_prod.bin`, `pmu_bl.bin`,
 `gpmu_ucode_image.bin`, `gpmu_ucode_desc.bin`, `pmu_sig.bin` and `fecs_sig.bin`.
-Both sets are required for the secure T214 probe. Run this from the Mesa root.
+The alternate HS ACR from Switchroot Noble’s installed `nvidia-l4t-firmware` 32.3.1-20191209225816 package is `/lib/firmware/gm20b/acr_ucode.bin` (SHA-256 `f948c259ca1c9fc8aad3013fe67372243be025b2790016f0ad9e60f7f4534841`). Stage these original bytes under the Windows name `nv_acr_ucode_prod.bin` alongside the same companion files. Both sets are required for the secure T214 probe. Run this from the Mesa root.
 
 ```sh
 python3 tegra-x1-wddm/tools/build.py \
