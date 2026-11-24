@@ -8,6 +8,8 @@
     out\<Version>\manifest.json                    versions, hardware IDs, minimum UEFI, SHA-256
   Upload the three files to a release tagged drivers-<Version>, or pass -Publish
   to have the GitHub CLI (gh, logged in with `gh auth login`) create the release.
+  The release notes start with release\notes\<Version>.md: what changed in this
+  release (and what is planned). It must exist before a release is made.
   -PublishOnly publishes files that an earlier run already made.
 
   Needs (on the PC): LLVM, the WDK 10.0.19041 + 10.0.26100 headers, the .NET SDK,
@@ -20,7 +22,7 @@ param(
   [Parameter(Mandatory = $true)][ValidatePattern('^\d{4}\.\d{1,2}\.\d{1,2}(\.\d+)?$')][string]$Version,
   [switch]$Publish,
   [switch]$PublishOnly,
-  [switch]$Beta,                  # pre-release: also the drivers marked Beta (stable releases leave them out)
+  [string]$Target,                # the commit or branch to tag (default: the repository's default branch)
   # The Switch UEFI built for hekate (bl33.bin from the UEFI repository's hekate build) and its
   # version (R419H). Attached as bl33-<UefiVersion>.bin; SwitchPatcher puts it on the ESP.
   [string]$HekateBl33,
@@ -29,6 +31,13 @@ param(
 
 $Repo = 'hayato41200/Windows-for-Switch-Drivers'
 
+# What changed in this release: release\notes\<Version>.md, written by hand, required.
+function Get-ChangeNotes {
+  $f = Join-Path $PSScriptRoot "notes\$Version.md"
+  if (-not (Test-Path $f)) { throw "Write what changed in this release in $f first (it goes at the top of the release notes)." }
+  return (Get-Content $f -Raw -Encoding utf8).TrimEnd()
+}
+
 function Publish-Release([string]$dir) {
   $gh = (Get-Command gh -ErrorAction SilentlyContinue).Source
   if (-not $gh) { $gh = Join-Path $env:ProgramFiles 'GitHub CLI\gh.exe' }
@@ -36,12 +45,12 @@ function Publish-Release([string]$dir) {
   & $gh auth status 2>&1 | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'gh is not logged in. Run: gh auth login' }
   $m = Get-Content (Join-Path $dir 'manifest.json') -Raw | ConvertFrom-Json
-  $pre = [bool]$m.prerelease
-  $title = if ($pre) { "Drivers $Version (beta)" } else { "Drivers $Version" }
-  $notes = @($title, '')
-  if ($pre) { $notes += 'Beta: includes drivers still in testing (marked beta). The control center offers them only on the beta channel.', '' }
+  # One channel only (no beta / pre-releases since 2026-11-20): every release is the one the
+  # control center and SwitchPatcher offer, so say in the notes what was tested on hardware.
+  $title = "Drivers $Version"
+  $notes = @($title, '', (Get-ChangeNotes), '')
   $notes += '| Driver | Version | Device | Needs UEFI |', '|---|---|---|---|'
-  $notes += $m.drivers.items | ForEach-Object { "| $($_.service)$(if ($_.beta) { ' (beta)' }) | $($_.version) | $($_.hwid) | $($_.minUefi) |" }
+  $notes += $m.drivers.items | ForEach-Object { "| $($_.service) | $($_.version) | $($_.hwid) | $($_.minUefi) |" }
   $notes += '', "Control center: $($m.app.version) ($($m.app.file))"
   if ($m.patcher) { $notes += "SwitchPatcher (PC): $($m.patcher.version) ($($m.patcher.file))" }
   if ($m.uefi) { $notes += "UEFI for the hekate boot chain: $($m.uefi.version) ($($m.uefi.bl33.file)). SwitchPatcher puts it on the SD; bl31.bin is not included (use your own)." }
@@ -51,8 +60,8 @@ function Publish-Release([string]$dir) {
   $notesFile = Join-Path $dir 'release-notes.md'
   $notes -join "`n" | Set-Content $notesFile -Encoding utf8
   $files = Get-ChildItem $dir -File | Where-Object { $_.Name -ne 'release-notes.md' } | ForEach-Object FullName
-  $preArg = @(if ($pre) { '--prerelease' })          # @() keeps it an array (a lone string would not splat as one argument)
-  & $gh release create "drivers-$Version" @files --repo $Repo --title $title --notes-file $notesFile @preArg
+  $targetArg = @(if ($Target) { '--target', $Target })
+  & $gh release create "drivers-$Version" @files --repo $Repo --title $title --notes-file $notesFile @targetArg
   if ($LASTEXITCODE -ne 0) { throw 'gh release create failed' }
 }
 
@@ -62,6 +71,7 @@ if ($PublishOnly) {
 }
 
 $ErrorActionPreference = 'Stop'
+$null = Get-ChangeNotes            # fail before building when the change notes are missing
 $Root = Split-Path -Parent $PSScriptRoot
 $Out = Join-Path $Root "out\$Version"
 $Stage = Join-Path $Out 'stage'
@@ -90,7 +100,7 @@ $Drivers = @(
   @{ Dir = 'SwitchWlan';        Name = 'switchwlan';    Build = 'drivers\SwitchWlan\build.ps1';                                      Kit = 'Switch-Wlan';        Hwid = 'ACPI\SWOA0D01'; MinUefi = 'R405'; Ja = 'Wi-Fi'; En = 'Wi-Fi'; Boot = $false }
   # Display: WDDM display-only driver against the 10.0.26100 WDK, own build script. Replaced at the next
   # boot like GPIO/I2C: swapping the display driver live can leave the screen black until a restart.
-  @{ Dir = 'SwitchDisplay';     Name = 'switchdisplay'; Build = 'drivers\SwitchDisplay\build.ps1';                                Kit = 'Switch-Display';     Hwid = 'ACPI\SWOA0E01'; MinUefi = 'R408'; Ja = '画面（表示専用ドライバー）'; En = 'Display (display-only)'; Boot = $true; Beta = $true }
+  @{ Dir = 'SwitchDisplay';     Name = 'switchdisplay'; Build = 'drivers\SwitchDisplay\build.ps1';                                Kit = 'Switch-Display';     Hwid = 'ACPI\SWOA0E01'; MinUefi = 'R408'; Ja = '画面（表示専用ドライバー）'; En = 'Display (display-only)'; Boot = $true }
   @{ Dir = 'SwoaDiag';          Name = 'swoadiag';      Src = 'swoadiag.c';      Libs = @();                             Inc = @();  Kit = 'Switch-UsbDiag';     Hwid = '';              MinUefi = '' }
   @{ Dir = 'SwoaHello';         Name = 'SwoaHello';     Src = 'hello.c';         Libs = @();                             Inc = @();  Kit = 'Switch-Stage0';      Hwid = '';              MinUefi = '' }
 )
@@ -101,7 +111,6 @@ function Sha256([string]$path) { (Get-FileHash -Algorithm SHA256 $path).Hash.ToL
 $DriverStage = Join-Path $Stage 'SwitchDrivers'
 $manifestDrivers = @()
 foreach ($d in $Drivers) {
-  if ($d.Beta -and -not $Beta) { continue }
   $dir = Join-Path $Root "drivers\$($d.Dir)"
   $build = Join-Path $Root "build\$($d.Dir)"
   $inf = Join-Path $dir "$($d.Name).inf"
@@ -126,7 +135,7 @@ foreach ($d in $Drivers) {
     $manifestDrivers += [ordered]@{
       service = $d.Name; kit = $d.Kit; inf = "$($d.Kit)/$($d.Name).inf"; hwid = $d.Hwid
       version = $ver; minUefi = $d.MinUefi; sysSha256 = (Sha256 (Join-Path $build "$($d.Name).sys"))
-      nameJa = $d.Ja; nameEn = $d.En; installAt = $(if ($d.Boot) { 'boot' } else { 'live' }); beta = [bool]$d.Beta
+      nameJa = $d.Ja; nameEn = $d.En; installAt = $(if ($d.Boot) { 'boot' } else { 'live' })
     }
   }
 }
@@ -177,7 +186,6 @@ Compress-Archive -Path (Join-Path $patcherStage 'SwitchPatcher.exe'), (Join-Path
 # ------------------------------------------------------------ manifest
 $manifest = [ordered]@{
   release   = "drivers-$Version"
-  prerelease = [bool]$Beta
   created   = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ssK')
   signer    = 'A9E1F054DFCC96F43010918892C3C30D5A522712'
   app       = [ordered]@{ version = $appVersion; file = (Split-Path $appZip -Leaf); sha256 = (Sha256 $appZip) }

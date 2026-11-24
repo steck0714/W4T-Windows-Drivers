@@ -12,19 +12,26 @@ The UEFI and DSDT live in [Windows-for-Switch](https://github.com/hayato41200/Wi
 |---|---|---|---|
 | `tegra210gpio` | ACPI\SWOA0101 | R367 | GPIO controller (GpioClx) |
 | `tegra210i2c` | ACPI\SWOA0201 | R370 | I2C controller (SpbCx). I2C1 / I2C3 / I2C5 |
-| `switchbattery` | ACPI\SWOA0301 | R371 (USB-C: R378) | Battery (battc); switches VBUS and charging when a USB-C device is plugged in or removed |
+| `switchbattery` | ACPI\SWOA0301 | R371 (USB-C: R378, TV: R440H, unpowered adapters: R444H) | Battery (battc); switches VBUS and charging when a USB-C device is plugged in or removed. Since 1.0.0.7 it enters DP Alt Mode when a DP Alt hub is plugged in and tells switchdisplay; since 1.0.0.8 also with unpowered adapters (the Switch powers VBUS) |
 | `switchfan` | ACPI\SWOA0401 | R372 (brightness: R376) | Fan control by temperature, screen brightness, backlight off when the screen turns off |
 | `switchtouch` | ACPI\SWOA0501 | R373 | Touch screen (VHF HID multi-touch) |
 | `switchpwrbtn` | ACPI\SWOA0601 | R374 | Power button (VHF HID). Since 1.0.2.0 a Windows restart returns to hekate (reboot-to-payload, Erista) and shut down powers the console off (MAX77620). Details: `drivers/SwitchPowerButton` ([English](drivers/SwitchPowerButton/README.md), [日本語](drivers/SwitchPowerButton/README-ja.md)) |
 | `switchcpu` | ACPI\SWOA0701 | R375 | CPU clock profiles (614–1766 MHz), thermal limits |
 | `switchrtc` | ACPI\SWOA0801 | R377 | Clock (reads the MAX77620 RTC, remembers the offset and sets the time) |
 | `switchbt` | ACPI\SWOA0B01 | R390 | Bluetooth (the BCM4356A3 on UART-D, connected to the inbox BthMini). 3 Mbps. Bring your own firmware patch `BCM4356A3.hcd` (not distributed). The range is very short for now (the Wi-Fi side is not running) |
-| `switchwlan` | `ACPI\SWOA0D01` | R405 | Wi-Fi (beta). WPA2-Personal, DHCP, internet access. Wi-Fi 5 (802.11ac), 866/866 Mbit/s link. Tested on hardware on 2026-11-08: fast.com 55 Mbit/s down, 39 Mbit/s up. Bring your own firmware `brcmfmac4356(A3)-pcie.bin/.txt` (tested with 7.35.252.108). `switchwlan.sys` 0.6.13 |
-| `switchaudio` (beta) | ACPI\SWOA0C01 | R403 (R402: speaker only) | Audio playback to the speakers and headphones (PortCls WaveRT, 48 kHz, 16-bit, stereo). Switches automatically when headphones are plugged in or removed. Windows sees one output, "Speakers", with one volume. No microphone |
+| `switchwlan` | `ACPI\SWOA0D01` | R405 | Wi-Fi. WPA2-Personal, DHCP, internet access. Wi-Fi 5 (802.11ac), 866/866 Mbit/s link. Tested on hardware on 2026-11-08: fast.com 55 Mbit/s down, 39 Mbit/s up. Bring your own firmware `brcmfmac4356(A3)-pcie.bin/.txt` (tested with 7.35.252.108). `switchwlan.sys` 0.6.13 |
+| `switchaudio` | ACPI\SWOA0C01 | R403 (R402: speaker only) | Audio playback to the speakers and headphones (PortCls WaveRT, 48 kHz, 16-bit, stereo). Switches automatically when headphones are plugged in or removed. Windows sees one output, "Speakers", with one volume. No microphone. 1.1.x: a second output for the TV over USB-C, "Digital Output", listed only while the TV is connected (Tegra HDA, 48 kHz 16-bit stereo; needs `switchdisplay` 1.6) |
 | `switchsensor` | ACPI\SWOA0901 | R379 | Tilt sensor (automatic screen rotation). The light sensor was not found on this unit and is not used |
-| `switchdisplay` (beta) | ACPI\SWOA0E01 | R408 | Built-in panel (WDDM display-only driver, replaces Basic Display). Rotation (Settings and SwitchCenter auto-rotate). Puts the panel to sleep and stops the display controller when the screen turns off. Drawing is still done by the CPU (no GPU acceleration). Replaced at the next boot (`kits/Switch-Display`) |
+| `switchdisplay` | ACPI\SWOA0E01 | R408 | Built-in panel (WDDM display-only driver, replaces Basic Display). Rotation (Settings and SwitchCenter auto-rotate). Puts the panel to sleep and stops the display controller when the screen turns off. Drawing is still done by the CPU (no GPU acceleration). Replaced at the next boot (`kits/Switch-Display`). 1.4.x: TV output over USB-C (mirrors the built-in screen, follows hot-plug and rotation). 1.4.2 fixes the stop right after start (error 43) that every version since 1.2.0 had. 1.5.0: 1920x1080 when the TV takes it. 1.6.x: sound to the TV (with `switchaudio` 1.1); 1.6.2: the boot-loop guard no longer stays tripped after a few quick restarts. 1.7.0: the TV is a second display (Extend, Duplicate or TV only, in Settings > Display) |
 | `swoadiag` | — (only while loaded) | — | Diagnostic: reads the USB (XUSB) registers |
 | `nvtsdhc` | ACPI\NVDA0101 | — (the SD loader adds the device) | SD host (sdport) for booting Windows 11 from SD. SwitchPatcher puts it on the SD (`kits/Switch-Sd`). If boot fails it shows a diagnostic code on a blue screen (see "Blue screen stop codes" below) |
+
+## TV output (USB-C DisplayPort Alt Mode)
+
+- **Needs:** a USB-C hub with DP Alt or a USB-C to HDMI adapter, with or without its own power; UEFI R444H or later; `switchbattery` 1.0.0.8; `switchdisplay` 1.7.0; for sound on the TV also `switchaudio` 1.1.3.
+- **What it does:** the TV is a second display, at 1920x1080 when the TV's EDID lists it, else 1280x720. In Settings > Display pick Extend, Duplicate (the built-in screen on the TV: landscape fills it, portrait is shrunk and centred) or show only on the TV. Connected at boot, the TV shows the UEFI screen already; plugging the hub in after Windows has started works too, and unplugging removes the second display. Sound: pick "Digital Output" in the sound output list (it appears while the TV is connected); 48 kHz, stereo.
+- **Planned:** a check with the official Nintendo dock; modes above 1920x1080 (the current link, two lanes at 2.7 Gbps, cannot carry 4K).
+- **Turning it off:** DWORD `DpAlt` = 0 under `HKLM\SYSTEM\CurrentControlSet\Services\switchbattery\Parameters` (no DP Alt Mode), `TvHotplug` = 0 or `TvMirror` = 0 under `switchdisplay\Parameters`; one display that always mirrors to the TV, as before 1.7.0: `TvExtend` = 0 (`ExtendOff.cmd` in `kits/Switch-Display`); TV sound only: `TvAudio` = 0 under `switchdisplay\Parameters`, or `TvAudioOff` = 1 under `switchaudio\Parameters`.
 
 ## Tested OS
 
@@ -123,7 +130,7 @@ This makes the four release files in `out\<version>\`:
 
 Create a GitHub release (tag `drivers-<version>`) and attach the four files.
 
-`-Beta` makes a pre-release (beta). Drivers marked `Beta` in the table are only in beta releases. When "Update channel" in the control center is set to beta, pre-releases are offered as updates too.
+There are no beta releases (pre-releases) since 2026-11-20. There is one kind of release, and the control center and SwitchPatcher always use the newest one. So the release notes (`release/notes/<version>.md`) say what was tested on hardware and what was not, and only things tested on hardware go into a release.
 
 With the GitHub CLI (logged in with `gh auth login`), `-Publish` also creates the release and uploads the files. To publish files made earlier, use `-PublishOnly`.
 
