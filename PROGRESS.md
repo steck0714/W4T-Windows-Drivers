@@ -47,3 +47,14 @@
 - [x] 2026-11-20: hayato41200 の 2 リポジトリを `reference/hayato41200/`(無改変スナップショット)と `build/HAC-001/hayato41200/`(kits の再配布用の写し)に取り込み(上流が非公開になるため)。実機結果が詰まっているのは `Windows-for-Switch-Drivers/kits/Switch-Gpu/`(`COMPARE-B3c-ja.md`)
 - [x] 2026-11-20: 照合用の上流を `reference/` に無改変で追加: `l4t-nvgpu-extra/`(fb_gm20b.c・flcn_gk20a.c・mm_gk20a.c ほか)、`linux-nouveau-v6.12/`(`vmmgf100.c` の `gf100_vmm_pgd_pde()` ほか)、`ruje0504-2/mesa-switch-woa/tegra-x1-wddm/`(`b1596cc`)、`ruje0504-2/winx/`(バイナリ除く)
 - [ ] 未対応: TegraGpu の PDE(64KiB 構成 `(5<<32)` と hayato41200 の 128KiB 構成 `(3<<32)`)と、SMMU 前提(GPU アドレス bit34 を立てない)の照合。原典は `reference/linux-nouveau-v6.12/`・`reference/l4t-nvgpu-extra/` に揃った。照合してから(実機での確認も別に必要)
+
+## 2026-11-24: 参照の差分更新と hayato 上流の取り込み
+- [x] `reference/hayato41200/` を `Windows-for-Switch ba7def6` / `Windows-for-Switch-Drivers 3d32f29` へ更新(無改変、MANIFEST 再生成)。`build/HAC-001/hayato41200/kits/` も同じ版に
+- [x] `reference/ruje-0504-2/mesa-switch-woa/tegra-x1-wddm/` を `16e0b75`(1112 ファイル)、`winx` を `36197a3` へ更新。winx の旧 manifest にあった `SampleDisplay.sys` / `sampledisplay.cat` を `EXCLUDED-BINARIES.sha256` に移した(29 件)
+- [x] `drivers/t210-icosa/drivers/` を hayato 最新(旧 `28ff74c` と新 `3d32f29` を基準に 3 方向マージ)へ取り込み。**SwitchGpu は 0.4.79 で上流と完全一致(変更なし)**。Audio / Display / Wlan / Tegra210Gpio も取り込み済みで差分なし
+  - SwitchTouch 1.0.0.5 → 1.0.0.7(長押し=右クリック、単タップが二度押しにならない修正)
+  - SwitchFan: 手動ファン制御(1.0.0.3 の 11/23 版)を反映
+  - SwitchBattery 1.0.0.8: 上流の DpCallback 解放を取り込み、こちらの ClassLock 取得(IRP 所有権修正)と併存させた(`SelfManagedIoCleanup`)
+- [ ] 未確認: WDK ビルド・clang のホストテスト(この環境に無い)・実機。マージした 3 ドライバは Actions で通るか要確認
+- [ ] 未対応: TegraGpu(ruje 由来)を ruje 最新(`windows/adapter.c` `adapter_reset.c` ほか)へ合わせる件。ABI ヘッダは `16e0b75` と一致済み。PDE(64KiB と 128KiB)・SMMU の照合も残り
+- [ ] 未対応: app/SwitchCenter(上流 0.9.2)と hayato の UEFI R445H(DP Alt / hekate 音声)は取り込んでいない
