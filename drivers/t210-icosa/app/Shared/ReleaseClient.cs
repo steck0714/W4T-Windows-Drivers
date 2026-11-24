@@ -3,6 +3,12 @@
 // as these checks go: HTTPS from this repository's releases, the ZIP's SHA-256
 // against manifest.json, each .sys against the manifest, and each .cat signed
 // by the project's test certificate.
+//
+// While the repositories are private, every request carries the GitHub
+// sign-in's token (GitHubAuth), and release files are downloaded through the
+// API (releases/assets/<id>, Accept: application/octet-stream), which works for
+// private and public repositories alike. GitHub answers with a redirect to its
+// file storage; HttpClient drops the Authorization header on that redirect.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -35,12 +41,22 @@ namespace SwitchCenter
         public int MinBuild;
     }
 
+    /// <summary>
+    /// The Switch UEFI built for the hekate boot chain (manifest "uefi"): bl33.bin, a separate
+    /// release file. SwitchPatcher puts it in switchroot\switchwoa on the ESP.
+    /// </summary>
+    sealed class UefiBoot
+    {
+        public string Version, Bl33File, Bl33Sha256, Bl33Url;
+    }
+
     sealed class Release
     {
         public string Tag, PageUrl, AppVersion, AppFile, AppSha256, AppUrl, DriversFile, DriversSha256, DriversUrl;
-        public bool Prerelease;           // a GitHub pre-release: beta drivers (Make-Release.ps1 -Beta)
+        public bool Prerelease;           // a GitHub pre-release (none since 2026-11-20; releases/latest skips them)
         public List<ManifestDriver> Drivers = new List<ManifestDriver>();
         public SdBoot Sd;                 // null in releases without it
+        public UefiBoot Uefi;             // null in releases without it
     }
 
     static class ReleaseClient
@@ -54,46 +70,68 @@ namespace SwitchCenter
         static readonly string[] AtNextBoot = { "tegra210gpio", "tegra210i2c" };
         static readonly Regex HwidPattern = new Regex(@"^ACPI\\[A-Z0-9]{4,8}$");
 
-        public static HttpClient NewClient()
+        /// <summary>The sign-in's token for this process (null = not signed in); set by EnsureTokenAsync.</summary>
+        static string token;
+
+        public static async Task EnsureTokenAsync() => token = await GitHubAuth.GetTokenAsync();
+
+        public static HttpClient NewClient() => NewClient(token);
+
+        public static HttpClient NewClient(string bearer)
         {
             var c = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
             c.DefaultRequestHeaders.UserAgent.ParseAdd(Application.ProductName + "/" + Application.ProductVersion.Split('+')[0]);
+            c.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+            if (bearer != null) c.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", bearer);
             return c;
         }
 
-        /// <summary>
-        /// The newest release of a channel: stable = releases/latest (GitHub skips pre-releases there),
-        /// beta = the newest release including pre-releases.
-        /// </summary>
-        public static async Task<Release> FetchChannelAsync(bool beta)
+        /// <summary>GET a GitHub API document. 404/401/403 without a usable sign-in means the release needs one.</summary>
+        static async Task<JsonDocument> GetJsonAsync(HttpClient http, string url)
         {
-            if (!beta) return await FetchAsync(null);
-            string newest = null;
-            Version newestVersion = null;
-            using (HttpClient http = NewClient())
-            using (JsonDocument list = JsonDocument.Parse(await http.GetStringAsync($"https://api.github.com/repos/{Repo}/releases?per_page=30")))
+            using HttpResponseMessage r = await http.GetAsync(url);
+            if (r.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
+                ((r.StatusCode == System.Net.HttpStatusCode.NotFound || r.StatusCode == System.Net.HttpStatusCode.Forbidden) && token == null))
+                throw new SignInRequiredException();
+            r.EnsureSuccessStatusCode();
+            return JsonDocument.Parse(await r.Content.ReadAsStringAsync());
+        }
+
+        /// <summary>Downloads a release file (an API asset URL) to path.</summary>
+        public static async Task DownloadToFileAsync(string url, string path)
+        {
+            using HttpClient http = NewClient();
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Accept.Clear();
+            request.Headers.Accept.ParseAdd("application/octet-stream");
+            using HttpResponseMessage r = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+            if (r.StatusCode == System.Net.HttpStatusCode.Unauthorized || (r.StatusCode == System.Net.HttpStatusCode.NotFound && token == null))
+                throw new SignInRequiredException();
+            r.EnsureSuccessStatusCode();
+            using Stream src = await r.Content.ReadAsStreamAsync();
+            using FileStream dst = File.Create(path);
+            await src.CopyToAsync(dst);
+        }
+
+        static async Task<string> DownloadStringAsync(string url)
+        {
+            string tmp = Path.GetTempFileName();
+            try
             {
-                // GitHub orders the list by the tagged commit's date, not by publishing, so
-                // releases tagged on the same commit come in any order: compare the tags instead.
-                foreach (JsonElement rel in list.RootElement.EnumerateArray())
-                {
-                    string tag = rel.GetProperty("tag_name").GetString();
-                    if (rel.GetProperty("draft").GetBoolean() || tag == null || !TagPattern.IsMatch(tag)) continue;
-                    Version v = System.Version.Parse(tag.Substring("drivers-".Length));
-                    if (newestVersion == null || v > newestVersion) { newest = tag; newestVersion = v; }
-                }
+                await DownloadToFileAsync(url, tmp);
+                return await File.ReadAllTextAsync(tmp);
             }
-            if (newest == null) throw new InvalidDataException("no release found");
-            return await FetchAsync(newest);
+            finally { try { File.Delete(tmp); } catch (IOException) { } }
         }
 
         /// <summary>Reads releases/latest (tag == null) or the given tag, and its manifest.json.</summary>
         public static async Task<Release> FetchAsync(string tag)
         {
             if (tag != null && !TagPattern.IsMatch(tag)) throw new InvalidDataException("bad tag " + tag);
+            await EnsureTokenAsync();
             using HttpClient http = NewClient();
             string api = $"https://api.github.com/repos/{Repo}/releases/" + (tag == null ? "latest" : "tags/" + tag);
-            using JsonDocument rel = JsonDocument.Parse(await http.GetStringAsync(api));
+            using JsonDocument rel = await GetJsonAsync(http, api);
             var r = new Release
             {
                 Tag = rel.RootElement.GetProperty("tag_name").GetString(),
@@ -104,14 +142,15 @@ namespace SwitchCenter
             var assets = new Dictionary<string, string>();
             foreach (JsonElement a in rel.RootElement.GetProperty("assets").EnumerateArray())
             {
-                string url = a.GetProperty("browser_download_url").GetString();
-                // Only files attached to a release of this repository, over HTTPS.
-                if (url.StartsWith($"https://github.com/{Repo}/releases/download/", StringComparison.Ordinal))
+                // The API URL of each file (works while the repository is private), only
+                // for files attached to a release of this repository, over HTTPS.
+                string url = a.GetProperty("url").GetString();
+                if (url.StartsWith($"https://api.github.com/repos/{Repo}/releases/assets/", StringComparison.Ordinal))
                     assets[a.GetProperty("name").GetString()] = url;
             }
             if (!assets.TryGetValue("manifest.json", out string manifestUrl)) throw new InvalidDataException("manifest.json is missing in " + r.Tag);
 
-            using JsonDocument m = JsonDocument.Parse(await http.GetStringAsync(manifestUrl));
+            using JsonDocument m = JsonDocument.Parse(await DownloadStringAsync(manifestUrl));
             JsonElement root = m.RootElement;
             if (root.GetProperty("release").GetString() != r.Tag) throw new InvalidDataException("manifest.json is for another release");
             JsonElement app = root.GetProperty("app");
@@ -158,6 +197,19 @@ namespace SwitchCenter
                 if (!ServicePattern.IsMatch(r.Sd.Service) || !System.Version.TryParse(r.Sd.Version, out _))
                     throw new InvalidDataException("bad manifest entry sd");
             }
+            if (root.TryGetProperty("uefi", out JsonElement uefi))
+            {
+                JsonElement bl33 = uefi.GetProperty("bl33");
+                r.Uefi = new UefiBoot
+                {
+                    Version = uefi.GetProperty("version").GetString(),
+                    Bl33File = bl33.GetProperty("file").GetString(),
+                    Bl33Sha256 = bl33.GetProperty("sha256").GetString().ToLowerInvariant(),
+                };
+                if (!Regex.IsMatch(r.Uefi.Version ?? "", @"^R\d{3,4}[A-Z]?$") || !Regex.IsMatch(r.Uefi.Bl33File ?? "", @"^[A-Za-z0-9._-]{1,64}$"))
+                    throw new InvalidDataException("bad manifest entry uefi");
+                if (!assets.TryGetValue(r.Uefi.Bl33File, out r.Uefi.Bl33Url)) throw new InvalidDataException(r.Uefi.Bl33File + " is missing in " + r.Tag);
+            }
             return r;
         }
 
@@ -181,10 +233,7 @@ namespace SwitchCenter
         /// <summary>Downloads url to path and checks its SHA-256 (lower-case hex).</summary>
         public static async Task DownloadAsync(string url, string path, string sha256)
         {
-            using (HttpClient http = NewClient())
-            using (Stream src = await http.GetStreamAsync(url))
-            using (FileStream dst = File.Create(path))
-                await src.CopyToAsync(dst);
+            await DownloadToFileAsync(url, path);
             string hash = Sha256(path);
             if (hash != sha256)
                 throw new InvalidDataException(T($"{Path.GetFileName(path)} の SHA-256 が manifest と合いません（{hash}）。",

@@ -61,8 +61,6 @@ namespace SwitchCenter
         static readonly TimeSpan PnputilTimeout = TimeSpan.FromMinutes(2);
 
         public static Task<Release> FetchAsync(string tag) => ReleaseClient.FetchAsync(tag);
-        public static Task<Release> FetchChannelAsync(bool beta) => ReleaseClient.FetchChannelAsync(beta);
-        static HttpClient NewClient() => ReleaseClient.NewClient();
         static string Sha256(string path) => ReleaseClient.Sha256(path);
 
         // ------------------------------------------------------------ compare
@@ -74,6 +72,8 @@ namespace SwitchCenter
         /// </summary>
         public static int EstimateUefi()
         {
+            int exact = UefiUpdate.Number(UefiUpdate.RunningVersion());     // R442 and later say it in SMBIOS
+            if (exact > 0) return exact;
             (string Hwid, int Rev)[] added =
             {
                 ("SWOA0801", 377), ("SWOA0701", 375), ("SWOA0601", 374), ("SWOA0501", 373),
@@ -165,10 +165,7 @@ namespace SwitchCenter
             {
                 string zip = Path.Combine(work, "drivers.zip");
                 log(T($"{release.DriversFile} をダウンロードしています…", $"Downloading {release.DriversFile}..."));
-                using (HttpClient http = NewClient())
-                using (Stream src = await http.GetStreamAsync(release.DriversUrl))
-                using (FileStream dst = File.Create(zip))
-                    await src.CopyToAsync(dst);
+                await ReleaseClient.DownloadToFileAsync(release.DriversUrl, zip);
                 string hash = Sha256(zip);
                 if (hash != release.DriversSha256)
                     throw new InvalidDataException(T($"ZIP の SHA-256 が manifest と合いません（{hash}）。", $"The ZIP's SHA-256 does not match the manifest ({hash})."));
@@ -202,11 +199,26 @@ namespace SwitchCenter
                     else
                     {
                         log(T($"{d.Service} を入れています…", $"Installing {d.Service}..."));
-                        int? code = await Pnputil($"/add-driver \"{inf}\" /install", log);
+                        // Wi-Fi: WLAN AutoConfig keeps the adapter open, and the old driver
+                        // then never finishes its query-remove (pnputil exit 480).
+                        bool wlan = d.Service == WifiFirmware.Service;
+                        if (wlan) WifiFirmware.StopWlanService(log);
+                        int? code;
+                        try { code = await Pnputil($"/add-driver \"{inf}\" /install", log); }
+                        finally { if (wlan) WifiFirmware.StartWlanService(log); }
                         if (code == null) { leaveFiles = true; return Stopped(chosen, n, log); }
                         if (code == ExitReboot) reboot = true;
+                        else if (code == 480)                   // ERROR_PNP_QUERY_REMOVE_DEVICE_TIMEOUT
+                        {
+                            log(T("  古いドライバーが外れませんでした。再起動すると新しいドライバーになります。",
+                                  "  The old driver could not be removed; it is replaced at the next restart."));
+                            reboot = true;
+                        }
                         else if (code != 0)
                             throw new InvalidOperationException(T($"pnputil が失敗しました（{code}）。", $"pnputil failed ({code})."));
+                        if (wlan && !WifiFirmware.Present())
+                            log(T("  Wi-Fi のファームウェアがまだありません。「ファームウェア（Wi-Fi・BT）…」で入れてください。",
+                                  "  The Wi-Fi firmware is not there yet; add it with \"Firmware (Wi-Fi, BT)...\"."));
                     }
                 }
                 return reboot ? ExitReboot : ExitOk;
@@ -290,10 +302,7 @@ namespace SwitchCenter
             try
             {
                 string zip = Path.Combine(dir, "app.zip");
-                using (HttpClient http = NewClient())
-                using (Stream src = await http.GetStreamAsync(release.AppUrl))
-                using (FileStream dst = File.Create(zip))
-                    await src.CopyToAsync(dst);
+                await ReleaseClient.DownloadToFileAsync(release.AppUrl, zip);
                 string hash = Sha256(zip);
                 if (hash != release.AppSha256)
                     throw new InvalidDataException(T($"ZIP の SHA-256 が manifest と合いません（{hash}）。", $"The ZIP's SHA-256 does not match the manifest ({hash})."));
