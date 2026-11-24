@@ -1,0 +1,8 @@
+{
+  "url": "https://theofficialgman.github.io/l4t-debs/pool/noble/s/switch-bsp/switch-bsp_5.1.2-34+24.04_all.deb",
+  "sha256": "3652c4303bf274e9148fde70ef6023c6cb3ade48b6d1170179d9caba6b975f4e",
+  "version": "5.1.2-34+24.04",
+  "path": "/usr/share/nvpmodel_indicator/nvpmodel-switch.svg",
+  "svg_sha256": "1876514288eb48133e05cd8e1b512ccec4cc68dd943d4dd797b4a601220ffb42",
+  "ico_sha256": "9d2e3affec9c5937f222fcbdad338a75c3536a2e895c8bf798634999600fe0a6"
+}
