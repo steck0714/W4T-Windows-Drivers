@@ -43,6 +43,13 @@ namespace SwitchCenter
         readonly Label perfStatus = new Label { Dock = DockStyle.Top, Height = 56 };
         readonly List<RadioButton> profileButtons = new List<RadioButton>();
         bool updatingRadios;
+        // 0.9.2: manual fan (switchfan 1.0.0.3). The driver keeps it until the next boot only.
+        readonly CheckBox fanManual = new CheckBox { Dock = DockStyle.Top, Height = 40 };
+        readonly Label fanLabel = new Label { Dock = DockStyle.Top, Height = 30 };
+        readonly TrackBar fanBar = new TrackBar { Minimum = 0, Maximum = 100, TickFrequency = 10, LargeChange = 10, SmallChange = 5, Dock = DockStyle.Top, Height = 50 };
+        readonly Label fanState = new Label { Dock = DockStyle.Top, Height = 30 };
+        readonly Timer fanApply = new Timer { Interval = 150 };
+        bool updatingFan;
 
         // Display
         readonly TrackBar brightnessBar = new TrackBar { Minimum = 3, Maximum = 100, TickFrequency = 10, LargeChange = 10, SmallChange = 5, Dock = DockStyle.Top, Height = 60 };
@@ -204,8 +211,77 @@ namespace SwitchCenter
             };
             page.Controls.Add(profilePanel);
             page.Controls.Add(perfStatus);
+            page.Controls.Add(BuildFanBox());
             page.Controls.Add(note);
             return page;
+        }
+
+        GroupBox BuildFanBox()
+        {
+            var box = new GroupBox { Text = T("ファン", "Fan"), Dock = DockStyle.Bottom, Height = 250, Padding = new Padding(10) };
+            var fanNote = new Label
+            {
+                Dock = DockStyle.Top, Height = 60,
+                Text = T("・68℃ 以上になると、手動でもファンを 100% にします（65℃ 未満で戻ります）。\n" +
+                         "・Windows を再起動すると、自動に戻ります。",
+                         "- At 68℃ or more the fan runs at 100% even when manual (released below 65℃).\n" +
+                         "- Restarting Windows goes back to automatic."),
+            };
+            fanManual.Text = T("ファンの強さを手動で決める", "Set the fan speed by hand");
+            fanBar.Enabled = false;
+            fanLabel.Text = T("手動の強さ: ", "Manual speed: ") + $"{fanBar.Value}%";
+            fanManual.CheckedChanged += (_, _) =>
+            {
+                fanBar.Enabled = fanManual.Checked;
+                if (!updatingFan) ApplyFan();
+            };
+            fanBar.ValueChanged += (_, _) =>
+            {
+                fanLabel.Text = T("手動の強さ: ", "Manual speed: ") + $"{fanBar.Value}%";
+                if (!updatingFan && fanManual.Checked) { fanApply.Stop(); fanApply.Start(); }
+            };
+            fanApply.Tick += (_, _) => { fanApply.Stop(); ApplyFan(); };
+            box.Controls.Add(fanNote);
+            box.Controls.Add(fanState);
+            box.Controls.Add(fanBar);
+            box.Controls.Add(fanLabel);
+            box.Controls.Add(fanManual);
+            return box;
+        }
+
+        void ApplyFan()
+        {
+            try
+            {
+                if (fanManual.Checked) FanControl.SetManual(fanBar.Value);
+                else FanControl.SetAuto();
+            }
+            catch (Win32Exception e) { fanState.Text = T("ファンを変えられませんでした: ", "Could not change the fan: ") + e.Message; }
+        }
+
+        void RefreshFan(FanControl.Status fan)
+        {
+            if (fan == null)
+            {
+                fanState.Text = T("手動の調整には、ファンのドライバー 1.0.0.3 以降が必要です。", "Manual control needs fan driver 1.0.0.3 or later.");
+                fanManual.Enabled = fanBar.Enabled = false;
+                return;
+            }
+            fanManual.Enabled = true;
+            if (!fanApply.Enabled && !fanBar.Capture)
+            {
+                updatingFan = true;
+                fanManual.Checked = fan.Manual;
+                fanBar.Value = Math.Clamp(fan.Manual ? fan.ManualPercent : fan.Percent, fanBar.Minimum, fanBar.Maximum);
+                fanBar.Enabled = fan.Manual;
+                fanLabel.Text = T("手動の強さ: ", "Manual speed: ") + $"{fanBar.Value}%";
+                updatingFan = false;
+            }
+            string why = fan.Failsafe ? T("（温度が読めないため 65% 以上）", " (temperature unreadable: 65% or more)")
+                       : fan.Guard ? T("（68℃ 以上のため 100%）", " (68℃ or more: 100%)")
+                       : fan.Manual ? T("（手動）", " (manual)") : T("（自動）", " (automatic)");
+            fanState.Text = T("今: ", "Now: ") + $"{fan.Percent}%" + why +
+                            (fan.TempValid ? T("    温度: ", "    Temperature: ") + fan.Temp + "℃" : "");
         }
 
         void BuildProfileButtons(CpuClock.Profile[] profiles, Func<CpuClock.Profile, string> label)
@@ -381,11 +457,10 @@ namespace SwitchCenter
         readonly Button checkButton = new Button { Width = 160, Height = 40 };
         readonly Button installButton = new Button { Width = 200, Height = 40, Enabled = false };
         readonly Button appButton = new Button { Width = 370, Height = 40, Visible = false, Margin = new Padding(3, 8, 3, 3) };
+        readonly Button uefiButton = new Button { Width = 370, Height = 40, Visible = false, Margin = new Padding(3, 8, 3, 3) };
         readonly Label updateStatus = new Label { AutoSize = true, MaximumSize = new Size(520, 0), Margin = new Padding(3, 8, 3, 3) };
         // Kept away from the buttons (a tap meant for them opened it), at the bottom.
         readonly LinkLabel releaseLink = new LinkLabel { AutoSize = true, MaximumSize = new Size(520, 0), Visible = false, Margin = new Padding(3, 24, 3, 3) };
-        readonly ComboBox channel = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 330 };
-        const string ChannelKey = @"Software\SwitchWOA\SwitchClock";     // DriverChannel: 0 stable, 1 beta
         Release latest;                       // set by "Check for updates"
         // GitHub sign-in: the releases can be read only by invited accounts (GitHubAuth).
         readonly Label signStatus = new Label { AutoSize = true, MaximumSize = new Size(330, 0), Margin = new Padding(3, 10, 3, 3) };
@@ -424,7 +499,7 @@ namespace SwitchCenter
             driverList.Columns.Add(T("入っている版", "Installed"), 90);
             driverList.Columns.Add(T("動作中", "Running"), 60);
             driverList.Columns.Add(T("最新", "Latest"), 100);
-            var bottom = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 350, FlowDirection = FlowDirection.TopDown, WrapContents = false };
+            var bottom = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 400, FlowDirection = FlowDirection.TopDown, WrapContents = false };
             var reload = new Button { Text = T("再読み込み", "Reload"), Width = 120, Height = 40 };
             reload.Click += (_, _) => LoadDrivers();
             checkButton.Text = T("更新を確認", "Check for updates");
@@ -432,16 +507,9 @@ namespace SwitchCenter
             installButton.Text = T("更新する", "Update");
             installButton.Click += async (_, _) => await InstallUpdates();
             appButton.Click += async (_, _) => await UpdateApp();
+            uefiButton.Click += async (_, _) => await UpdateUefi();
             releaseLink.Text = T("リリースのページを開く", "Open the release page");
             releaseLink.LinkClicked += (_, _) => { if (latest != null) OpenInBrowser(latest.PageUrl); };
-            channel.Items.Add(T("安定版のドライバー", "Stable drivers"));
-            channel.Items.Add(T("ベータ版のドライバー（試験中のものを含む）", "Beta drivers (includes ones in testing)"));
-            channel.SelectedIndex = ReadChannel();
-            channel.SelectionChangeCommitted += async (_, _) => await ChangeChannel();
-            var channelRow = new FlowLayoutPanel { AutoSize = true };
-            channelRow.Controls.Add(new Label { Text = T("更新の種類:", "Channel:"), AutoSize = true, Margin = new Padding(3, 10, 3, 3) });
-            channelRow.Controls.Add(channel);
-            bottom.Controls.Add(channelRow);
             var signRow = new FlowLayoutPanel { AutoSize = true };
             signButton.Click += async (_, _) => await SignInOrOut();
             signRow.Controls.Add(signButton);
@@ -461,10 +529,12 @@ namespace SwitchCenter
             buttons.Controls.Add(installButton);
             bottom.Controls.Add(buttons);
             bottom.Controls.Add(appButton);
+            bottom.Controls.Add(uefiButton);
             bottom.Controls.Add(updateStatus);
             bottom.Controls.Add(releaseLink);
             updateStatus.Text = T($"コントロールセンター {AppVersion}。「更新を確認」で、GitHub の最新のリリースと比べます。",
-                                  $"Control center {AppVersion}. \"Check for updates\" compares with the latest release on GitHub.");
+                                  $"Control center {AppVersion}. \"Check for updates\" compares with the latest release on GitHub.") +
+                                "\n" + UefiLine(Updater.EstimateUefi());
             page.Controls.Add(driverList);
             page.Controls.Add(bottom);
             return page;
@@ -512,33 +582,6 @@ namespace SwitchCenter
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true })?.Dispose();
         }
 
-        static int ReadChannel()
-        {
-            using Microsoft.Win32.RegistryKey k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(ChannelKey);
-            return k?.GetValue("DriverChannel") is int v && v == 1 ? 1 : 0;
-        }
-
-        bool Beta => channel.SelectedIndex == 1;
-
-        async System.Threading.Tasks.Task ChangeChannel()
-        {
-            if (Beta && ReadChannel() == 0 &&
-                MessageBox.Show(this,
-                    T("ベータ版では、GitHub のプレリリースにある試験中のドライバーも、更新の候補になります。\n\n" +
-                      "まだ十分に試していないので、動かなかったり、起動に影響したりすることがあります。" +
-                      "そのときは、「安定版」に戻して、ドライバーを入れ直してください。\n\nベータ版にしますか？",
-                      "With the beta channel, drivers still in testing (GitHub pre-releases) are offered as updates too.\n\n" +
-                      "They are not fully tested and may not work or may affect booting. If that happens, switch back to stable and reinstall the drivers.\n\nUse the beta channel?"),
-                    T("ベータ版のドライバー", "Beta drivers"), MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK)
-            {
-                channel.SelectedIndex = 0;
-                return;
-            }
-            using (Microsoft.Win32.RegistryKey k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(ChannelKey))
-                k.SetValue("DriverChannel", channel.SelectedIndex);
-            if (latest != null) await CheckUpdates();      // compare with the other channel's release right away
-        }
-
         void LoadDrivers()
         {
             List<DriverRow> rows = DriverStatus.Read(latest);
@@ -574,23 +617,32 @@ namespace SwitchCenter
             updateStatus.Text = T("GitHub を確認しています…", "Checking GitHub...");
             try
             {
-                latest = await Updater.FetchChannelAsync(Beta);
+                latest = await Updater.FetchAsync(null);     // releases/latest (one channel, no beta)
                 LoadDrivers();
                 int count = updates.FindAll(x => x.Update).Count;
                 int pending = updates.Sum(x => x.Pending);
                 int uefi = Updater.EstimateUefi();
                 updateStatus.Text =
-                    T($"最新のリリース: {latest.Tag}", $"Latest release: {latest.Tag}") +
-                    (latest.Prerelease ? T("（ベータ版）", " (beta)") : "") + "\n" +
+                    T($"最新のリリース: {latest.Tag}", $"Latest release: {latest.Tag}") + "\n" +
                     T($"コントロールセンター: 今 {AppVersion} / 最新 {latest.AppVersion}", $"Control center: {AppVersion} installed / {latest.AppVersion} latest") + "\n" +
                     (count > 0 ? T($"更新できるドライバー: {count} 件（青い行）", $"Driver updates: {count} (blue rows)")
                                : T("ドライバーはすべて最新です。", "All drivers are up to date.")) + "\n" +
                     (pending > 0 ? T($"再起動を待っているデバイス: {pending} 個\n", $"Devices waiting for a restart: {pending}\n") : "") +
-                    T($"UEFI: R{uefi} 以降（DSDT のデバイスからの推定）", $"UEFI: R{uefi} or later (estimated from the DSDT devices)");
+                    UefiLine(uefi);
                 bool newApp = Updater.AppIsOlder(latest) && latest.AppUrl != null;
                 appButton.Visible = newApp;
                 appButton.Enabled = true;
                 appButton.Text = T($"コントロールセンターを {latest.AppVersion} に更新", $"Update the control center to {latest.AppVersion}");
+                // The button only when it can help: a release UEFI, and not known to be RCM or already that version.
+                string running = UefiUpdate.RunningVersion();
+                bool rcm = running != null && !UefiUpdate.IsHekate(running);
+                bool same = running != null && latest.Uefi != null && running == latest.Uefi.Version;
+                uefiButton.Visible = latest.Uefi != null && !rcm;
+                uefiButton.Enabled = !same;
+                if (latest.Uefi != null)
+                    uefiButton.Text = same ? T($"UEFI は最新です（{running}）", $"UEFI is up to date ({running})")
+                                    : running != null ? T($"UEFI を {running} から {latest.Uefi.Version} にする…", $"Update the UEFI from {running} to {latest.Uefi.Version}...")
+                                    : T($"UEFI を {latest.Uefi.Version} にする（hekate から起動のとき）…", $"UEFI {latest.Uefi.Version} (when booted from hekate)...");
                 releaseLink.Visible = true;
             }
             catch (SignInRequiredException e)
@@ -620,12 +672,9 @@ namespace SwitchCenter
                 ? T("\n\nGPIO と I2C は、ほかのドライバーが使っているので、今は Windows に登録だけして、次に起動したときに入れ替えます。",
                     "\n\nGPIO and I2C are used by the other drivers, so they are only added now and replaced at the next boot.")
                 : "";
-            string betaNote = latest.Prerelease
-                ? T("\n\nこれはベータ版（プレリリース）です。試験中のドライバーが含まれます。", "\n\nThis is a beta (pre-release) with drivers still in testing.")
-                : "";
             if (MessageBox.Show(this,
-                    T($"{latest.Tag} から、次のドライバーを入れます。\n\n{list}\n\n管理者の確認が出ます。入れる前に、SHA-256 と署名を確かめます。{bootNote}{betaNote}",
-                      $"Install these drivers from {latest.Tag}?\n\n{list}\n\nWindows will ask for administrator approval. SHA-256 and signatures are checked first.{bootNote}{betaNote}"),
+                    T($"{latest.Tag} から、次のドライバーを入れます。\n\n{list}\n\n管理者の確認が出ます。入れる前に、SHA-256 と署名を確かめます。{bootNote}",
+                      $"Install these drivers from {latest.Tag}?\n\n{list}\n\nWindows will ask for administrator approval. SHA-256 and signatures are checked first.{bootNote}"),
                     T("ドライバーの更新", "Driver update"), MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
 
             installButton.Enabled = checkButton.Enabled = false;
@@ -640,6 +689,45 @@ namespace SwitchCenter
             };
             checkButton.Enabled = true;
             LoadDrivers();
+        }
+
+        /// <summary>"UEFI: R442H (hekate)" from SMBIOS, or the DSDT estimate for UEFIs older than R442.</summary>
+        static string UefiLine(int estimate)
+        {
+            string v = UefiUpdate.RunningVersion();
+            if (v != null)
+                return UefiUpdate.IsHekate(v) ? T($"UEFI: {v}（hekate から起動）", $"UEFI: {v} (booted from hekate)")
+                                              : T($"UEFI: {v}（RCM・coreboot から起動）", $"UEFI: {v} (booted from RCM / coreboot)");
+            return T($"UEFI: R{estimate} 以降（DSDT のデバイスからの推定。R442 より前の UEFI は版を出しません）",
+                     $"UEFI: R{estimate} or later (estimated from the DSDT devices; UEFIs before R442 do not report a version)");
+        }
+
+        /// <summary>hekate chain only: bl33.bin on the ESP, replaced by the elevated --update-uefi process.</summary>
+        async System.Threading.Tasks.Task UpdateUefi()
+        {
+            if (latest?.Uefi == null) return;
+            if (MessageBox.Show(this,
+                    T($"ESP の UEFI（switchroot\\switchwoa\\bl33.bin）を、{latest.Tag} の {latest.Uefi.Version} にします。\n\n" +
+                      "hekate から Windows を起動しているときだけ使えます（RCM の ROM は PC で更新してください）。\n" +
+                      "今の UEFI は、hekate のメニューの「Windows (previous UEFI)」として残します。新しい UEFI で起動しなかったら、そちらを選んでください。\n\n" +
+                      "管理者の確認が出ます。置く前に SHA-256 を確かめます。",
+                      $"Replace the UEFI on the ESP (switchroot\\switchwoa\\bl33.bin) with {latest.Uefi.Version} from {latest.Tag}?\n\n" +
+                      "Only when Windows is booted from hekate (update an RCM ROM on your PC).\n" +
+                      "The current UEFI stays as \"Windows (previous UEFI)\" in the hekate menu; choose it if the new one does not boot.\n\n" +
+                      "Windows will ask for administrator approval. The SHA-256 is checked first."),
+                    T("UEFI の更新", "UEFI update"), MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+            uefiButton.Enabled = checkButton.Enabled = false;
+            int? code = await UefiUpdate.RunElevatedAsync(latest.Tag);
+            updateStatus.ForeColor = code is UefiUpdate.ExitUpdated or UefiUpdate.ExitUpToDate ? Color.DarkGreen : Color.Firebrick;
+            updateStatus.Text = code switch
+            {
+                null => T("管理者の確認がキャンセルされました。", "Administrator approval was cancelled."),
+                UefiUpdate.ExitUpdated => T($"UEFI を {latest.Uefi.Version} にしました。次に hekate から起動したときに新しくなります。", $"UEFI {latest.Uefi.Version} is in place; it starts at the next boot from hekate."),
+                UefiUpdate.ExitUpToDate => T($"UEFI はもう {latest.Uefi.Version} です。", $"The UEFI is already {latest.Uefi.Version}."),
+                UefiUpdate.ExitNotHekate => T("hekate から起動していないので、UEFI は変えていません。RCM の ROM は PC で更新してください。", "Not booted from hekate, so the UEFI was not changed. Update an RCM ROM on your PC."),
+                _ => T("UEFI を更新できませんでした。理由は、更新の画面に出ています。", "The UEFI update failed; the update window shows why."),
+            };
+            uefiButton.Enabled = checkButton.Enabled = true;
         }
 
         async System.Threading.Tasks.Task UpdateApp()
@@ -752,6 +840,10 @@ namespace SwitchCenter
             try { light = Backlight.Get(); } catch (Win32Exception) { }
             BatteryInfo battery = BatteryInfo.Read();
             int? fan = FanInfo.Percent;
+            FanControl.Status fanStatus = null;
+            try { fanStatus = FanControl.Get(); } catch (Win32Exception) { }
+            if (fanStatus != null) fan = fanStatus.Percent;
+            RefreshFan(fanStatus);
 
             cpuValue.Text = cpu != null ? $"{cpu.Khz / 1000.0:0} MHz" : "—";
             tempValue.Text = cpu is { TempValid: true } ? $"{cpu.TempSoC}℃" : "—";
@@ -767,7 +859,8 @@ namespace SwitchCenter
                 T("コアごとの使用率: ", "Usage per core: ") + cores + "\n" +
                 T("CPU の電圧: ", "CPU voltage: ") + (cpu != null ? cpu.Mv + " mV" : "—") + "\n" +
                 T("基板の温度: ", "Board temperature: ") + (cpu is { TempValid: true } ? cpu.TempBoard + "℃" : "—") +
-                T("    ファン: ", "    Fan: ") + (fan is int f ? f + "%" : "—") + "\n" +
+                T("    ファン: ", "    Fan: ") + (fan is int f ? f + "%" : "—") +
+                (fanStatus is { Manual: true } ? T("（手動）", " (manual)") : "") + "\n" +
                 T("電源: ", "Power: ") + battery.PowerText +
                 T("    バッテリーの電圧: ", "    Battery voltage: ") + (battery.Millivolts is int mv ? mv + " mV" : "—") + "\n" +
                 "USB-C: " + battery.UsbcText + "\n" +
@@ -821,6 +914,7 @@ namespace SwitchCenter
             {
                 timer.Dispose();
                 brightnessApply.Dispose();
+                fanApply.Dispose();
                 sensorTimer.Dispose();
                 tileValueFont.Dispose();
                 tileTitleFont.Dispose();

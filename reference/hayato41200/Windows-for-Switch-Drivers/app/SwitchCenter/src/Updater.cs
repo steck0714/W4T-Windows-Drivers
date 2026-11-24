@@ -61,7 +61,6 @@ namespace SwitchCenter
         static readonly TimeSpan PnputilTimeout = TimeSpan.FromMinutes(2);
 
         public static Task<Release> FetchAsync(string tag) => ReleaseClient.FetchAsync(tag);
-        public static Task<Release> FetchChannelAsync(bool beta) => ReleaseClient.FetchChannelAsync(beta);
         static string Sha256(string path) => ReleaseClient.Sha256(path);
 
         // ------------------------------------------------------------ compare
@@ -73,6 +72,8 @@ namespace SwitchCenter
         /// </summary>
         public static int EstimateUefi()
         {
+            int exact = UefiUpdate.Number(UefiUpdate.RunningVersion());     // R442 and later say it in SMBIOS
+            if (exact > 0) return exact;
             (string Hwid, int Rev)[] added =
             {
                 ("SWOA0801", 377), ("SWOA0701", 375), ("SWOA0601", 374), ("SWOA0501", 373),
