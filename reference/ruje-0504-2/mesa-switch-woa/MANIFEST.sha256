@@ -358,7 +358,7 @@ fa1ddaa54b49e3c955beb53de4ea6cbebafceb6d2d9d4db96229922132115cc5  tegra-x1-wddm/
 15b26cc9f5981ff0ff360ae3fde3eb79074a2b7e3c315a813fdd56c2e7b4ed41  tegra-x1-wddm/docs/nvk-wsi-dib-a143bee5/permanent-grant.json
 928899874f9b707b254aa89c34bca410d136d5b535291b82a02e5b40fb92f0e3  tegra-x1-wddm/docs/nvk-wsi-dib-a143bee5/qualification.json
 819f0c6e1db10e7037f54b35a1c67a57c66f70803ccaeb9b1e7a80620c110f20  tegra-x1-wddm/docs/nvk-wsi-dib-a143bee5/system-one-time.json
-1b3b4c1f98329363037bd0f7deaa7f4aee1acf6c2d3f01f99232204abef33bf2  tegra-x1-wddm/docs/open-faults.json
+33d0fb175ea4d153f62b3704e42c85e24523fcbff2252caf95742108abaf3df8  tegra-x1-wddm/docs/open-faults.json
 57931d11fb578c586b062b9421a09ed681a8dd2427f63e3c1b4d0fd7792e9314  tegra-x1-wddm/docs/present1-reserved1-0790651c/README.md
 b2e0eb9346d9e1d5e531c52fe721133e4b32296813bce182a1351eeaa448f418  tegra-x1-wddm/docs/present1-reserved1-0790651c/build.json
 fbbaf44106df0c18e147f67af07ad85c680de0461c2e2bb5d26b2d2436972325  tegra-x1-wddm/docs/present1-reserved1-0790651c/causal-evidence.json
@@ -394,6 +394,10 @@ c8c2323df75df9d174e87ed1f6e6ea45e84942f242ddd2f67aca20c77aedc4ca  tegra-x1-wddm/
 0c5bd4349133a4427311b903dfeec0ce712efd3b28ac52f48b296226cd18f017  tegra-x1-wddm/docs/windows-native-graphics/c4-adapter-target-static-main-review-20261123.json
 079ea133ec3c916dec2899db72071bdfeca50f6b86143ee05981fe8d1c2ba2fd  tegra-x1-wddm/docs/windows-native-graphics/c4-adapter-target-store-main-review-20261123.json
 8ee611c3e9dfd234f6975ed6c7eeb098bc06dbe73af95e3feed7b8c1b25f4ecf  tegra-x1-wddm/docs/windows-native-graphics/c4-formal-activation-main-review-20261124.json
+71dc3b9392548e73dbd014ac668b293ba19e7b6c7baa4bc387c1d22886bb6fab  tegra-x1-wddm/docs/windows-native-graphics/c4-sd0513-unexplained-boot100286-20261124.System.xml
+8cb8754754591b6621add1b364aa89af0555aa03bd3bc3596fe302956a378771  tegra-x1-wddm/docs/windows-native-graphics/c4-sd0513-unexplained-boot100286-20261124.json
+6ea906cac73fbf71c33bc1ad28b7c74ef01d79c0610c5e8397950db110ea436d  tegra-x1-wddm/docs/windows-native-graphics/c4-sd0513-unexplained-boot100286-20261124.main-review.json
+41044840e97132493e8f2eaf5905631c160ab271e60a10b7c25c249442bcd691  tegra-x1-wddm/docs/windows-native-graphics/c4-sd0513-unexplained-boot100286-20261124.native-original.json
 e7205c0a2f8b6c1de2dd42bdc5cb7cd37dbcfe6310d47adea3557484600f3841  tegra-x1-wddm/docs/windows-native-graphics/candidate-boot-95090-comparison.json
 b57164d618b71313d04a0c16b8f7eaf9a9881b4308fa5be626348cdfe91df49c  tegra-x1-wddm/docs/windows-native-graphics/capture-boundary-correction-main-review-20261122.json
 bc155dad7b980e00cae430c592cc73d8af118ba48c6a09ccbf00890d470632d0  tegra-x1-wddm/docs/windows-native-graphics/context-native-idle-main-review-20261123.json
@@ -402,6 +406,7 @@ bc155dad7b980e00cae430c592cc73d8af118ba48c6a09ccbf00890d470632d0  tegra-x1-wddm/
 d6485599d276833bf24c7b71dcc8fc88e69b41c60a78deef8967825bf4e55c58  tegra-x1-wddm/docs/windows-native-graphics/desktop-capture-progress-review-20261122.json
 9743e495388690be6e27a63d6567f67e380c8fc9c284fa72d57155113c361ae3  tegra-x1-wddm/docs/windows-native-graphics/dma-return-calibration-94004.json
 81a59df48b1f3164a0044eeb41f6f8cd453db9665467f318e1517e1200005576  tegra-x1-wddm/docs/windows-native-graphics/executor-interruption-main-review-20261124.json
+996a2e46c5751eb9830377f375989a1c7451887615cce2618a2227d14b9ef4cd  tegra-x1-wddm/docs/windows-native-graphics/explorer5496-retained-umd-main-review-20261124.json
 de1b1a1280a4318cc5c38b7906004a26001d59d126a67cd8a448ce364ae1b06e  tegra-x1-wddm/docs/windows-native-graphics/first-present-deferred-contracts-20261121.json
 864ec6e03b0d0440316e9f50a76fb407056588cf69dea11b44d1125c7892c97a  tegra-x1-wddm/docs/windows-native-graphics/first-present-deferred-contracts-review-20261122.json
 75ef64cbaf3c3fd0e19b3ab8f57d7742e8f493083c99ce1df7b81c53145b5cf0  tegra-x1-wddm/docs/windows-native-graphics/first-present-main-review-20261121.json
@@ -643,6 +648,19 @@ a877ceb522fa4d1823bc89683d5c6e50ac1ee50d9c93d04109694593510d2d3f  tegra-x1-wddm/
 1860cf734eb7f52b020ef4b985aaa042b617805230d0352c24a2beddec3ac086  tegra-x1-wddm/docs/windows-native-graphics/sd-dump-preparation-20261124/public-ddi-contracts.json
 2bde197fd36a2acb8e823b3a59b1546c99424cacceac87012435d58d99f7c2bd  tegra-x1-wddm/docs/windows-native-graphics/sd-dump-preparation-20261124/source-input-identity.json
 314552cd0212e6b7d4d90ddfb96c6be9d67ce858ef7c4c606e1f85d1f11e82c6  tegra-x1-wddm/docs/windows-native-graphics/sd-dump-preparation-main-review-20261124.json
+d1d3070e883e3ff16a670aa9fe54ccea004e455931a3ffa08fc2507357182228  tegra-x1-wddm/docs/windows-native-graphics/sd0513-boot100134-main-review-20261124.json
+04ea4410f4c960572133d95fa320ce3261de841b2e4e7b101da7d6373373ebc1  tegra-x1-wddm/docs/windows-native-graphics/sd0513-candidate-boot100134-unclean-20261124.System.xml
+947fb34cb3e4eb2b6d0ca18fc0ed7534dd84e8a4555271bd36d0b28da3892ed3  tegra-x1-wddm/docs/windows-native-graphics/sd0513-candidate-boot100134-unclean-20261124.json
+9742046df0b6fc990ec4488447185e6db9184a47099cd7e731ee68dd867a7ab9  tegra-x1-wddm/docs/windows-native-graphics/sd0513-candidate-boot100134-unclean-20261124.native-original.json
+b5206c9450d68522f07205423ee3f185063a5c1e18adadbe3e91e2eb2a8131b4  tegra-x1-wddm/docs/windows-native-graphics/sd0513-negative-batch-main-review-20261124.json
+9ead080af02bd0650de92692b28aec22d720cf4288eea0de6fe2e554478da436  tegra-x1-wddm/docs/windows-native-graphics/sd0513-normalIO-boot100134-20261124.json
+8739833be93cf4c0f1690bbc990631b97730848bac45323c73e37647ca729377  tegra-x1-wddm/docs/windows-native-graphics/sd0513-normalIO-boot100134-20261124.native-original.json
+4096bb74c591ab2ec0162ac08f695b3d286ce1f4fac53ef517de2b3bf7d9c867  tegra-x1-wddm/docs/windows-native-graphics/sd0513-one-NT-no-dump-boot100210-20261124.System.xml
+91fd44cd3381d44b7af0a6476c27740e9ed0095963a091f50987dadba71350a5  tegra-x1-wddm/docs/windows-native-graphics/sd0513-one-NT-no-dump-boot100210-20261124.json
+1019475b20ce9e70895978f0a317c92df7ede05ec879605993feca2ee91ad6e0  tegra-x1-wddm/docs/windows-native-graphics/sd0513-one-NT-no-dump-boot100210-20261124.native-original.json
+348ab34f000a11d10319e723c01111815ba4429b944fdfacfc19b43403b9d8c0  tegra-x1-wddm/docs/windows-native-graphics/sd0515-boot100692-black-screen-20261124.System.xml
+d1067048daa40ef89aefee7dbc0e3d3f9ab5559e0c9aa05ed3cc74cdd34e9f83  tegra-x1-wddm/docs/windows-native-graphics/sd0515-boot100692-black-screen-20261124.json
+2c6cfb7b5f1ebdd63c57c689b7effc5d79181ca6a8d9492925eafa06c3a0c6a1  tegra-x1-wddm/docs/windows-native-graphics/sd0515-boot100692-black-screen-20261124.native-original.bin
 115d5b9f104cd19ca98badd34869eac6e33824e7baed886990aece47e16d7061  tegra-x1-wddm/docs/windows-native-graphics/sequential-dma-recovery.md
 416beb3798fa69c81b5265b36044b5f123260345f9d6ce9e8cf33a91509ff484  tegra-x1-wddm/docs/windows-native-graphics/small-dump-control-main-review-20261122.json
 19bdaf672c60e82548f6d7d71ac6664d97ffc6e5427f24b2019a5f4318978185  tegra-x1-wddm/docs/windows-native-graphics/tdr-baseline-callback-binding-20261122.json

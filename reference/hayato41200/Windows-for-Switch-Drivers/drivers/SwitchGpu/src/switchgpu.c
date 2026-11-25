@@ -15,7 +15,7 @@
  * At every start the driver only READS: PMC_GPU_RG_CNTRL, the GPU clock and
  * reset bits, PLLP_OUTC, the fuse clock, the MC hot reset bits, the MAX77621
  * registers and MAX77620 GPIO6. Nothing is written unless the registry value
- * PowerTest = 1; then, once (PowerTest is reset to 0 first), the GPU is
+ * PowerTest is 6 or Cycle is requested. The GPU is
  * powered as L4T nvgpu gm20b_tegra_unrailgate does:
  *   VDD_GPU 1.0 V (VOUT = VOUT_DVS = 0xBF) and GPIO6 high, 2 ms;
  *   clocks: gpu gate (CLK_X 24), pllg_ref (CLK_X 29), pll_p_out5 204 MHz
@@ -26,9 +26,8 @@
  *   MC flush (MC + 0x970 bit 2, wait MC + 0x974 bit 2), 10 us, flush done;
  * then NV_PMC_BOOT_0 (BAR0 + 0), PTIMER (BAR0 + 0x9400 / 0x9410) and the WPR the
  * GPU sees (NV_PFB 0x100CD4, index 2 / 3, as nouveau's gm200_acr_wpr_check) are read,
- * BAR0 only if the clamp is off, the clock on and the reset low. Unless
- * KeepOn = 1, the GPU is then powered down in the reverse order and every
- * register is put back as it was found.
+ * BAR0 only if the clamp is off, the clock on and the reset low. E1 retains
+ * the GPU on success. Resident controls use admin-only device IOCTLs.
  *
  * Before each step "Step" is written and the key flushed to disk, so after a
  * hang and a restart Status.cmd shows where it stopped.
@@ -38,8 +37,9 @@
 #include <ntstrsafe.h>
 #include <wdf.h>
 #include <spb.h>
+#include "swgpu-blit.h"
 
-#define SWGPU_VERSION      0x0000044Fu   /* 0.4.79 */
+#define SWGPU_VERSION      0x00000D00u   /* 0.13.0 */
 
 #define CAR_PHYS           0x60006000ull
 #define CAR_LEN            0x1000u
@@ -91,9 +91,7 @@
 /* The WPR the GPU sees (from the MC carveouts sent with SEND_CFG_TO_GPU):
  * write index 2 -> start >> 8 in [31:8], index 3 -> limit (nouveau gm200_acr_wpr_check). */
 #define NV_PFB_MMU_WPR_INFO 0x100CD4
-/* Stage B1 probe (PowerTest = 2): no firmware, nothing executed on the GPU. */
 #define NV_PTOP_DEVICE_INFO 0x022700    /* 64 entries (nouveau gk104_top_parse) */
-#define NV_PTOP_SCAL       0x022430    /* num GPCs, TPC/GPC, FBPs, ... (nvgpu hw_top) */
 #define PMU_FALCON         0x10A000
 #define FALCON_MAILBOX0    0x040
 #define FALCON_MAILBOX1    0x044
@@ -101,13 +99,11 @@
 #define FALCON_HWCFG       0x108       /* IMEM = ([8:0]) << 8, DMEM = ([17:9]) << 8 */
 #define FALCON_DMACTL      0x10C
 #define FALCON_ITFEN       0x048       /* bit 0: external interface on (nouveau sets it before DMA) */
-#define FALCON_HWCFG1      0x12C
 #define FALCON_SCTL        0x240
 #define FALCON_DMEMC0      0x1C0       /* BIT24 auto-increment write, BIT25 read */
 #define FALCON_DMEMD0      0x1C4
 #define PMU_DEBUG          0xC08       /* bit 20 = debug-fused (nouveau gm200_pmu_flcn.debug) */
-/* Stage B2a probe (PowerTest = 3): falcon DMA in physical mode, no firmware.
- * Falcon v4 DMA (open-gpu-kernel-modules dev_falcon_v4.h): */
+/* Falcon DMA registers used by ACR and its diagnostics. */
 #define FALCON_DMATRFBASE  0x110       /* address >> 8 */
 #define FALCON_DMATRFMOFFS 0x114       /* DMEM/IMEM offset */
 #define FALCON_DMATRFCMD   0x118       /* IDLE bit 1, IMEM bit 4, WRITE bit 5 (falcon -> memory), SIZE [10:8], CTXDMA [14:12] */
@@ -121,22 +117,15 @@
 #define FALCON_IMEMD0       0x184
 #define FALCON_IMEMT0       0x188
 #define FALCON_IMEMC_AINCR  (1u << 25)
-#define DMATRFCMD_IDLE     (1u << 1)
-#define DMATRFCMD_WRITE    (1u << 5)
-#define DMATRFCMD_256B     (6u << 8)
-#define DMA_IDX            4u          /* ctx dma index 4 = PHYS_SYS_NCOH in nouveau's PMU setup */
 #define PMU_UCODE_DMA_IDX  0u          /* GK20A_PMU_DMAIDX_UCODE: physical local FB */
 /* PMU FBIF at + 0xE00 (nouveau gm200_pmu_flcn_bind_inst); TRANSCFG(i) = + 4 i:
  * TARGET [1:0] (2 = noncoherent sysmem), MEM_TYPE bit 2 (1 = physical);
  * FBIF_CTL + 0x24 bit 7 = ALLOW_PHYS_NO_CTX (dev_fbif_v4.h). */
 #define PMU_FBIF_TRANSCFG(i) (0xE00 + (i) * 4)
 #define PMU_FBIF_CTL       0xE24
-#define FBIF_PHYS_NCOH     6u
 /* PMC_ENABLE units of the memory path (nvgpu hw_mc_gm20b: xbar bit 2, l2 bit 3,
  * pfb bit 20, hub bit 29; nvgpu gk20a_fb_reset resets these four together). */
-#define PMC_ENABLE_MEMPATH ((1u << 2) | (1u << 3) | (1u << 20) | (1u << 29))
 /* Tegra210 MC SMMU (Linux tegra210.c / tegra-smmu.c) */
-#define MC_SMMU_CONFIG     0x010       /* bit 0 = SMMU on */
 #define MC_INTSTATUS       0x000       /* MC error interrupts (Linux tegra mc.c) */
 #define MC_ERR_STATUS      0x008
 #define MC_ERR_ADR         0x00C
@@ -147,8 +136,108 @@
 #define SMMU_ATTR_RWNS     0xE0000000u /* readable, writable, non-secure (tegra-smmu) */
 #define SMMU_PDE_NEXT      (1u << 28)  /* PDE points to a page table */
 #define MC_SMMU_GPU_ASID   0xAAC       /* bit 31 = GPU swgroup translated */
-#define MC_SMMU_CLIENT_230 0x230       /* bit 24 GPUSRD, bit 25 GPUSWR */
-#define MC_SMMU_CLIENT_B98 0xB98       /* bit 8 GPUSRD2, bit 9 GPUSWR2 */
+
+/* E1 resident controls use a device interface rather than a PnP restart:
+ * restarting the device invokes ReleaseHardware and intentionally shuts the
+ * resident GPU down. The interface is restricted to SYSTEM and Administrators. */
+#define IOCTL_SWGPU_RESIDENT_STATUS CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+#define IOCTL_SWGPU_RESIDENT_STOP   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+#define IOCTL_SWGPU_SUBMIT_TEST     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x802, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+#define IOCTL_SWGPU_IRQ_TEST        CTL_CODE(FILE_DEVICE_UNKNOWN, 0x803, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+#define IOCTL_SWGPU_CYCLE_TEST      CTL_CODE(FILE_DEVICE_UNKNOWN, 0x804, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+#define IOCTL_SWGPU_COPY_TEST       CTL_CODE(FILE_DEVICE_UNKNOWN, 0x805, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+#define IOCTL_SWGPU_BLIT_TEST       CTL_CODE(FILE_DEVICE_UNKNOWN, 0x806, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+
+/* GM20B NV_PMC / PFIFO interrupt source registers (nvgpu hw_mc_gm20b.h). */
+#define PMC_INTR_STATUS_STALL       0x00000100u
+#define PMC_INTR_STATUS_NONSTALL    0x00000104u
+#define PMC_INTR_MASK_STALL         0x00000640u
+#define PMC_INTR_MASK_NONSTALL      0x00000644u
+#define PMC_INTR_EN_STALL           0x00000140u
+#define PMC_INTR_EN_NONSTALL        0x00000144u
+#define PMC_INTR_PFIFO_PENDING      0x00000100u
+#define PMC_INTR_PGRAPH_PENDING     0x00001000u /* Claude 0.7.0: GR intr id 12 from this GPU's top_device_info (8006183E: intr 12, reset 12); 0x200000 was wrong */
+#define FIFO_INTR_0                 0x00002100u
+#define FIFO_INTR_0_CHANNEL_INTR    0x80000000u
+#define FIFO_INTR_EN_1              0x00002528u /* Claude 0.7.3: nonstall routing (nvgpu fifo_intr_en_1 = CHANNEL_INTR) */
+#define GR_INTR_NONSTALL            0x00400120u
+#define GR_INTR_NONSTALL_TRAP       0x00000002u
+
+typedef struct _SWGPU_RESIDENT_STATUS {
+    ULONG Version;
+    ULONG Resident;
+    ULONG Boot0;
+    ULONG PtimerLoBefore;
+    ULONG PtimerHi;
+    ULONG PtimerLoAfter;
+    ULONG PtimerDelta;
+    ULONG PmcEnable;
+    ULONG PrivRingStatus0;
+    ULONG PrivRingStatus1;
+    ULONG FecsMailbox0;
+    ULONG FecsCpuctl;
+    ULONG FifoEngineStatus;
+    ULONG CcsrChannel;
+    ULONG PbdmaStatus;
+    ULONG PbdmaIntr0;
+    ULONG GrIntr;
+    ULONG GrStatus;
+    ULONG MmuFaultStatus;
+    ULONG ShutdownResult;
+} SWGPU_RESIDENT_STATUS, *PSWGPU_RESIDENT_STATUS;
+
+typedef struct _SWGPU_E2_RESULT {
+    ULONG Version, Result, Rounds, RingEntries, Wraps, FailRound, MaxPolls, TotalUs;
+    ULONG FirstColor, LastColor, FirstSemaphore, LastSemaphore;
+    ULONG GpGet, GpPut, Semaphore, Channel, PbdmaStatus, PbdmaIntr0, FifoIntr0;
+    ULONG GrIntr, GrException, GrStatus, MmuFault, ClassError, TrappedAddr;
+    ULONG TrappedDataLo, TrappedDataHi, PixelFirst, PixelMiddle, PixelLast;
+} SWGPU_E2_RESULT, *PSWGPU_E2_RESULT;
+
+typedef struct _SWGPU_E3_RESULT {
+    ULONG Version, Result, Rounds, Waits, NonstallCount, StallCount, StallUnits;
+    ULONG MaxWaitUs, TotalUs, Timeouts, HaveInterrupts;
+    ULONG FirstMcIntr0, FirstMcIntr1, LastMcIntr0, LastMcIntr1;
+    ULONG GpGet, GpPut, Semaphore, PixelFirst, PixelMiddle, PixelLast;
+    ULONG Channel, PbdmaStatus, PbdmaIntr0, FifoIntr0, GrIntr, GrStatus, MmuFault;
+} SWGPU_E3_RESULT, *PSWGPU_E3_RESULT;
+
+typedef struct _SWGPU_E4_RESULT {
+    ULONG Version, StartResult, SubmitResult, StopResult, Rounds, MaxPolls;
+    ULONG PoolResult, PoolBytes, PoolUsedPeak, PoolFallbacks, PoolAllocs;
+    ULONG PoolFrees, PoolFailures, PoolUsed;
+} SWGPU_E4_RESULT, *PSWGPU_E4_RESULT;
+
+typedef struct _SWGPU_F1_RESULT {
+    ULONG Version, Result, Rounds, BytesCopied, FailRound, LastSize;
+    ULONG MismatchOffset, Expected, Actual, MaxWaitUs, MaxPolls, IrqWakes, IrqTimeouts;
+    ULONG Pending, CeIntr, CeLaunchError, FifoIntr, FaultId, PbdmaIntr, GrIntr;
+} SWGPU_F1_RESULT, *PSWGPU_F1_RESULT;
+
+typedef enum _SWGPU_POOL_REGION {
+    SwGpuPoolGr, SwGpuPoolAcr, SwGpuPoolWpr, SwGpuPoolRegionCount
+} SWGPU_POOL_REGION;
+
+typedef struct _SWGPU_DMA_POOL {
+    PVOID Block[SwGpuPoolRegionCount];
+    BOOLEAN InUse[SwGpuPoolRegionCount];
+    ULONG Result, Bytes, Used, UsedPeak, Fallbacks, Allocs, Frees, Failures;
+} SWGPU_DMA_POOL;
+
+typedef struct _SWGPU_RESIDENT_POWER {
+    UCHAR Vout;
+    UCHAR VoutDvs;
+    UCHAR Gpio6;
+    BOOLEAN Valid;
+    BOOLEAN RailOn;
+    BOOLEAN ClocksOn;
+    BOOLEAN OutcChanged;
+    BOOLEAN FuseChanged;
+    ULONG ClkX;
+    ULONG ClkH;
+    ULONG PllOutc;
+    ULONG McHotResetCtrl;
+} SWGPU_RESIDENT_POWER, *PSWGPU_RESIDENT_POWER;
 
 typedef struct _SWGPU_DEVICE {
     WDFDEVICE      Device;
@@ -160,26 +249,81 @@ typedef struct _SWGPU_DEVICE {
     ULONG          Bar1MapLen;
     volatile UCHAR *Bar1Cpu;
     volatile UCHAR *Car;
+    ULONG          GpcBootOut, GpcBootBypass;
+    BOOLEAN        GpcManaged;
+    ULONG          VoutOnRaw;    /* MAXULONG if the power-on read failed */
     volatile UCHAR *Pmc;
     volatile UCHAR *Mc;
     LARGE_INTEGER  VddId;
     LARGE_INTEGER  PmicId;
     WDFIOTARGET    Vdd;          /* MAX77621 0x1C */
     WDFIOTARGET    Pmic;         /* MAX77620 0x3C */
+    BOOLEAN        ResidentActive;
+    BOOLEAN        ResidentChannelEnabled;
+    BOOLEAN        ResidentRunlistSubmitted;
+    BOOLEAN        ResidentInstBound;
+    BOOLEAN        ResidentIdleRefHeld;
+    WDFINTERRUPT   StallInterrupt;
+    WDFINTERRUPT   NonstallInterrupt;
+    BOOLEAN        HaveInterruptResources;
+    BOOLEAN        InterruptSourcesEnabled;
+    SWGPU_DMA_POOL DmaPool;
+    ULONG          InterruptResourceCount;
+    volatile LONG  E3IsrActive;
+    volatile LONG  E3NonstallCount;
+    volatile LONG  E3StallCount;
+    volatile LONG  E3StallUnits;
+    volatile LONG  E3FirstMcIntr0;
+    volatile LONG  E3FirstMcIntr1;
+    volatile LONG  E3LastMcIntr0;
+    volatile LONG  E3LastMcIntr1;
+    volatile LONG  E3FirstSet;
+    KEVENT         E3Event;
+    BOOLEAN        CopyInFlight;
+    volatile LONG  BlitGate;
+    volatile LONG  BlitOnline;
+    /* G1 scheduler fields under PowerLock. Hardware state under BlitGate. */
+    WDFTIMER       PowerTimer;
+    WDFWORKITEM    PowerWork;
+    KSPIN_LOCK     PowerLock;
+    KEVENT         PowerWorkDone;
+    ULONG          IdlePowerOffMs;
+    BOOLEAN        PowerPolicy, PowerPaused, PowerFinal, PowerD0;
+    BOOLEAN        PowerQueued, PowerWakeWanted, PowerDisabled, PowerManualStop;
+    volatile LONG64 LastBlitTime;
+    ULONGLONG      PowerWakeStart;
+    LARGE_INTEGER  PowerWakeQpc;
+    ULONG          PowerOffs, PowerOns, LastOffMs, LastOnUs, OnFailures, OnStreak;
+    BOOLEAN        BlitReset;
+    BOOLEAN        BlitUnsafe;
+    ULONG          BlitLastWaitUs, BlitLastPolls;
+    ULONG          ResidentRunlistEmptyValue;
+    ULONG          ResidentChannelId;
+    ULONG          ResidentShutdownResult;
+    SWGPU_RESIDENT_POWER ResidentPower;
 } SWGPU_DEVICE, *PSWGPU_DEVICE;
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(SWGPU_DEVICE, SwGpuGetDevice)
 
-#define B2A_RETAINED_PAGE_PAIRS 8u
-static PVOID g_B2aRetainedPages[B2A_RETAINED_PAGE_PAIRS][2];
-static ULONG g_B2aRetainedPagePairs;
+/* g_AcrVm/g_GrVm back a single ACPI GPU instance. The resident owner records
+ * which device keeps these shared arenas and mappings live. */
+static PSWGPU_DEVICE g_ResidentOwner;
+
 
 DRIVER_INITIALIZE DriverEntry;
 EVT_WDF_DRIVER_DEVICE_ADD SwGpuEvtDeviceAdd;
 EVT_WDF_DEVICE_PREPARE_HARDWARE SwGpuEvtPrepareHardware;
 EVT_WDF_DEVICE_RELEASE_HARDWARE SwGpuEvtReleaseHardware;
 EVT_WDF_DEVICE_SELF_MANAGED_IO_INIT SwGpuEvtSelfManagedIoInit;
+EVT_WDF_DEVICE_D0_EXIT SwGpuEvtD0Exit;
+EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL SwGpuEvtIoDeviceControl;
+EVT_WDF_INTERRUPT_ISR SwGpuEvtStallInterruptIsr;
+EVT_WDF_INTERRUPT_ISR SwGpuEvtNonstallInterruptIsr;
+EVT_WDF_INTERRUPT_DPC SwGpuEvtInterruptDpc;
 
 static WCHAR SwGpuParamsPath[256];
+static BOOLEAN g_Verbose;
+static ULONG B3eResidentShutdown(PSWGPU_DEVICE Dev, BOOLEAN DrainIsrs);
+static ULONG B3eEnableInterruptSources(PSWGPU_DEVICE Dev);
 
 /* ---------------------------------------------------------------- trace */
 
@@ -188,6 +332,12 @@ static VOID Trace(PCWSTR Name, ULONG Value)
     if (SwGpuParamsPath[0] != L'\0' && KeGetCurrentIrql() == PASSIVE_LEVEL) {
         (VOID)RtlWriteRegistryValue(RTL_REGISTRY_ABSOLUTE, SwGpuParamsPath, Name, REG_DWORD, &Value, sizeof(Value));
     }
+}
+
+/* Keep MMIO read ordering while suppressing detailed registry writes. */
+static VOID TraceDetail(PCWSTR Name, ULONG Value)
+{
+    if (g_Verbose) Trace(Name, Value);
 }
 
 static ULONG ReadParam(PCWSTR Name, ULONG Default)
@@ -225,46 +375,119 @@ static VOID TraceDurable(PCWSTR Name, ULONG Value)
 
 static VOID Step(ULONG N) { TraceDurable(L"Step", N); }
 
-static VOID RetainB2aPages(PVOID Inst, PVOID GpuPd)
-{
-    if (Inst == NULL && GpuPd == NULL) return;
-    if (g_B2aRetainedPagePairs < B2A_RETAINED_PAGE_PAIRS) {
-        g_B2aRetainedPages[g_B2aRetainedPagePairs][0] = Inst;
-        g_B2aRetainedPages[g_B2aRetainedPagePairs][1] = GpuPd;
-        ++g_B2aRetainedPagePairs;
-        TraceDurable(L"B2aBindPagesRetained", g_B2aRetainedPagePairs);
-    } else {
-        /* Keep the pages allocated rather than risk freeing a live GPU context. */
-        TraceDurable(L"B2aBindPagesRetainFull", g_B2aRetainedPagePairs);
-    }
-}
-
-static VOID FreeB2aPagesAfterGpuReset(VOID)
-{
-    ULONG i;
-    for (i = 0; i < g_B2aRetainedPagePairs; ++i) {
-        if (g_B2aRetainedPages[i][0] != NULL)
-            MmFreeContiguousMemorySpecifyCache(g_B2aRetainedPages[i][0], PAGE_SIZE, MmNonCached);
-        if (g_B2aRetainedPages[i][1] != NULL)
-            MmFreeContiguousMemorySpecifyCache(g_B2aRetainedPages[i][1], PAGE_SIZE, MmNonCached);
-        g_B2aRetainedPages[i][0] = NULL;
-        g_B2aRetainedPages[i][1] = NULL;
-    }
-    TraceDurable(L"B2aBindPagesFreedAfterReset", g_B2aRetainedPagePairs);
-    g_B2aRetainedPagePairs = 0;
-}
-
-static VOID TraceBin(PCWSTR Name, PVOID Data, ULONG Length)
+static VOID TraceErrorBin(PCWSTR Name, PVOID Data, ULONG Length)
 {
     if (SwGpuParamsPath[0] != L'\0' && KeGetCurrentIrql() == PASSIVE_LEVEL) {
         (VOID)RtlWriteRegistryValue(RTL_REGISTRY_ABSOLUTE, SwGpuParamsPath, Name, REG_BINARY, Data, Length);
     }
 }
 
+#define TraceBin(Name, Data, Length) do { \
+    if (g_Verbose) TraceErrorBin((Name), (Data), (Length)); \
+} while (0)
+
 /* ------------------------------------------------------------------- MMIO */
 
 static ULONG Rd(volatile UCHAR *Base, ULONG Off) { return READ_REGISTER_ULONG((volatile ULONG *)(Base + Off)); }
 static VOID Wr(volatile UCHAR *Base, ULONG Off, ULONG V) { WRITE_REGISTER_ULONG((volatile ULONG *)(Base + Off), V); }
+
+/* The resident gate is checked before any BAR0 access. This keeps an asserted
+ * level vector harmless while the GPU is off or during a non-resident run. */
+static BOOLEAN B3eRecordMcInterrupt(PSWGPU_DEVICE Dev, ULONG Intr0, ULONG Intr1,
+                                   BOOLEAN Stall)
+{
+    if (InterlockedCompareExchange(&Dev->E3FirstSet, 1, 0) == 0) {
+        InterlockedExchange(&Dev->E3FirstMcIntr0, (LONG)Intr0);
+        InterlockedExchange(&Dev->E3FirstMcIntr1, (LONG)Intr1);
+    }
+    InterlockedExchange(&Dev->E3LastMcIntr0, (LONG)Intr0);
+    InterlockedExchange(&Dev->E3LastMcIntr1, (LONG)Intr1);
+    if (Stall) {
+        InterlockedIncrement(&Dev->E3StallCount);
+        InterlockedOr(&Dev->E3StallUnits, (LONG)Intr0);
+    } else {
+        InterlockedIncrement(&Dev->E3NonstallCount);
+    }
+    return TRUE;
+}
+
+static BOOLEAN B3eInterruptIsr(WDFINTERRUPT Interrupt, BOOLEAN Stall)
+{
+    WDFDEVICE Device = WdfInterruptGetDevice(Interrupt);
+    PSWGPU_DEVICE Dev = SwGpuGetDevice(Device);
+    volatile UCHAR *B;
+    ULONG intr0, intr1, fifoIntr, grIntr, grAck;
+    BOOLEAN handled = FALSE;
+
+    if (Dev == NULL || InterlockedCompareExchange(&Dev->E3IsrActive, 0, 0) == 0 ||
+        !Dev->ResidentActive || Dev->Bar0 == NULL)
+        return FALSE;
+    B = Dev->Bar0;
+    intr0 = Rd(B, PMC_INTR_STATUS_STALL);
+    intr1 = Rd(B, PMC_INTR_STATUS_NONSTALL);
+    if (Stall) {
+        if (intr0 == 0u) return FALSE;
+        (VOID)B3eRecordMcInterrupt(Dev, intr0, intr1, TRUE);
+        /* ISR direct-write allowlist only: PMC INTR_EN_0 (0x140) masks stall;
+         * PFIFO INTR_0 (0x2100) W1C-acks CHANNEL_INTR; GR INTR_NONSTALL
+         * (0x400120) W1C-acks the nonstall trap; PMC INTR_EN_1 (0x144) masks an
+         * unacked nonstall source (Claude 0.7.0). No other ISR writes. */
+        Wr(B, PMC_INTR_EN_STALL, 0u);
+        (VOID)Rd(B, PMC_INTR_EN_STALL);
+        return TRUE;
+    }
+
+    if ((intr1 & PMC_INTR_PFIFO_PENDING) != 0u) {
+        fifoIntr = Rd(B, FIFO_INTR_0);
+        if ((fifoIntr & FIFO_INTR_0_CHANNEL_INTR) != 0u) {
+            /* PFIFO CHANNEL_INTR is W1C (nvgpu fifo_nonstall_isr path). */
+            Wr(B, FIFO_INTR_0, FIFO_INTR_0_CHANNEL_INTR);
+            handled = TRUE;
+        }
+    }
+    if ((intr1 & PMC_INTR_PGRAPH_PENDING) != 0u) {
+        grIntr = Rd(B, GR_INTR_NONSTALL);
+        grAck = grIntr & GR_INTR_NONSTALL_TRAP;
+        if (grAck != 0u) {
+            /* GR nonstall trap is W1C, as gr_gk20a_handle_nonstall(). */
+            Wr(B, GR_INTR_NONSTALL, grAck);
+            handled = TRUE;
+        }
+    }
+    if (!handled) {
+        /* Claude 0.7.0: a level line with a pending source we do not ack would
+         * storm. Mask INTR_EN_1 (allowlisted write) and claim it; E3 then times
+         * out and the recorded status shows which bit it was. */
+        if (intr1 == 0u) return FALSE;
+        (VOID)B3eRecordMcInterrupt(Dev, intr0, intr1, FALSE);
+        Wr(B, PMC_INTR_EN_NONSTALL, 0u);
+        (VOID)Rd(B, PMC_INTR_EN_NONSTALL);
+        return TRUE;
+    }
+    (VOID)B3eRecordMcInterrupt(Dev, intr0, intr1, FALSE);
+    (VOID)WdfInterruptQueueDpcForIsr(Interrupt);
+    return TRUE;
+}
+
+BOOLEAN SwGpuEvtStallInterruptIsr(WDFINTERRUPT Interrupt, ULONG MessageId)
+{
+    UNREFERENCED_PARAMETER(MessageId);
+    return B3eInterruptIsr(Interrupt, TRUE);
+}
+
+BOOLEAN SwGpuEvtNonstallInterruptIsr(WDFINTERRUPT Interrupt, ULONG MessageId)
+{
+    UNREFERENCED_PARAMETER(MessageId);
+    return B3eInterruptIsr(Interrupt, FALSE);
+}
+
+VOID SwGpuEvtInterruptDpc(WDFINTERRUPT Interrupt, WDFOBJECT AssociatedObject)
+{
+    WDFDEVICE Device = (WDFDEVICE)AssociatedObject;
+    PSWGPU_DEVICE Dev = SwGpuGetDevice(Device);
+    UNREFERENCED_PARAMETER(Interrupt);
+    if (Dev != NULL) KeSetEvent(&Dev->E3Event, IO_NO_INCREMENT, FALSE);
+}
 static VOID Us(ULONG Microseconds) { KeStallExecutionProcessor(Microseconds); }
 
 static VOID Ms(ULONG Milliseconds)
@@ -350,6 +573,7 @@ static ULONG I2cTrace(WDFIOTARGET Target, UCHAR Register, PCWSTR Name)
 static VOID Snapshot(PSWGPU_DEVICE Dev, BOOLEAN After)
 {
 #define N(a, b) (After ? L##b : L##a)
+    if (Dev->ResidentActive) { TraceDetail(L"B3eSnapshotSkipped", After ? 2u : 1u); return; }
     Trace(N("RgCntrlAtStart",  "RgCntrlAfter"),  Rd(Dev->Pmc, PMC_GPU_RG_CNTRL));
     Trace(N("ClkXAtStart",     "ClkXAfter"),     Rd(Dev->Car, CAR_CLK_OUT_ENB_X));
     Trace(N("RstXAtStart",     "RstXAfter"),     Rd(Dev->Car, CAR_RST_DEVICES_X));
@@ -371,16 +595,11 @@ static VOID Snapshot(PSWGPU_DEVICE Dev, BOOLEAN After)
 
 /* ------------------------------------------------------- stage B1 probe */
 
-/* Error values from a PRI read that nobody answered (0xBADFxxxx) or a dead bus. */
-static BOOLEAN PriBad(ULONG v) { return (v & 0xFFFF0000u) == 0xBADF0000u || v == 0xFFFFFFFFu; }
-
-/* nouveau gk20a_privring_init_privring_ring (B1 step 23, proven on hardware).
- * 0.3.14: shared with B2a, which never ran it: 0.3.13 showed the L2 (LTC)
- * registers answering with a PRI error (0xBADF3000) and 0 LTCs enumerated. */
+/* nouveau gk20a_privring_init_privring_ring. Initialize before ACR DMA. */
 static VOID PrivRingInit(volatile UCHAR *B, ULONG StepNo)
 {
     Step(StepNo);
-    Trace(L"RingStatus0Before", Rd(B, 0x120058));
+    TraceDetail(L"RingStatus0Before", Rd(B, 0x120058));
     Wr(B, 0x137250, Rd(B, 0x137250) & ~0x3Fu);
     Wr(B, NV_PMC_ENABLE, Rd(B, NV_PMC_ENABLE) & ~0x20u);
     Us(20);
@@ -392,66 +611,11 @@ static VOID PrivRingInit(volatile UCHAR *B, ULONG StepNo)
     Wr(B, 0x128328, 0x800);
     Wr(B, 0x124320, 0x800);
     Us(10);
-    Trace(L"RingStatus0", Rd(B, 0x120058));
-    Trace(L"RingCmd", Rd(B, 0x12004C));
-    Trace(L"RingMaster", Rd(B, 0x122204));
-    Trace(L"PmcEnableAfterRing", Rd(B, NV_PMC_ENABLE));
+    TraceDetail(L"RingStatus0", Rd(B, 0x120058));
+    TraceDetail(L"RingCmd", Rd(B, 0x12004C));
+    TraceDetail(L"RingMaster", Rd(B, 0x122204));
+    TraceDetail(L"PmcEnableAfterRing", Rd(B, NV_PMC_ENABLE));
     TraceDurable(L"RingDone", StepNo);
-}
-
-/* With the GPU powered and answering as GM20B: read the topology table and the
- * PMU falcon, try a DMEM write/read through the PIO port (nothing is started),
- * then run nouveau's gk20a_privring init and read the ring status. */
-static VOID ProbeB1(PSWGPU_DEVICE Dev)
-{
-    static const ULONG pat[4] = { 0x5A5A0001u, 0xA5A50002u, 0x12345678u, 0xFEDCBA98u };
-    ULONG ptop[64], scal[12], rb[4], i, ok = 0, hw;
-    volatile UCHAR *B = Dev->Bar0;
-
-    Step(20);   /* topology, scal */
-    for (i = 0; i < 64; ++i) ptop[i] = Rd(B, NV_PTOP_DEVICE_INFO + i * 4);
-    TraceBin(L"Ptop", ptop, sizeof(ptop));
-    for (i = 0; i < 12; ++i) scal[i] = Rd(B, NV_PTOP_SCAL + i * 4);
-    TraceBin(L"Scal", scal, sizeof(scal));
-    TraceDurable(L"PtopRead", 1);
-
-    Step(21);   /* PMU falcon registers */
-    hw = Rd(B, PMU_FALCON + FALCON_HWCFG);
-    Trace(L"PmuHwcfg", hw);
-    Trace(L"PmuHwcfg1", Rd(B, PMU_FALCON + FALCON_HWCFG1));
-    Trace(L"PmuCpuctl", Rd(B, PMU_FALCON + FALCON_CPUCTL));
-    Trace(L"PmuDmactl", Rd(B, PMU_FALCON + FALCON_DMACTL));
-    Trace(L"PmuSctl", Rd(B, PMU_FALCON + FALCON_SCTL));
-    Trace(L"PmuDebug", Rd(B, PMU_FALCON + PMU_DEBUG));
-    Trace(L"PmuMbox0", Rd(B, PMU_FALCON + FALCON_MAILBOX0));
-    Trace(L"PmuMbox1", Rd(B, PMU_FALCON + FALCON_MAILBOX1));
-    TraceDurable(L"PmuRead", 1);
-
-    if (!PriBad(hw) && hw != 0) {
-        Step(22);   /* DMEM PIO write / read back at offset 0, then clear */
-        Wr(B, PMU_FALCON + FALCON_DMEMC0, (1u << 24));
-        for (i = 0; i < 4; ++i) Wr(B, PMU_FALCON + FALCON_DMEMD0, pat[i]);
-        Wr(B, PMU_FALCON + FALCON_DMEMC0, (1u << 25));
-        for (i = 0; i < 4; ++i) { rb[i] = Rd(B, PMU_FALCON + FALCON_DMEMD0); if (rb[i] == pat[i]) ++ok; }
-        Wr(B, PMU_FALCON + FALCON_DMEMC0, (1u << 24));
-        for (i = 0; i < 4; ++i) Wr(B, PMU_FALCON + FALCON_DMEMD0, 0);
-        TraceBin(L"DmemReadBack", rb, sizeof(rb));
-        TraceDurable(L"DmemOk", ok);
-    }
-
-    PrivRingInit(B, 23);
-}
-
-/* ------------------------------------------------------ stage B2a probe */
-
-static ULONG DmaWait(volatile UCHAR *B)
-{
-    ULONG i;
-    for (i = 0; i < 2000; ++i) {
-        if (Rd(B, PMU_FALCON + FALCON_DMATRFCMD) & DMATRFCMD_IDLE) return i;
-        Us(5);
-    }
-    return 0xFFFFFFFFu;
 }
 
 /* GM200 PMU bind handshake from nouveau gm200_pmu_flcn_bind_inst/bind_stat.
@@ -499,574 +663,6 @@ static BOOLEAN PmuBindInst(volatile UCHAR *B, ULONGLONG instAddress,
     return state == 0;
 }
 
-/* With the GPU powered and answering as GM20B: check that the GPU is not
- * behind the SMMU, then let the PMU falcon's DMA engine copy 256 bytes from a
- * Windows buffer into DMEM and 256 bytes from DMEM back into the buffer, in
- * physical mode (no GPU page tables), driven from the CPU. Nothing runs on the
- * falcon. The buffer is 4 KB, physically contiguous, below 4 GB, uncached;
- * only bytes 0x100..0x1FF of it are a DMA target. */
-/* 0.3.13 (read only): the GPU-side memory path state that nouveau programs
- * on GM20B before the first falcon DMA (fb/gm200.c, fb/gf100.c, ltc/gm200.c,
- * bus/gf100.c). 0.3.12 showed no MC interrupt from any GPU step, so the DMA
- * most likely stays inside the GPU. The order must match Gpu.ps1. */
-static const ULONG g_GpuMemRegs[] = {
-    0x000100,   /* PMC_INTR */
-    0x000200,   /* PMC_ENABLE */
-    0x001100,   /* PBUS interrupt status */
-    0x001140,   /* PBUS interrupt enable */
-    0x009084,   /* PBUS fault address */
-    0x009088,   /* PBUS fault data */
-    0x070004,   /* L2 invalidate control/status */
-    0x070010,   /* L2 flush control/status */
-    0x100C10,   /* FB sysmem flush page (>> 8) */
-    0x100C80,   /* FB MMU control (big page) */
-    0x100CC4,   /* FB MMU debug control */
-    0x100CC8,   /* FB MMU debug write buffer (>> 8) */
-    0x100CCC,   /* FB MMU debug read buffer (>> 8) */
-    0x12006C,   /* LTC count */
-    0x17E278,   /* LTC tag base */
-    0x17E280,   /* LTS count (bits 31..28) */
-    0x022438,   /* FBP count */
-};
-
-static VOID DumpGpuMem(volatile UCHAR *B, PCWSTR Name)
-{
-    ULONG v[sizeof(g_GpuMemRegs) / sizeof(g_GpuMemRegs[0])];
-    ULONG i;
-    for (i = 0; i < sizeof(g_GpuMemRegs) / sizeof(g_GpuMemRegs[0]); ++i) v[i] = Rd(B, g_GpuMemRegs[i]);
-    TraceBin(Name, v, sizeof(v));
-}
-
-static VOID ProbeB2a(PSWGPU_DEVICE Dev)
-{
-    volatile UCHAR *B = Dev->Bar0;
-    PHYSICAL_ADDRESS lo, hi, none, pa;
-    volatile ULONG *buf;
-    ULONG cfg, asid, c230, cb98, tc, ctl, dmactl, i, ok, polls, spill, now;
-    ULONG oldPtbAsid, oldPtb0, base;
-    ULONG instPmuWas = 0, ctxEnableWas = 0, fbifWas[5] = { 0 }, itfenWas = 0;
-    ULONG bindState = 0, bindPoll = 0, bindDoneState = 0, bindDonePolls = 0;
-    BOOLEAN idle = TRUE, asidChanged = FALSE, stillTranslated = FALSE, ptbChanged = FALSE;
-    BOOLEAN bindReady = FALSE, bindTouched = FALSE, itfenTouched = FALSE;
-    volatile ULONG *pd = NULL, *pt = NULL;
-    volatile ULONG *inst = NULL, *gpuPd = NULL;
-    PHYSICAL_ADDRESS pdPa, ptPa, instPa, gpuPdPa;
-    volatile ULONG *fbPg[3] = { NULL, NULL, NULL };
-    ULONG fbRegWas[4] = { 0 };
-    BOOLEAN fbTouched = FALSE, fifoTouched = FALSE;
-
-    PrivRingInit(B, 29);
-    /* 0.3.16: nvgpu resets and enables PFIFO (mc reset FIFO = PMC_ENABLE
-     * bit 8) before the PMU boots, and the GPU MMU reports faults through
-     * PFIFO, which read 0xBAD0DA00 so far. Reset it, enable it, clear its
-     * interrupt status. Turned off again in step 34. */
-    {
-        ULONG en = Rd(B, NV_PMC_ENABLE);
-        Trace(L"B2aFifoPmcWas", en);
-        Wr(B, NV_PMC_ENABLE, en & ~0x100u);
-        (VOID)Rd(B, NV_PMC_ENABLE);
-        Us(20);
-        Wr(B, NV_PMC_ENABLE, en | 0x100u);
-        (VOID)Rd(B, NV_PMC_ENABLE);
-        Us(20);
-        fifoTouched = !(en & 0x100u);
-        Trace(L"B2aFifoPmcNow", Rd(B, NV_PMC_ENABLE));
-        Trace(L"B2aFifoIntr0Was", Rd(B, 0x2100));
-        Wr(B, 0x2100, 0xFFFFFFFFu);
-        TraceDurable(L"B2aFifoIntr0Clr", Rd(B, 0x2100));
-    }
-    Trace(L"B2aLtcNrAfterRing", Rd(B, 0x12006C));
-    DumpGpuMem(B, L"B2aGpuMemAfterRing");
-
-    Step(30);   /* SMMU */
-    Trace(L"McHotStatB2aStart", Rd(Dev->Mc, MC_HOTRESET_STAT_1));
-    cfg = Rd(Dev->Mc, MC_SMMU_CONFIG);
-    asid = Rd(Dev->Mc, MC_SMMU_GPU_ASID);
-    c230 = Rd(Dev->Mc, MC_SMMU_CLIENT_230);
-    cb98 = Rd(Dev->Mc, MC_SMMU_CLIENT_B98);
-    Trace(L"SmmuConfig", cfg);
-    Trace(L"SmmuGpuAsid", asid);
-    Trace(L"SmmuClient230", c230);
-    Trace(L"SmmuClientB98", cb98);
-    /* 0.3.0 on hardware: config and the client registers read 0xFFFFFFFF and
-     * the GPU swgroup reads 0x80000000 (translated, ASID 0). Linux runs the
-     * GPU in identity mode by clearing that enable bit (tegra_smmu_disable),
-     * so do the same for the test only, and put it back afterwards. */
-    if (asid & 0x80000000u) {
-        Wr(Dev->Mc, MC_SMMU_GPU_ASID, asid & ~0x80000000u);
-        now = Rd(Dev->Mc, MC_SMMU_GPU_ASID);
-        TraceDurable(L"SmmuGpuAsidBypass", now);
-        if (now & 0x80000000u) {
-            /* 0.3.1 on hardware: the write is ignored (the SMMU registers look
-             * locked to the secure world). Go on anyway: the read DMA cannot
-             * harm anything, and the write DMA only runs if the read proves
-             * the address reaches our buffer unchanged. */
-            TraceDurable(L"SmmuStillTranslated", 1);
-            stillTranslated = TRUE;
-        } else {
-            asidChanged = TRUE;
-        }
-    }
-    /* 0.3.3: the page directory of ASID 0 (ATF leaves ASID_SECURITY = 0, so
-     * the PTB registers should be usable from the normal world). */
-    oldPtbAsid = Rd(Dev->Mc, MC_SMMU_PTB_ASID);
-    Trace(L"SmmuPtbAsidWas", oldPtbAsid);
-    Wr(Dev->Mc, MC_SMMU_PTB_ASID, 0);
-    Trace(L"SmmuPtbAsid0", Rd(Dev->Mc, MC_SMMU_PTB_ASID));
-    oldPtb0 = Rd(Dev->Mc, MC_SMMU_PTB_DATA);
-    TraceDurable(L"SmmuPtbData0", oldPtb0);
-    Trace(L"McIntStatusBefore", Rd(Dev->Mc, MC_INTSTATUS));
-    Trace(L"McErrStatusBefore", Rd(Dev->Mc, MC_ERR_STATUS));
-    Trace(L"McErrAdrBefore", Rd(Dev->Mc, MC_ERR_ADR));
-    /* 0.3.2 showed an old latched error (int 0x200); the error registers only
-     * latch a new error after the status is cleared (write 1 to clear). */
-    Wr(Dev->Mc, MC_INTSTATUS, Rd(Dev->Mc, MC_INTSTATUS));
-    Trace(L"McIntStatusCleared", Rd(Dev->Mc, MC_INTSTATUS));
-    /* 0.3.9: does int 0x200 (ARBITRATION_EMEM) come back by itself? Wait
-     * 10 ms with no GPU DMA, read it, then clear it again for the DMA. */
-    Ms(10);
-    Trace(L"McIntStatusIdle10ms", Rd(Dev->Mc, MC_INTSTATUS));
-    Trace(L"McErrStatusIdle10ms", Rd(Dev->Mc, MC_ERR_STATUS));
-    Wr(Dev->Mc, MC_INTSTATUS, Rd(Dev->Mc, MC_INTSTATUS));
-    /* MC hot reset status bit 2 = the GPU client has no outstanding requests. */
-    Trace(L"McHotStatBeforeDma", Rd(Dev->Mc, MC_HOTRESET_STAT_1));
-
-    lo.QuadPart = 0; hi.QuadPart = 0xFFFFFFFFll; none.QuadPart = 0;
-    buf = (volatile ULONG *)MmAllocateContiguousMemorySpecifyCache(PAGE_SIZE, lo, hi, none, MmNonCached);
-    if (buf == NULL) {
-        if (asidChanged) Wr(Dev->Mc, MC_SMMU_GPU_ASID, asid);
-        TraceDurable(L"B2aResult", 0xE0000031u);
-        return;
-    }
-    pa = MmGetPhysicalAddress((PVOID)buf);
-    Trace(L"B2aBufPhys", pa.LowPart);
-    base = pa.LowPart & ~0x3FFFFFu;
-    inst = (volatile ULONG *)MmAllocateContiguousMemorySpecifyCache(PAGE_SIZE, lo, hi, none, MmNonCached);
-    gpuPd = (volatile ULONG *)MmAllocateContiguousMemorySpecifyCache(PAGE_SIZE, lo, hi, none, MmNonCached);
-    if (inst != NULL && gpuPd != NULL) {
-        instPa = MmGetPhysicalAddress((PVOID)inst);
-        gpuPdPa = MmGetPhysicalAddress((PVOID)gpuPd);
-        RtlZeroMemory((PVOID)inst, PAGE_SIZE);
-        RtlZeroMemory((PVOID)gpuPd, PAGE_SIZE);
-        /* gf100_vmm_join(): the instance block carries the page-directory
-         * target/address at 0x200 and the VA limit at 0x208. B2a keeps using
-         * physical DMA, so the GPU page directory is intentionally empty. */
-        inst[0x200 / sizeof(ULONG)] = (gpuPdPa.LowPart & ~0xFFFu) | 3u; /* NCOH */
-        inst[0x204 / sizeof(ULONG)] = 0;
-        inst[0x208 / sizeof(ULONG)] = 0xFFFFFFFFu;
-        inst[0x20C / sizeof(ULONG)] = 0;
-        KeMemoryBarrier();
-        Trace(L"B2aInstPhys", instPa.LowPart);
-        Trace(L"B2aGpuPdPhys", gpuPdPa.LowPart);
-        Trace(L"B2aInstPdbLo", inst[0x200 / sizeof(ULONG)]);
-        Trace(L"B2aInstLimitLo", inst[0x208 / sizeof(ULONG)]);
-        /* If the Tegra SMMU still translates GPU accesses, all GPU-fetched
-         * objects must fit inside its single 4 MiB identity-mapped window. */
-        bindReady = !stillTranslated ||
-            ((instPa.LowPart & ~0x3FFFFFu) == base && (gpuPdPa.LowPart & ~0x3FFFFFu) == base);
-        TraceDurable(L"B2aInstMapReady", bindReady ? 1 : 0);
-    } else {
-        bindReady = FALSE;
-        TraceDurable(L"B2aInstAlloc", 0);
-    }
-
-    /* 0.3.3 on hardware: the GPU stays in ASID 0, whose page directory points
-     * outside RAM (PTB_DATA 0x4020608C), but the PTB registers are writable.
-     * So give ASID 0 a small identity map: one page directory and one page
-     * table mapping the 4 MB around the buffer to itself (tegra-smmu format),
-     * flush the SMMU caches, and put the old value back afterwards. */
-    if (stillTranslated) {
-        pd = (volatile ULONG *)MmAllocateContiguousMemorySpecifyCache(PAGE_SIZE, lo, hi, none, MmNonCached);
-        pt = (volatile ULONG *)MmAllocateContiguousMemorySpecifyCache(PAGE_SIZE, lo, hi, none, MmNonCached);
-        if (pd != NULL && pt != NULL) {
-            pdPa = MmGetPhysicalAddress((PVOID)pd);
-            ptPa = MmGetPhysicalAddress((PVOID)pt);
-            for (i = 0; i < 1024; ++i) pd[i] = 0;
-            for (i = 0; i < 1024; ++i) pt[i] = ((base >> 12) + i) | SMMU_ATTR_RWNS;
-            pd[base >> 22] = (ULONG)(ptPa.QuadPart >> 12) | SMMU_ATTR_RWNS | SMMU_PDE_NEXT;
-            KeMemoryBarrier();
-            Trace(L"SmmuPdPhys", pdPa.LowPart);
-            Trace(L"SmmuPtPhys", ptPa.LowPart);
-            Wr(Dev->Mc, MC_SMMU_PTB_ASID, 0);
-            Wr(Dev->Mc, MC_SMMU_PTB_DATA, (ULONG)(pdPa.QuadPart >> 12) | SMMU_ATTR_RWNS);
-            Trace(L"SmmuPtbDataNew", Rd(Dev->Mc, MC_SMMU_PTB_DATA));
-            Wr(Dev->Mc, MC_SMMU_PTC_FLUSH, 0);
-            (VOID)Rd(Dev->Mc, MC_SMMU_PTB_ASID);
-            Wr(Dev->Mc, MC_SMMU_TLB_FLUSH, 0);
-            (VOID)Rd(Dev->Mc, MC_SMMU_PTB_ASID);
-            ptbChanged = TRUE;
-            TraceDurable(L"SmmuIdentityMap", 1);
-        } else {
-            bindReady = FALSE;
-            TraceDurable(L"B2aInstMapReady", 0);
-        }
-    }
-    for (i = 0; i < 64; ++i) buf[i] = 0xC0DE0000u + i * 0x01010101u;     /* source for memory -> DMEM */
-    for (i = 64; i < 1024; ++i) buf[i] = 0xEEEEEEEEu;                      /* 0x100..0x1FF: DMEM -> memory target */
-    KeMemoryBarrier();
-
-    /* 0.3.15: nouveau's FB init for GM20B (gm200_fb_init and
-     * gf100_fb_sysmem_flush_page_init): sysmem flush page at 0x100C10 and the
-     * MMU debug write/read buffers at 0x100CC8/0x100CCC (address >> 8), size
-     * field 0x100CC4 bits 18..17 = min(size >> 16, 2) = 0 for 4 KB pages.
-     * 0.3.14 showed all of them 0. Pages come from inside the SMMU identity
-     * window when the GPU is still translated. Put back in step 34; the pages
-     * are kept until after the GPU reset. */
-    {
-        PHYSICAL_ADDRESS fl = lo, fh = hi, fpa[3];
-        ULONG j, inMap = 1;
-        if (stillTranslated) { fl.QuadPart = base; fh.QuadPart = (LONGLONG)base + 0x3FFFFF; }
-        for (j = 0; j < 3; ++j)
-            fbPg[j] = (volatile ULONG *)MmAllocateContiguousMemorySpecifyCache(PAGE_SIZE, fl, fh, none, MmNonCached);
-        if (fbPg[0] != NULL && fbPg[1] != NULL && fbPg[2] != NULL) {
-            for (j = 0; j < 3; ++j) {
-                RtlZeroMemory((PVOID)fbPg[j], PAGE_SIZE);
-                fpa[j] = MmGetPhysicalAddress((PVOID)fbPg[j]);
-                if (stillTranslated && (fpa[j].LowPart & ~0x3FFFFFu) != base) inMap = 0;
-            }
-            KeMemoryBarrier();
-            fbRegWas[0] = Rd(B, 0x100C10);
-            fbRegWas[1] = Rd(B, 0x100CC8);
-            fbRegWas[2] = Rd(B, 0x100CCC);
-            fbRegWas[3] = Rd(B, 0x100CC4);
-            fbTouched = TRUE;
-            Wr(B, 0x100C10, (ULONG)(fpa[0].QuadPart >> 8));
-            Wr(B, 0x100CC8, (ULONG)(fpa[1].QuadPart >> 8));
-            Wr(B, 0x100CCC, (ULONG)(fpa[2].QuadPart >> 8));
-            Wr(B, 0x100CC4, fbRegWas[3] & ~0x00060000u);
-            Trace(L"B2aFbFlushPhys", fpa[0].LowPart);
-            Trace(L"B2aFbDbgWrPhys", fpa[1].LowPart);
-            Trace(L"B2aFbDbgRdPhys", fpa[2].LowPart);
-            Trace(L"B2aFbInMap", inMap);
-            Trace(L"B2aFbFlushNow", Rd(B, 0x100C10));
-            Trace(L"B2aFbDbgWrNow", Rd(B, 0x100CC8));
-            Trace(L"B2aFbDbgRdNow", Rd(B, 0x100CCC));
-            TraceDurable(L"B2aFbDbgCtlNow", Rd(B, 0x100CC4));
-        } else {
-            TraceDurable(L"B2aFbAlloc", 0);
-        }
-    }
-    /* 0.3.16: nvgpu gk20a_mm_fb_flush after the mm setup: flush_fb_flush
-     * (0x070000) pending_busy, then poll outstanding/pending (bits 1, 0)
-     * clear, 5 us steps, 100 tries. */
-    {
-        ULONG w;
-        Wr(B, 0x070000, 1u);
-        for (w = 0; w < 100 && (Rd(B, 0x070000) & 3u); ++w) Us(5);
-        Trace(L"B2aFbFlushPolls", w);
-        TraceDurable(L"B2aFbFlushReg", Rd(B, 0x070000));
-    }
-
-    /* 0.3.12 (read, then clear): 0.3.11 saw int 0x200 once, somewhere between
-     * the idle check and the end of the first bind. Split that window. */
-    Trace(L"McIntBeforeStep35", Rd(Dev->Mc, MC_INTSTATUS));
-    Wr(Dev->Mc, MC_INTSTATUS, Rd(Dev->Mc, MC_INTSTATUS));
-    Step(35);   /* 0.3.4 on hardware: still no DMA with an identity map, and
-                 * PMC_ENABLE (0xC0012020) has none of XBAR, L2, PFB, HUB on:
-                 * reset them as nvgpu does (off, wait, on). */
-    /* 0.3.5 on hardware: writing those bits changed nothing (0xC0012020 stays):
-     * GM20B has no enable bits for them (nouveau's gk104 reset table has only
-     * FIFO and PMU). So only record PMC_ENABLE and the PMU FBIF window. */
-    now = Rd(B, NV_PMC_ENABLE);
-    Trace(L"PmcEnableBeforeMem", now);
-    Trace(L"PmcEnableAfterMem", now);
-    {
-        ULONG fb[12];
-        for (i = 0; i < 12; ++i) fb[i] = Rd(B, PMU_FALCON + 0xE00 + i * 4);
-        TraceBin(L"PmuFbifWindow", fb, sizeof(fb));
-    }
-
-    Trace(L"McIntBeforeSetup", Rd(Dev->Mc, MC_INTSTATUS));
-    Wr(Dev->Mc, MC_INTSTATUS, Rd(Dev->Mc, MC_INTSTATUS));
-    Step(31);   /* physical DMA setup */
-    tc = Rd(B, PMU_FALCON + PMU_FBIF_TRANSCFG(DMA_IDX));
-    ctl = Rd(B, PMU_FALCON + PMU_FBIF_CTL);
-    dmactl = Rd(B, PMU_FALCON + FALCON_DMACTL);
-    Trace(L"B2aTranscfgWas", tc);
-    Trace(L"B2aFbifCtlWas", ctl);
-    Trace(L"B2aDmactlWas", dmactl);
-    Wr(B, PMU_FALCON + PMU_FBIF_TRANSCFG(DMA_IDX), FBIF_PHYS_NCOH);
-    Wr(B, PMU_FALCON + PMU_FBIF_CTL, ctl | 0x80u);
-    Wr(B, PMU_FALCON + FALCON_DMACTL, 0);
-    Trace(L"B2aTranscfg", Rd(B, PMU_FALCON + PMU_FBIF_TRANSCFG(DMA_IDX)));
-    Trace(L"B2aFbifCtl", Rd(B, PMU_FALCON + PMU_FBIF_CTL));
-    TraceDurable(L"B2aSetup", 1);
-
-    Trace(L"McIntBeforeBind", Rd(Dev->Mc, MC_INTSTATUS));
-    Wr(Dev->Mc, MC_INTSTATUS, Rd(Dev->Mc, MC_INTSTATUS));
-    Step(39);   /* bind an instance block to the PMU before the DMA attempts */
-    if (bindReady) {
-        static const ULONG fbifOffsets[5] = { 0xE00, 0xE04, 0xE08, 0xE0C, 0xE10 };
-        instPmuWas = Rd(B, PMU_FALCON + FALCON_BIND_INST);
-        ctxEnableWas = Rd(B, PMU_FALCON + FALCON_CTX_ENABLE);
-        itfenWas = Rd(B, PMU_FALCON + FALCON_ITFEN);
-        itfenTouched = TRUE;
-        for (i = 0; i < 5; ++i) fbifWas[i] = Rd(B, PMU_FALCON + fbifOffsets[i]);
-        Trace(L"B2aBindInstWas", instPmuWas);
-        Trace(L"B2aBindCtxEnableWas", ctxEnableWas);
-        Trace(L"B2aItfenWas", itfenWas);
-        TraceBin(L"B2aBindFbifWas", fbifWas, sizeof(fbifWas));
-
-        /* Match gm200_pmu_flcn_bind_inst(): set the standard DMA indices,
-         * enable the context and bind NCOH system memory at 0x480. */
-        bindTouched = TRUE;
-        bindReady = PmuBindInst(B, instPa.LowPart, &bindState, &bindDoneState,
-                                &bindPoll, &bindDonePolls);
-        Trace(L"B2aBindFbifNow0", Rd(B, PMU_FALCON + fbifOffsets[0]));
-        Trace(L"B2aBindFbifNow1", Rd(B, PMU_FALCON + fbifOffsets[1]));
-        Trace(L"B2aBindFbifNow2", Rd(B, PMU_FALCON + fbifOffsets[2]));
-        Trace(L"B2aBindFbifNow3", Rd(B, PMU_FALCON + fbifOffsets[3]));
-        Trace(L"B2aBindFbifNow4", Rd(B, PMU_FALCON + fbifOffsets[4]));
-        Trace(L"B2aBindInstNow", Rd(B, PMU_FALCON + FALCON_BIND_INST));
-        Trace(L"B2aBindCtxEnableNow", Rd(B, PMU_FALCON + FALCON_CTX_ENABLE));
-        Trace(L"B2aBindAckState", bindState);
-        Trace(L"B2aBindAckPolls", bindPoll);
-        Trace(L"B2aBindDoneState", bindDoneState);
-        Trace(L"B2aBindDonePolls", bindDonePolls);
-        Trace(L"B2aItfenForBind", Rd(B, PMU_FALCON + FALCON_ITFEN));
-        if (bindReady) Wr(B, PMU_FALCON + FALCON_DMACTL, dmactl);
-        TraceDurable(L"B2aBindResult", bindReady ? 1 : 0xE0000034u);
-    } else {
-        TraceDurable(L"B2aBindResult", 0xE0000035u);
-    }
-    /* 0.3.11 (read only, then clear): did the bind step bring int 0x200 back? */
-    Trace(L"McIntAfterBind", Rd(Dev->Mc, MC_INTSTATUS));
-    Trace(L"McErrAfterBind", Rd(Dev->Mc, MC_ERR_STATUS));
-    Trace(L"McErrAdrAfterBind", Rd(Dev->Mc, MC_ERR_ADR));
-    Wr(Dev->Mc, MC_INTSTATUS, Rd(Dev->Mc, MC_INTSTATUS));
-    DumpGpuMem(B, L"B2aGpuMemBefore");
-    /* 0.3.17 (read only): PFIFO MMU fault state before the first try. */
-    Trace(L"B2aFifoIntr0BeforeTries", Rd(B, 0x2100));
-    Trace(L"B2aFifoFaultIdBeforeTries", Rd(B, 0x259C));
-
-    {
-        /* 0.3.6: try the FBIF target noncoherent sysmem (6), then local FB (4),
-         * then coherent sysmem (5), resetting the PMU falcon (PMC_ENABLE bit 13
-         * off/on, wait for the scrub) before each retry. After each attempt,
-         * record the falcon interrupt status (bit 5 = EXTERR, a bus error) and
-         * the PFIFO MMU fault registers. */
-        static const ULONG targets[3] = { 6, 4, 5 };
-        static const PCWSTR names[3][4] = {
-            { L"B2aV1Polls", L"B2aV1Cmd", L"B2aV1Irq", L"B2aV1Ok" },
-            { L"B2aV2Polls", L"B2aV2Cmd", L"B2aV2Irq", L"B2aV2Ok" },
-            { L"B2aV3Polls", L"B2aV3Cmd", L"B2aV3Irq", L"B2aV3Ok" } };
-        ULONG v, k, w;
-        ok = 0;
-        for (k = 0; bindReady && k < 3 && ok != 64; ++k) {
-            Step(36 + k);
-            if (k > 0) {
-                ULONG en = Rd(B, NV_PMC_ENABLE);
-                Wr(B, NV_PMC_ENABLE, en & ~(1u << 13));
-                (VOID)Rd(B, NV_PMC_ENABLE);
-                Us(20);
-                Wr(B, NV_PMC_ENABLE, en | (1u << 13));
-                (VOID)Rd(B, NV_PMC_ENABLE);
-                for (w = 0; w < 2000 && (Rd(B, PMU_FALCON + FALCON_DMACTL) & 6u); ++w) Us(5);
-                Wr(B, PMU_FALCON + PMU_FBIF_CTL, Rd(B, PMU_FALCON + PMU_FBIF_CTL) | 0x80u);
-                bindReady = PmuBindInst(B, instPa.LowPart, &bindState, &bindDoneState,
-                                        &bindPoll, &bindDonePolls);
-                Trace(L"B2aRebindAckState", bindState);
-                Trace(L"B2aRebindAckPolls", bindPoll);
-                Trace(L"B2aRebindDoneState", bindDoneState);
-                Trace(L"B2aRebindDonePolls", bindDonePolls);
-                TraceDurable(L"B2aRebindResult", bindReady ? 1 : 0xE0000036u);
-                if (!bindReady) break;
-                Wr(B, PMU_FALCON + FALCON_DMACTL, dmactl);
-            }
-            Wr(B, PMU_FALCON + PMU_FBIF_TRANSCFG(DMA_IDX), targets[k]);
-            /* 0.3.6 on hardware: no transfer started with any target and no
-             * bus error: the falcon's external interface (ITFEN bit 0) may be
-             * off after reset; nouveau's gm200_flcn_fw_load sets it first. */
-            if (k == 0) Trace(L"B2aItfen", Rd(B, PMU_FALCON + FALCON_ITFEN));
-            Wr(B, PMU_FALCON + FALCON_ITFEN, Rd(B, PMU_FALCON + FALCON_ITFEN) | 1u);
-            if (k == 0) {
-                Trace(L"B2aItfen", Rd(B, PMU_FALCON + FALCON_ITFEN));
-                Trace(L"B2aDmactlNow", Rd(B, PMU_FALCON + FALCON_DMACTL));
-                Trace(L"B2aTranscfgNow", Rd(B, PMU_FALCON + PMU_FBIF_TRANSCFG(DMA_IDX)));
-            }
-            Wr(B, PMU_FALCON + FALCON_DMEMC0, 0x100u | (1u << 24));
-            for (i = 0; i < 64; ++i) Wr(B, PMU_FALCON + FALCON_DMEMD0, 0);
-            Wr(B, PMU_FALCON + 0x004, 0xFFFFFFFFu);        /* clear falcon interrupts */
-            /* 0.3.11: MC int just before this try (for tries 2 and 3 this
-             * covers the falcon reset and rebind), then clear it. */
-            {
-                static const PCWSTR mcBefore[3] = { L"McIntBeforeTry1", L"McIntBeforeTry2", L"McIntBeforeTry3" };
-                Trace(mcBefore[k], Rd(Dev->Mc, MC_INTSTATUS));
-                Wr(Dev->Mc, MC_INTSTATUS, Rd(Dev->Mc, MC_INTSTATUS));
-            }
-            Wr(B, PMU_FALCON + FALCON_DMATRFBASE, (ULONG)(pa.QuadPart >> 8));
-            Wr(B, PMU_FALCON + FALCON_DMATRFMOFFS, 0x100);
-            Wr(B, PMU_FALCON + FALCON_DMATRFFBOFFS, 0);
-            Wr(B, PMU_FALCON + FALCON_DMATRFCMD, DMATRFCMD_256B | (DMA_IDX << 12));
-            polls = DmaWait(B);
-            {
-                static const PCWSTR mcAfter[3][2] = {
-                    { L"McIntAfterTry1", L"McErrAfterTry1" },
-                    { L"McIntAfterTry2", L"McErrAfterTry2" },
-                    { L"McIntAfterTry3", L"McErrAfterTry3" } };
-                static const PCWSTR fifoAfter[3][2] = {
-                    { L"B2aFifoIntr0AfterTry1", L"B2aFifoFaultIdAfterTry1" },
-                    { L"B2aFifoIntr0AfterTry2", L"B2aFifoFaultIdAfterTry2" },
-                    { L"B2aFifoIntr0AfterTry3", L"B2aFifoFaultIdAfterTry3" } };
-                Trace(mcAfter[k][0], Rd(Dev->Mc, MC_INTSTATUS));
-                Trace(mcAfter[k][1], Rd(Dev->Mc, MC_ERR_STATUS));
-                Trace(fifoAfter[k][0], Rd(B, 0x2100));
-                Trace(fifoAfter[k][1], Rd(B, 0x259C));
-            }
-            Trace(names[k][0], polls);
-            Trace(names[k][1], Rd(B, PMU_FALCON + FALCON_DMATRFCMD));
-            Trace(names[k][2], Rd(B, PMU_FALCON + 0x008));
-            Wr(B, PMU_FALCON + FALCON_DMEMC0, 0x100u | (1u << 25));
-            ok = 0;
-            for (i = 0; i < 64; ++i) {
-                v = Rd(B, PMU_FALCON + FALCON_DMEMD0);
-                if (i == 0) Trace(L"B2aInWord0", v);
-                if (i == 63) Trace(L"B2aInWord63", v);
-                if (v == 0xC0DE0000u + i * 0x01010101u) ++ok;
-            }
-            TraceDurable(names[k][3], ok);
-            Trace(L"B2aInPolls", polls);
-            Trace(L"B2aInCmd", Rd(B, PMU_FALCON + FALCON_DMATRFCMD));
-            idle = (polls != 0xFFFFFFFFu);
-        }
-        Trace(L"B2aGoodTarget", ok == 64 ? targets[k - 1] : 0);
-        DumpGpuMem(B, L"B2aGpuMemAfter");
-        /* 0.3.17 (read only): the MMU fault record of every unit whose bit is
-         * set in the fault id register, plus unit 0x17 (PMU in nouveau's
-         * gk104 table) always: inst, va lo, va hi, info at 0x2800 + unit * 0x10
-         * (nouveau gk104_fifo_intr_mmu_fault_unit). Up to 6 records. */
-        {
-            ULONG rec[6][5], n = 0, id = Rd(B, 0x259C), u;
-            for (u = 0; u < 32 && n < 6; ++u) {
-                if (!(id & (1u << u)) && u != 0x17) continue;
-                rec[n][0] = u;
-                rec[n][1] = Rd(B, 0x2800 + u * 0x10);
-                rec[n][2] = Rd(B, 0x2804 + u * 0x10);
-                rec[n][3] = Rd(B, 0x2808 + u * 0x10);
-                rec[n][4] = Rd(B, 0x280C + u * 0x10);
-                ++n;
-            }
-            if (n) TraceBin(L"B2aFaultRecs", rec, n * 5 * sizeof(ULONG));
-        }
-        Trace(L"PfifoIntr0", Rd(B, 0x2100));
-        Trace(L"PfifoMmuFaultId", Rd(B, 0x259C));
-        Trace(L"PfifoFault0Inst", Rd(B, 0x2800));
-        Trace(L"PfifoFault0Lo", Rd(B, 0x2804));
-        Trace(L"PfifoFault0Hi", Rd(B, 0x2808));
-        Trace(L"PfifoFault0Info", Rd(B, 0x280C));
-        TraceDurable(L"B2aInOk", ok);
-    }
-    Trace(L"McIntStatusAfterIn", Rd(Dev->Mc, MC_INTSTATUS));
-    Trace(L"McErrStatusAfterIn", Rd(Dev->Mc, MC_ERR_STATUS));
-    Trace(L"McErrAdrAfterIn", Rd(Dev->Mc, MC_ERR_ADR));
-    /* 0.3.9: bit 2 clear here = a GPU memory request reached the MC and is
-     * still outstanding; bit 2 set = nothing is pending at the MC. */
-    TraceDurable(L"McHotStatAfterDma", Rd(Dev->Mc, MC_HOTRESET_STAT_1));
-
-    /* Write into memory only when the read proved the address reaches our buffer. */
-    if (idle && ok == 64) {
-        Step(33);   /* DMEM 0x200 -> memory + 0x100 */
-        Wr(B, PMU_FALCON + FALCON_DMEMC0, 0x200u | (1u << 24));
-        for (i = 0; i < 64; ++i) Wr(B, PMU_FALCON + FALCON_DMEMD0, 0x600D0000u + i);
-        Wr(B, PMU_FALCON + FALCON_DMATRFMOFFS, 0x200);
-        Wr(B, PMU_FALCON + FALCON_DMATRFFBOFFS, 0x100);
-        Wr(B, PMU_FALCON + FALCON_DMATRFCMD, DMATRFCMD_WRITE | DMATRFCMD_256B | (DMA_IDX << 12));
-        polls = DmaWait(B);
-        Trace(L"B2aOutPolls", polls);
-        Trace(L"B2aOutCmd", Rd(B, PMU_FALCON + FALCON_DMATRFCMD));
-        if (polls == 0xFFFFFFFFu) idle = FALSE;
-        Us(100);
-        KeMemoryBarrier();
-        ok = 0; spill = 0;
-        for (i = 0; i < 64; ++i) if (buf[64 + i] == 0x600D0000u + i) ++ok;
-        for (i = 128; i < 1024; ++i) if (buf[i] != 0xEEEEEEEEu) ++spill;
-        for (i = 0; i < 64; ++i) if (buf[i] != 0xC0DE0000u + i * 0x01010101u) ++spill;
-        Trace(L"B2aOutWord0", buf[64]);
-        Trace(L"B2aOutSpill", spill);
-        TraceDurable(L"B2aOutOk", ok);
-    }
-
-    Step(34);   /* put the DMA setup back, clear DMEM */
-    if (bindTouched) {
-        static const ULONG fbifOffsets[5] = { 0xE00, 0xE04, 0xE08, 0xE0C, 0xE10 };
-        /* Restore configuration. The GPU reset in PowerTest releases the
-         * active context; do not replay the action register at 0x058. */
-        Wr(B, PMU_FALCON + FALCON_CTX_ENABLE, ctxEnableWas);
-        for (i = 0; i < 5; ++i) Wr(B, PMU_FALCON + fbifOffsets[i], fbifWas[i]);
-        Trace(L"B2aBindCtxEnableRestored", Rd(B, PMU_FALCON + FALCON_CTX_ENABLE));
-        Trace(L"B2aBindInstActive", Rd(B, PMU_FALCON + FALCON_BIND_INST));
-    }
-    if (fifoTouched) {
-        Wr(B, NV_PMC_ENABLE, Rd(B, NV_PMC_ENABLE) & ~0x100u);
-        Trace(L"B2aFifoPmcRestored", Rd(B, NV_PMC_ENABLE));
-    }
-    if (fbTouched) {
-        Wr(B, 0x100C10, fbRegWas[0]);
-        Wr(B, 0x100CC8, fbRegWas[1]);
-        Wr(B, 0x100CCC, fbRegWas[2]);
-        Wr(B, 0x100CC4, fbRegWas[3]);
-        Trace(L"B2aFbFlushRestored", Rd(B, 0x100C10));
-    }
-    /* Keep the FB pages until the GPU reset (the GPU may still hold them). */
-    RetainB2aPages((PVOID)fbPg[0], (PVOID)fbPg[1]);
-    RetainB2aPages((PVOID)fbPg[2], NULL);
-    Wr(B, PMU_FALCON + PMU_FBIF_TRANSCFG(DMA_IDX), tc);
-    Wr(B, PMU_FALCON + PMU_FBIF_CTL, ctl);
-    Wr(B, PMU_FALCON + FALCON_DMACTL, dmactl);
-    if (itfenTouched) Wr(B, PMU_FALCON + FALCON_ITFEN, itfenWas);
-    Wr(B, PMU_FALCON + FALCON_DMEMC0, 0x100u | (1u << 24));
-    for (i = 0; i < 128; ++i) Wr(B, PMU_FALCON + FALCON_DMEMD0, 0);
-    /* A DMA that never went idle might still write: keep (leak) the buffer then. */
-    if (ptbChanged) {
-        Wr(Dev->Mc, MC_SMMU_PTB_ASID, 0);
-        Wr(Dev->Mc, MC_SMMU_PTB_DATA, oldPtb0);
-        Wr(Dev->Mc, MC_SMMU_PTB_ASID, oldPtbAsid);
-        Wr(Dev->Mc, MC_SMMU_PTC_FLUSH, 0);
-        (VOID)Rd(Dev->Mc, MC_SMMU_PTB_ASID);
-        Wr(Dev->Mc, MC_SMMU_TLB_FLUSH, 0);
-        (VOID)Rd(Dev->Mc, MC_SMMU_PTB_ASID);
-        Wr(Dev->Mc, MC_SMMU_PTB_ASID, 0);
-        Trace(L"SmmuPtbDataRestored", Rd(Dev->Mc, MC_SMMU_PTB_DATA));
-        Wr(Dev->Mc, MC_SMMU_PTB_ASID, oldPtbAsid);
-    }
-    if (idle) {
-        if (pd != NULL) MmFreeContiguousMemorySpecifyCache((PVOID)pd, PAGE_SIZE, MmNonCached);
-        if (pt != NULL) MmFreeContiguousMemorySpecifyCache((PVOID)pt, PAGE_SIZE, MmNonCached);
-        if (!bindTouched) {
-            if (inst != NULL) MmFreeContiguousMemorySpecifyCache((PVOID)inst, PAGE_SIZE, MmNonCached);
-            if (gpuPd != NULL) MmFreeContiguousMemorySpecifyCache((PVOID)gpuPd, PAGE_SIZE, MmNonCached);
-        } else {
-            RetainB2aPages((PVOID)inst, (PVOID)gpuPd);
-            inst = NULL;
-            gpuPd = NULL;
-        }
-    } else if (bindTouched) {
-        RetainB2aPages((PVOID)inst, (PVOID)gpuPd);
-        inst = NULL;
-        gpuPd = NULL;
-    }
-    if (asidChanged) {
-        Wr(Dev->Mc, MC_SMMU_GPU_ASID, asid);
-        Trace(L"SmmuGpuAsidRestored", Rd(Dev->Mc, MC_SMMU_GPU_ASID));
-    }
-    if (idle) MmFreeContiguousMemorySpecifyCache((PVOID)buf, PAGE_SIZE, MmNonCached);
-    TraceDurable(L"B2aResult", !idle ? 0xE0000032u : (ok == 64 ? 0 : 0xE0000033u));
-}
-
-/* ------------------------------------------------------------ power test */
-
-/* ------------------------------------------------------ stage B3a probe */
-
-/* 0.4.0: stage B3a. Read the ACR HS firmware that the kit copied from the
- * user's own linux-firmware (nvidia/gm20b/acr/bl.bin, acr/ucode_load.bin)
- * into the registry, check every header field against the blob sizes, build
- * the signed image in memory (nouveau nvkm_falcon_fw_ctor_hs and
- * nvkm_falcon_fw_patch), load the HS bootloader into the top of PMU IMEM by
- * PIO (gm200_flcn_fw_load / gm200_flcn_pio_imem_wr) and the bootloader DMEM
- * descriptor (flcn_bl_dmem_desc v0, gm20b_acr_hsfw_load_bld) at DMEM 0, and
- * read both back. The falcon CPU is NOT started: the bootloader would DMA the
- * image through a GPU virtual address (ctx_dma VIRT), which needs the PMU
- * address space first. The DMA bases in the descriptor stay 0 here. */
 #define FALCON_BOOTVEC     0x104
 #define FALCON_IMEMC0      0x180       /* BIT24 auto-increment write, BIT25 read, BIT28 secure */
 #define FALCON_IMEMD0      0x184
@@ -1084,10 +680,10 @@ static VOID ProbeB2a(PSWGPU_DEVICE Dev)
 #define ACR_WPR_BYTES      0x00040000u
 #define ACR_GM20B_IOMMU_TAG (1ull << 34) /* nouveau_platform.c: gm20b iommu_bit */
 
-/* C2d owns a separate 2 MiB contiguous arena and GPU instance. The outer
+/* C2d owns a separate contiguous GR arena and GPU instance. The outer
  * SMMU directory may reference this arena, but the ACR arena and instance
  * block remain dedicated to the ACR/PMU path. */
-#define GR_VM_ARENA_SIZE   0x200000u
+#define GR_VM_ARENA_SIZE   0x248000u   /* 2 MiB + 256 KiB GPU PGT + 8 outer SMMU PGTs */
 #define GR_VM_CTX_OFF      0x000000u
 #define GR_VM_GLOBAL_OFF   0x020000u /* golden context image */
 #define GR_VM_BUNDLE_OFF   0x040000u
@@ -1107,9 +703,150 @@ static VOID ProbeB2a(PSWGPU_DEVICE Dev)
 #define GR_VM_D2_RUNLIST_OFF 0x1D4000u
 #define GR_VM_D2_PUSHBUF_OFF 0x1D5000u
 #define GR_VM_D2_RT_OFF      0x1D6000u /* D5 pitch-linear 64x64x4 render target */
+#define GR_VM_F1_PUSH_OFF    0x1DA000u /* Dedicated copy pushbuffer and completion words */
+#define GR_VM_F1_SRC_OFF     0x1E0000u /* 64 KiB, mapped by the existing arena PTEs */
+#define GR_VM_F1_DST_OFF     0x1F0000u /* 64 KiB, ends at the end of the arena */
+#define GR_VM_F1_BYTES       0x10000u
+#define GR_VM_BLIT_GPU_PGT  0x200000u
+#define GR_VM_BLIT_SMMU_PT  0x240000u
+#define GR_VM_BLIT_BASE     0x20000000u  /* 128 MiB GPU PDE boundary; same 32-bit outer IOVA */
+#define GR_VM_BLIT_PDES     8u           /* 32 MiB, 4 MiB per outer SMMU page table */
 #define GR_VM_GPU_PGT_BAR1_OFF 0x1A0000u /* spare 64 KiB-aligned segment within the PGT backing */
 #define GR_VM_GPU_VA       0x18000000u
 #define GR_VM_PAGE_COUNT   (GR_VM_ARENA_SIZE >> 12)
+
+C_ASSERT(GR_VM_D2_RT_OFF + 64u * 64u * sizeof(ULONG) <= GR_VM_F1_PUSH_OFF);
+C_ASSERT(GR_VM_F1_PUSH_OFF + PAGE_SIZE <= GR_VM_F1_SRC_OFF);
+C_ASSERT(GR_VM_F1_SRC_OFF + GR_VM_F1_BYTES <= GR_VM_F1_DST_OFF);
+C_ASSERT(GR_VM_F1_DST_OFF + GR_VM_F1_BYTES <= GR_VM_ARENA_SIZE);
+C_ASSERT(GR_VM_F1_DST_OFF + GR_VM_F1_BYTES <= GR_VM_BLIT_GPU_PGT);
+C_ASSERT(GR_VM_BLIT_GPU_PGT + 0x40000u == GR_VM_BLIT_SMMU_PT);
+C_ASSERT(GR_VM_BLIT_SMMU_PT + GR_VM_BLIT_PDES * PAGE_SIZE == GR_VM_ARENA_SIZE);
+
+/* E4 DMA allocation inventory (Resident, Submit and Irq):
+ * - GR: 0x248000 bytes, page aligned, below 4 GiB, within one 4 MiB window,
+ *   MmNonCached. Contains GR/SMMU/BAR1 tables, instances, channel and golden
+ *   contexts, global buffers, USERD, GPFIFO, runlist, pushbuffer/semaphores
+ *   and the 16 KiB render target at the GR_VM_* offsets above.
+ * - ACR: 512 KiB, same constraints. Contains SMMU/GPU tables, PMU instance
+ *   and HS ACR image. The other Falcon uploads use the existing WPR/PIO paths.
+ * - WPR input: wprUsed (at most 256 KiB), page aligned, below 4 GiB,
+ *   MmNonCached, no boundary requirement. Holds the PMU/FECS LS images.
+ * Firmware assembly, registry blobs and diagnostic arrays use ordinary
+ * ExAllocatePool2 memory and are not DMA backing. Submit/Irq allocate no
+ * additional contiguous memory.
+ *
+ * Fixed regions are reserved independently at PrepareHardware so a failed
+ * reservation leaves the others usable. PnP and the sequential IOCTL queue
+ * serialize checkouts/returns. Return DMA backing only after GPU reset and
+ * restoration of the SMMU mappings, before ReleaseHardware frees the regions.
+ */
+static const ULONG g_DmaPoolRegionBytes[SwGpuPoolRegionCount] = {
+    GR_VM_ARENA_SIZE, ACR_VM_ARENA_SIZE, ACR_WPR_BYTES
+};
+
+static VOID E4TracePool(const SWGPU_DMA_POOL *Pool)
+{
+    Trace(L"E4PoolResult", Pool->Result);
+    Trace(L"E4PoolBytes", Pool->Bytes);
+    Trace(L"E4PoolUsedPeak", Pool->UsedPeak);
+    Trace(L"E4PoolFallbacks", Pool->Fallbacks);
+    Trace(L"E4PoolAllocs", Pool->Allocs);
+    Trace(L"E4PoolFrees", Pool->Frees);
+    Trace(L"E4PoolFailures", Pool->Failures);
+    Trace(L"E4PoolUsed", Pool->Used);
+}
+
+static PVOID E4AllocateContiguous(SWGPU_POOL_REGION Region, ULONG Bytes)
+{
+    PHYSICAL_ADDRESS low, high, boundary;
+    low.QuadPart = 0;
+    high.QuadPart = 0xFFFFFFFFll;
+    boundary.QuadPart = Region == SwGpuPoolWpr ? 0 : ACR_SMMU_WINDOW;
+    return MmAllocateContiguousMemorySpecifyCache(Bytes, low, high, boundary, MmNonCached);
+}
+
+static VOID E4ReservePool(PSWGPU_DEVICE Dev)
+{
+    SWGPU_DMA_POOL *pool = &Dev->DmaPool;
+    SWGPU_POOL_REGION region;
+    RtlZeroMemory(pool, sizeof(*pool));
+    for (region = SwGpuPoolGr; region < SwGpuPoolRegionCount; ++region) {
+        ULONG bytes = g_DmaPoolRegionBytes[region];
+        pool->Block[region] = E4AllocateContiguous(region, bytes);
+        if (pool->Block[region] != NULL && region != SwGpuPoolWpr &&
+            MmGetPhysicalAddress(pool->Block[region]).QuadPart > 0xFFFFFFFFll - bytes) {
+            /* The existing arena range checks require a 32-bit exclusive end. */
+            MmFreeContiguousMemorySpecifyCache(pool->Block[region], bytes, MmNonCached);
+            pool->Block[region] = NULL;
+        }
+        if (pool->Block[region] == NULL) {
+            pool->Result |= 1u << region;
+            ++pool->Failures;
+        } else {
+            pool->Bytes += bytes;
+        }
+    }
+    E4TracePool(pool);
+}
+
+static PVOID E4Checkout(PSWGPU_DEVICE Dev, SWGPU_POOL_REGION Region, ULONG Bytes)
+{
+    SWGPU_DMA_POOL *pool = &Dev->DmaPool;
+    PVOID block;
+    if (Bytes == 0 || Bytes > g_DmaPoolRegionBytes[Region] || pool->InUse[Region]) {
+        ++pool->Failures;
+        return NULL;
+    }
+    block = pool->Block[Region];
+    if (block != NULL) {
+        pool->InUse[Region] = TRUE;
+        pool->Used += g_DmaPoolRegionBytes[Region];
+        if (pool->Used > pool->UsedPeak) pool->UsedPeak = pool->Used;
+        ++pool->Allocs;
+        RtlZeroMemory(block, g_DmaPoolRegionBytes[Region]);
+    } else {
+        ++pool->Fallbacks;
+        block = E4AllocateContiguous(Region, Bytes);
+        if (block != NULL) {
+            pool->InUse[Region] = TRUE;
+            RtlZeroMemory(block, Bytes);
+        } else {
+            ++pool->Failures;
+        }
+    }
+    return block;
+}
+
+static VOID E4Return(PSWGPU_DEVICE Dev, SWGPU_POOL_REGION Region, PVOID Block, ULONG Bytes)
+{
+    SWGPU_DMA_POOL *pool = &Dev->DmaPool;
+    if (Block == NULL) return;
+    pool->InUse[Region] = FALSE;
+    if (Block == pool->Block[Region]) {
+        pool->Used -= g_DmaPoolRegionBytes[Region];
+        ++pool->Frees;
+    } else {
+        MmFreeContiguousMemorySpecifyCache(Block, Bytes, MmNonCached);
+    }
+}
+
+static VOID E4ReleasePool(PSWGPU_DEVICE Dev)
+{
+    SWGPU_DMA_POOL *pool = &Dev->DmaPool;
+    SWGPU_POOL_REGION region;
+    for (region = SwGpuPoolGr; region < SwGpuPoolRegionCount; ++region) {
+        if (pool->InUse[region]) {
+            Trace(L"E4PoolReleaseBorrowed", pool->Used);
+            continue;
+        }
+        if (pool->Block[region] != NULL) {
+            MmFreeContiguousMemorySpecifyCache(pool->Block[region],
+                g_DmaPoolRegionBytes[region], MmNonCached);
+            pool->Block[region] = NULL;
+        }
+    }
+}
 
 typedef struct _ACR_VM_STATE {
     PVOID Arena;
@@ -1138,7 +875,6 @@ typedef struct _GR_VM_STATE {
     ULONG OldSmmuPtes[GR_VM_PAGE_COUNT];
     BOOLEAN PtbChanged;
     BOOLEAN SharedSmmuPt;
-    BOOLEAN Attempted;
     BOOLEAN Active;
 } GR_VM_STATE;
 
@@ -1178,7 +914,7 @@ static BOOLEAN AcrTraceSmmuPte(volatile ULONG *Pt, ULONG Win, ULONG Pa,
 static BOOLEAN AcrVmPrepare(PSWGPU_DEVICE Dev, ULONG WprBytes, ULONGLONG *ArenaIovaOut,
                             ULONGLONG *InstIovaOut)
 {
-    PHYSICAL_ADDRESS lo, hi, boundary, arenaPa;
+    PHYSICAL_ADDRESS arenaPa;
     volatile ULONG *smmuPd, *smmuPt;
     ULONGLONG *gpuPgd, *gpuPgt, *inst;
     ULONG win, arenaFirst, arenaPages;
@@ -1191,27 +927,19 @@ static BOOLEAN AcrVmPrepare(PSWGPU_DEVICE Dev, ULONG WprBytes, ULONGLONG *ArenaI
     BOOLEAN smmuReadbackOk;
 
     RtlZeroMemory(&g_AcrVm, sizeof(g_AcrVm));
-    lo.QuadPart = 0;
-    hi.QuadPart = 0xFFFFFFFFll;
-    boundary.QuadPart = 0;
     g_AcrVm.WprBytes = WprBytes;
-    g_AcrVm.WprBuffer = MmAllocateContiguousMemorySpecifyCache(
-        WprBytes, lo, hi, boundary, MmNonCached);
+    g_AcrVm.WprBuffer = E4Checkout(Dev, SwGpuPoolWpr, WprBytes);
     if (g_AcrVm.WprBuffer == NULL) return FALSE;
-    RtlZeroMemory(g_AcrVm.WprBuffer, WprBytes);
     g_AcrVm.WprPa = MmGetPhysicalAddress(g_AcrVm.WprBuffer);
     if (g_AcrVm.WprPa.HighPart != 0 || (g_AcrVm.WprPa.LowPart & 0xFFFu) != 0) return FALSE;
-    Trace(L"AcrWprBufferPaLo", g_AcrVm.WprPa.LowPart);
-    Trace(L"AcrWprBufferPaHi", (ULONG)g_AcrVm.WprPa.HighPart);
-    Trace(L"AcrWprBufferBytes", WprBytes);
+    TraceDetail(L"AcrWprBufferPaLo", g_AcrVm.WprPa.LowPart);
+    TraceDetail(L"AcrWprBufferPaHi", (ULONG)g_AcrVm.WprPa.HighPart);
+    TraceDetail(L"AcrWprBufferBytes", WprBytes);
 
-    boundary.QuadPart = ACR_SMMU_WINDOW;
-    g_AcrVm.Arena = MmAllocateContiguousMemorySpecifyCache(
-        ACR_VM_ARENA_SIZE, lo, hi, boundary, MmNonCached);
+    g_AcrVm.Arena = E4Checkout(Dev, SwGpuPoolAcr, ACR_VM_ARENA_SIZE);
     if (g_AcrVm.Arena == NULL) return FALSE;
-    RtlZeroMemory(g_AcrVm.Arena, ACR_VM_ARENA_SIZE);
     arenaPa = MmGetPhysicalAddress(g_AcrVm.Arena);
-    Trace(L"AcrArenaPa", arenaPa.LowPart);
+    TraceDetail(L"AcrArenaPa", arenaPa.LowPart);
     if (arenaPa.HighPart != 0 || (arenaPa.LowPart & 0xFFFu) != 0 ||
         arenaPa.LowPart > 0xFFFFFFFFu - ACR_VM_ARENA_SIZE) return FALSE;
 
@@ -1221,7 +949,9 @@ static BOOLEAN AcrVmPrepare(PSWGPU_DEVICE Dev, ULONG WprBytes, ULONGLONG *ArenaI
     arenaFirst = (arenaPa.LowPart - win) >> 12;
     if (arenaFirst + arenaPages > (ACR_SMMU_WINDOW >> 12)) return FALSE;
 
-    if (oldAsid & 0x80000000u) {
+    Trace(L"AcrSmmuMode", (oldAsid & 0x80000000u) ? 1u : 0u);
+    if ((oldAsid & 0x80000000u) == 0u) return FALSE;
+    {
         /* The existing GPU SMMU path translates ASID 0. Preserve its prior
          * page-table selection and restore it only after the GPU reset. */
         oldPtbAsid = Rd(Dev->Mc, MC_SMMU_PTB_ASID);
@@ -1253,21 +983,17 @@ static BOOLEAN AcrVmPrepare(PSWGPU_DEVICE Dev, ULONG WprBytes, ULONGLONG *ArenaI
         arenaIova = (ULONGLONG)arenaPa.LowPart | ACR_GM20B_IOMMU_TAG;
         if (Rd(Dev->Mc, MC_SMMU_PTB_DATA) !=
             ((ULONG)(arenaPa.QuadPart >> 12) | SMMU_ATTR_RWNS)) return FALSE;
-    } else {
-        /* With the GPU SMMU disabled, PMU VM entries use system physical
-         * addresses directly. */
-        arenaIova = arenaPa.LowPart;
     }
 
     *ArenaIovaOut = arenaIova;
     *InstIovaOut = *ArenaIovaOut + ACR_VM_INST_OFF;
-    Trace(L"AcrSmmuWin", win);
-    Trace(L"AcrArenaIova", (ULONG)*ArenaIovaOut);
-    Trace(L"AcrArenaIovaHi", (ULONG)(*ArenaIovaOut >> 32));
-    Trace(L"AcrInstIova", (ULONG)*InstIovaOut);
-    Trace(L"AcrInstIovaHi", (ULONG)(*InstIovaOut >> 32));
-    Trace(L"AcrIommuTagHi", (oldAsid & 0x80000000u) ? 4u : 0u);
-    Trace(L"AcrSmmuArenaFirst", arenaFirst);
+    TraceDetail(L"AcrSmmuWin", win);
+    TraceDetail(L"AcrArenaIova", (ULONG)*ArenaIovaOut);
+    TraceDetail(L"AcrArenaIovaHi", (ULONG)(*ArenaIovaOut >> 32));
+    TraceDetail(L"AcrInstIova", (ULONG)*InstIovaOut);
+    TraceDetail(L"AcrInstIovaHi", (ULONG)(*InstIovaOut >> 32));
+    TraceDetail(L"AcrIommuTagHi", (oldAsid & 0x80000000u) ? 4u : 0u);
+    TraceDetail(L"AcrSmmuArenaFirst", arenaFirst);
 
     gpuPgd = (ULONGLONG *)((PUCHAR)g_AcrVm.Arena + ACR_VM_PGD_OFF);
     gpuPgt = (ULONGLONG *)((PUCHAR)g_AcrVm.Arena + ACR_VM_PGT_OFF);
@@ -1294,8 +1020,8 @@ static BOOLEAN AcrVmPrepare(PSWGPU_DEVICE Dev, ULONG WprBytes, ULONGLONG *ArenaI
      * See NOTICE-GM20B-MMU.txt in the test kit for the upstream notice. */
     gpuPgd[pdeIndex] =
         (((ULONGLONG)*ArenaIovaOut + ACR_VM_PGT_OFF) << 24) | (5ull << 32);
-    Trace(L"AcrSmallPdeHighHalf", 1u);
-    Trace(L"AcrSocTablePolicy", 1u); /* experimental VIDMEM/VOL table route */
+    TraceDetail(L"AcrSmallPdeHighHalf", 1u);
+    TraceDetail(L"AcrSocTablePolicy", 1u); /* experimental VIDMEM/VOL table route */
     inst[0x200 / sizeof(ULONGLONG)] =
         (((ULONGLONG)*ArenaIovaOut + ACR_VM_PGD_OFF) & ~0xFFFULL) | 4u;
     inst[0x208 / sizeof(ULONGLONG)] = 0xFFFFFFFFFFULL;
@@ -1304,9 +1030,8 @@ static BOOLEAN AcrVmPrepare(PSWGPU_DEVICE Dev, ULONG WprBytes, ULONGLONG *ArenaI
     /* The PMU GPU-MMU tables above are themselves reached through the SoC
      * SMMU. Record the outer identity map at every page relevant to the PDE
      * fault, including the backing pages that contain the GPU tables. */
-    Trace(L"AcrSmmuMode", (oldAsid & 0x80000000u) ? 1u : 0u);
-    Trace(L"AcrSmmuGpuAsid", oldAsid);
-    if (oldAsid & 0x80000000u) {
+    TraceDetail(L"AcrSmmuGpuAsid", oldAsid);
+    {
         smmuReadbackOk = TRUE;
         smmuPdeIndex = win >> 22;
         smmuPtPa = (ULONGLONG)arenaPa.LowPart + PAGE_SIZE;
@@ -1314,9 +1039,9 @@ static BOOLEAN AcrVmPrepare(PSWGPU_DEVICE Dev, ULONG WprBytes, ULONGLONG *ArenaI
         smmuPdeExpected = (ULONG)(smmuPtPa >> 12) |
                           SMMU_ATTR_RWNS | SMMU_PDE_NEXT;
         smmuPdeRead = smmuPd[smmuPdeIndex];
-        Trace(L"AcrSmmuPdeIndex", smmuPdeIndex);
-        Trace(L"AcrSmmuPdeExpected", smmuPdeExpected);
-        Trace(L"AcrSmmuPdeRead", smmuPdeRead);
+        TraceDetail(L"AcrSmmuPdeIndex", smmuPdeIndex);
+        TraceDetail(L"AcrSmmuPdeExpected", smmuPdeExpected);
+        TraceDetail(L"AcrSmmuPdeRead", smmuPdeRead);
         smmuReadbackOk = (smmuPdeRead == smmuPdeExpected);
         smmuReadbackOk = AcrTraceSmmuPte(smmuPt, win, arenaPa.LowPart,
                                 L"AcrSmmuArenaPteIndex", L"AcrSmmuArenaPteExpected",
@@ -1333,29 +1058,26 @@ static BOOLEAN AcrVmPrepare(PSWGPU_DEVICE Dev, ULONG WprBytes, ULONGLONG *ArenaI
         smmuReadbackOk = AcrTraceSmmuPte(smmuPt, win, arenaPa.LowPart + ACR_VM_IMAGE_OFF,
                                 L"AcrSmmuImagePteIndex", L"AcrSmmuImagePteExpected",
                                 L"AcrSmmuImagePteRead") && smmuReadbackOk;
-        Trace(L"AcrSmmuPtbDataRead", Rd(Dev->Mc, MC_SMMU_PTB_DATA));
+        TraceDetail(L"AcrSmmuPtbDataRead", Rd(Dev->Mc, MC_SMMU_PTB_DATA));
         smmuMapOk = smmuReadbackOk ? 1u : 0u;
-    } else {
-        /* With SMMU bypassed, the Falcon sees physical pages directly. */
-        smmuMapOk = 2u;
     }
     TraceDurable(L"AcrSmmuMapReadback", smmuMapOk);
 
-    Trace(L"AcrPgdIova", (ULONG)(*ArenaIovaOut + ACR_VM_PGD_OFF));
-    Trace(L"AcrPgdIovaHi", (ULONG)((*ArenaIovaOut + ACR_VM_PGD_OFF) >> 32));
-    Trace(L"AcrPgtIova", (ULONG)(*ArenaIovaOut + ACR_VM_PGT_OFF));
-    Trace(L"AcrPgtIovaHi", (ULONG)((*ArenaIovaOut + ACR_VM_PGT_OFF) >> 32));
-    Trace(L"AcrPdeIndex", pdeIndex);
-    Trace(L"AcrPdeLo", (ULONG)gpuPgd[pdeIndex]);
-    Trace(L"AcrPdeHi", (ULONG)(gpuPgd[pdeIndex] >> 32));
-    Trace(L"AcrPteVa", ACR_GPU_VA_BASE + ACR_VM_IMAGE_OFF);
-    Trace(L"AcrPteIndex", pteIndex);
-    Trace(L"AcrPteLo", (ULONG)gpuPgt[pteIndex]);
-    Trace(L"AcrPteHi", (ULONG)(gpuPgt[pteIndex] >> 32));
-    Trace(L"AcrInstPdbLo", (ULONG)inst[0x200 / sizeof(ULONGLONG)]);
-    Trace(L"AcrInstPdbHi", (ULONG)(inst[0x200 / sizeof(ULONGLONG)] >> 32));
-    Trace(L"AcrInstLimitLo", (ULONG)inst[0x208 / sizeof(ULONGLONG)]);
-    Trace(L"AcrInstLimitHi", (ULONG)(inst[0x208 / sizeof(ULONGLONG)] >> 32));
+    TraceDetail(L"AcrPgdIova", (ULONG)(*ArenaIovaOut + ACR_VM_PGD_OFF));
+    TraceDetail(L"AcrPgdIovaHi", (ULONG)((*ArenaIovaOut + ACR_VM_PGD_OFF) >> 32));
+    TraceDetail(L"AcrPgtIova", (ULONG)(*ArenaIovaOut + ACR_VM_PGT_OFF));
+    TraceDetail(L"AcrPgtIovaHi", (ULONG)((*ArenaIovaOut + ACR_VM_PGT_OFF) >> 32));
+    TraceDetail(L"AcrPdeIndex", pdeIndex);
+    TraceDetail(L"AcrPdeLo", (ULONG)gpuPgd[pdeIndex]);
+    TraceDetail(L"AcrPdeHi", (ULONG)(gpuPgd[pdeIndex] >> 32));
+    TraceDetail(L"AcrPteVa", ACR_GPU_VA_BASE + ACR_VM_IMAGE_OFF);
+    TraceDetail(L"AcrPteIndex", pteIndex);
+    TraceDetail(L"AcrPteLo", (ULONG)gpuPgt[pteIndex]);
+    TraceDetail(L"AcrPteHi", (ULONG)(gpuPgt[pteIndex] >> 32));
+    TraceDetail(L"AcrInstPdbLo", (ULONG)inst[0x200 / sizeof(ULONGLONG)]);
+    TraceDetail(L"AcrInstPdbHi", (ULONG)(inst[0x200 / sizeof(ULONGLONG)] >> 32));
+    TraceDetail(L"AcrInstLimitLo", (ULONG)inst[0x208 / sizeof(ULONGLONG)]);
+    TraceDetail(L"AcrInstLimitHi", (ULONG)(inst[0x208 / sizeof(ULONGLONG)] >> 32));
     g_AcrVm.Active = TRUE;
     return TRUE;
 }
@@ -1364,10 +1086,10 @@ static BOOLEAN AcrVmBind(volatile UCHAR *B, ULONGLONG InstIova)
 {
     ULONG a = 0, d = 0, ap = 0, dp = 0;
     BOOLEAN ok = PmuBindInst(B, InstIova, &a, &d, &ap, &dp);
-    Trace(L"AcrBindInstWritten", 0x70000000u | (ULONG)(InstIova >> 12));
-    Trace(L"AcrBindInstRead", Rd(B, PMU_FALCON + FALCON_BIND_INST));
-    Trace(L"AcrBindAckState", a);
-    Trace(L"AcrBindDoneState", d);
+    TraceDetail(L"AcrBindInstWritten", 0x70000000u | (ULONG)(InstIova >> 12));
+    TraceDetail(L"AcrBindInstRead", Rd(B, PMU_FALCON + FALCON_BIND_INST));
+    TraceDetail(L"AcrBindAckState", a);
+    TraceDetail(L"AcrBindDoneState", d);
     Trace(L"AcrBindAckPolls", ap);
     Trace(L"AcrBindDonePolls", dp);
     TraceDurable(L"AcrBindOk", ok ? 1u : 0u);
@@ -1391,15 +1113,15 @@ static BOOLEAN AcrMmuInvalidatePdb(volatile UCHAR *B, ULONGLONG PgdIova)
         Us(5);
     }
     Trace(L"AcrMmuInvSlotPolls", polls);
-    Trace(L"AcrMmuInvSlotStatus", status);
-    Trace(L"AcrMmuInvFreeSlots", (status & 0x00FF0000u) >> 16);
-    Trace(L"AcrMmuInvPendingBefore", (status & 0x00008000u) ? 1u : 0u);
+    TraceDetail(L"AcrMmuInvSlotStatus", status);
+    TraceDetail(L"AcrMmuInvFreeSlots", (status & 0x00FF0000u) >> 16);
+    TraceDetail(L"AcrMmuInvPendingBefore", (status & 0x00008000u) ? 1u : 0u);
     if (polls == 2000) goto done;
 
     Wr(B, 0x100CB8, (ULONG)pdb);
     pdbRead = Rd(B, 0x100CB8);
-    Trace(L"AcrMmuInvPdb", (ULONG)pdb);
-    Trace(L"AcrMmuInvPdbRead", pdbRead);
+    TraceDetail(L"AcrMmuInvPdb", (ULONG)pdb);
+    TraceDetail(L"AcrMmuInvPdbRead", pdbRead);
     /* Nouveau programs 0x100CB8 without reading it back. Keep the readback
      * diagnostic only: this register may not return the written PDB value. */
 
@@ -1410,7 +1132,7 @@ static BOOLEAN AcrMmuInvalidatePdb(volatile UCHAR *B, ULONGLONG PgdIova)
         Us(5);
     }
     Trace(L"AcrMmuInvDonePolls", polls);
-    Trace(L"AcrMmuInvDoneStatus", status);
+    TraceDetail(L"AcrMmuInvDoneStatus", status);
 done:
     TraceDurable(L"AcrMmuInvOk", queued ? 1u : 0u);
     return queued;
@@ -1426,15 +1148,15 @@ static BOOLEAN AcrMmuInvalidateAllPdbs(volatile UCHAR *B)
     BOOLEAN fifoEmptyObserved = FALSE;
 
     status = Rd(B, 0x100C80);
-    Trace(L"AcrMmuAllPdbBeforeStatus", status);
+    TraceDetail(L"AcrMmuAllPdbBeforeStatus", status);
     for (polls = 0; polls < 2000; ++polls) {
         status = Rd(B, 0x100C80);
         if ((status & 0x00FF0000u) != 0) break;
         Us(5);
     }
     Trace(L"AcrMmuAllPdbSlotPolls", polls);
-    Trace(L"AcrMmuAllPdbSlotStatus", status);
-    Trace(L"AcrMmuAllPdbFreeSlots", (status & 0x00FF0000u) >> 16);
+    TraceDetail(L"AcrMmuAllPdbSlotStatus", status);
+    TraceDetail(L"AcrMmuAllPdbFreeSlots", (status & 0x00FF0000u) >> 16);
     if (polls == 2000) {
         TraceDurable(L"AcrMmuAllPdbInvOk", 0);
         return FALSE;
@@ -1443,8 +1165,8 @@ static BOOLEAN AcrMmuInvalidateAllPdbs(volatile UCHAR *B)
     Wr(B, 0x100CBC, 0x80000003u); /* trigger + PAGE_ALL + ALL_PDB */
     KeMemoryBarrier();
     status = Rd(B, 0x100C80);
-    Trace(L"AcrMmuAllPdbRequest", 0x80000003u);
-    Trace(L"AcrMmuAllPdbPostWriteStatus", status);
+    TraceDetail(L"AcrMmuAllPdbRequest", 0x80000003u);
+    TraceDetail(L"AcrMmuAllPdbPostWriteStatus", status);
     for (polls = 0; polls < 2000; ++polls) {
         status = Rd(B, 0x100C80);
         if (status & 0x00008000u) {
@@ -1454,7 +1176,7 @@ static BOOLEAN AcrMmuInvalidateAllPdbs(volatile UCHAR *B)
         Us(5);
     }
     Trace(L"AcrMmuAllPdbStatusPolls", polls);
-    Trace(L"AcrMmuAllPdbStatus", status);
+    TraceDetail(L"AcrMmuAllPdbStatus", status);
     TraceDurable(L"AcrMmuAllPdbInvOk", fifoEmptyObserved ? 1u : 0u);
     return fifoEmptyObserved;
 }
@@ -1474,16 +1196,14 @@ static VOID AcrVmCleanupAfterGpuReset(PSWGPU_DEVICE Dev)
         restoreData = Rd(Dev->Mc, MC_SMMU_PTB_DATA);
         Wr(Dev->Mc, MC_SMMU_PTB_ASID, g_AcrVm.OldPtbAsid);
         restoreAsid = Rd(Dev->Mc, MC_SMMU_PTB_ASID);
-        Trace(L"AcrSmmuRestoreData", restoreData);
+        TraceDetail(L"AcrSmmuRestoreData", restoreData);
         TraceDurable(L"AcrSmmuRestored",
                      restoreData == g_AcrVm.OldPtbData && restoreAsid == g_AcrVm.OldPtbAsid ? 1u : 0u);
     } else {
         TraceDurable(L"AcrSmmuRestored", 1u); /* no SMMU page-table change */
     }
-    if (g_AcrVm.WprBuffer != NULL)
-        MmFreeContiguousMemorySpecifyCache(g_AcrVm.WprBuffer, g_AcrVm.WprBytes, MmNonCached);
-    if (g_AcrVm.Arena != NULL)
-        MmFreeContiguousMemorySpecifyCache(g_AcrVm.Arena, ACR_VM_ARENA_SIZE, MmNonCached);
+    E4Return(Dev, SwGpuPoolWpr, g_AcrVm.WprBuffer, g_AcrVm.WprBytes);
+    E4Return(Dev, SwGpuPoolAcr, g_AcrVm.Arena, ACR_VM_ARENA_SIZE);
     RtlZeroMemory(&g_AcrVm, sizeof(g_AcrVm));
 }
 #define SWGPU_TAG          'uGwS'
@@ -1499,12 +1219,26 @@ static PUCHAR ReadBinParam(PCWSTR Name, ULONG Max, PULONG Len)
     NTSTATUS st;
 
     *Len = 0;
-    if (SwGpuParamsPath[0] == L'\0') return NULL;
+    if (SwGpuParamsPath[0] == L'\0') { Trace(L"FwReadFailStage", 1u); return NULL; }
     RtlInitUnicodeString(&path, SwGpuParamsPath);
     InitializeObjectAttributes(&oa, &path, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
-    if (!NT_SUCCESS(ZwOpenKey(&key, KEY_READ, &oa))) return NULL;
+    st = ZwOpenKey(&key, KEY_READ, &oa);
+    if (!NT_SUCCESS(st)) {
+        /* Claude 0.12.5: F3 boot start failed with E0000041 (no ACR blobs). */
+        Trace(L"FwReadFailStage", 2u);
+        Trace(L"FwReadFailStatus", (ULONG)st);
+        return NULL;
+    }
     RtlInitUnicodeString(&name, Name);
     st = ZwQueryValueKey(key, &name, KeyValuePartialInformation, NULL, 0, &need);
+    if (!((st == STATUS_BUFFER_TOO_SMALL || st == STATUS_BUFFER_OVERFLOW) &&
+          need > 0 && need <= Max + sizeof(KEY_VALUE_PARTIAL_INFORMATION))) {
+        Trace(L"FwReadFailStage", 3u);
+        Trace(L"FwReadFailStatus", (ULONG)st);
+        Trace(L"FwReadFailNeed", need);
+        Trace(L"FwReadFailMax", Max);
+        Trace(L"FwReadFailNameLen", (ULONG)name.Length);
+    }
     if ((st == STATUS_BUFFER_TOO_SMALL || st == STATUS_BUFFER_OVERFLOW) &&
         need > 0 && need <= Max + sizeof(KEY_VALUE_PARTIAL_INFORMATION)) {
         kv = (PKEY_VALUE_PARTIAL_INFORMATION)ExAllocatePool2(POOL_FLAG_PAGED, need, SWGPU_TAG);
@@ -1564,7 +1298,7 @@ static VOID WprPutLe64(PUCHAR P, ULONGLONG V)
 /* Build a GM20B WPR image from the staged Linux firmware blobs. Runtime PMU
  * loader_config addresses are physical WPR addresses (WPR base + image
  * offsets), as populated by nvgpu and relocated by nouveau before ACR.
- * WprBase=0 is used only for the CPU-only layout preview. */
+ * WprBase is the protected WPR base read from the device. */
 static ULONG BuildWprB3b(ULONG PmuDmemSize, ULONGLONG WprBase, PUCHAR *OutWpr, PULONG OutAllocLen, PULONG OutUsed, PULONG OutPmuArgv)
 {
     PUCHAR pmuDesc = NULL, pmuImage = NULL, pmuSig = NULL;
@@ -1588,7 +1322,7 @@ static ULONG BuildWprB3b(ULONG PmuDmemSize, ULONGLONG WprBase, PUCHAR *OutWpr, P
     if (OutAllocLen != NULL) *OutAllocLen = 0;
     if (OutUsed != NULL) *OutUsed = 0;
     if (OutPmuArgv != NULL) *OutPmuArgv = 0;
-    if (OutWpr != NULL && WprBase == 0) {
+    if (WprBase == 0) {
         result = 0xE0000077u;
         goto done;
     }
@@ -1601,21 +1335,21 @@ static ULONG BuildWprB3b(ULONG PmuDmemSize, ULONGLONG WprBase, PUCHAR *OutWpr, P
     fecsInst = ReadBinParam(L"FwFecsInst", 0x20000u, &fecsInstLen);
     fecsData = ReadBinParam(L"FwFecsData", 0x20000u, &fecsDataLen);
     fecsSig = ReadBinParam(L"FwFecsSig", 0x20000u, &fecsSigLen);
-    Trace(L"B3bPmuDescLen", pmuDescLen);
-    Trace(L"B3bPmuImageLen", pmuImageLen);
-    Trace(L"B3bPmuSigLen", pmuSigLen);
-    Trace(L"B3bFecsBlLen", fecsBlLen);
-    Trace(L"B3bFecsInstLen", fecsInstLen);
-    Trace(L"B3bFecsDataLen", fecsDataLen);
-    Trace(L"B3bFecsSigLen", fecsSigLen);
+    TraceDetail(L"B3bPmuDescLen", pmuDescLen);
+    TraceDetail(L"B3bPmuImageLen", pmuImageLen);
+    TraceDetail(L"B3bPmuSigLen", pmuSigLen);
+    TraceDetail(L"B3bFecsBlLen", fecsBlLen);
+    TraceDetail(L"B3bFecsInstLen", fecsInstLen);
+    TraceDetail(L"B3bFecsDataLen", fecsDataLen);
+    TraceDetail(L"B3bFecsSigLen", fecsSigLen);
     /* Keep the 0.4.1 kit's existing SUMMARY field names usable. */
-    Trace(L"B3aFwPmuDescLen", pmuDescLen);
-    Trace(L"B3aFwPmuImageLen", pmuImageLen);
-    Trace(L"B3aFwPmuSigLen", pmuSigLen);
-    Trace(L"B3aFwFecsBlLen", fecsBlLen);
-    Trace(L"B3aFwFecsInstLen", fecsInstLen);
-    Trace(L"B3aFwFecsDataLen", fecsDataLen);
-    Trace(L"B3aFwFecsSigLen", fecsSigLen);
+    TraceDetail(L"B3aFwPmuDescLen", pmuDescLen);
+    TraceDetail(L"B3aFwPmuImageLen", pmuImageLen);
+    TraceDetail(L"B3aFwPmuSigLen", pmuSigLen);
+    TraceDetail(L"B3aFwFecsBlLen", fecsBlLen);
+    TraceDetail(L"B3aFwFecsInstLen", fecsInstLen);
+    TraceDetail(L"B3aFwFecsDataLen", fecsDataLen);
+    TraceDetail(L"B3aFwFecsSigLen", fecsSigLen);
     if (pmuDesc == NULL || pmuImage == NULL || pmuSig == NULL || fecsBl == NULL ||
         fecsInst == NULL || fecsData == NULL || fecsSig == NULL) {
         result = 0xE0000052u; goto done;
@@ -1638,11 +1372,11 @@ static ULONG BuildWprB3b(ULONG PmuDmemSize, ULONGLONG WprBase, PUCHAR *OutWpr, P
     pmuAppCodeSize = Le32(pmuDesc + 120);
     pmuAppDataOff = Le32(pmuDesc + 124);
     pmuAppDataSize = Le32(pmuDesc + 128);
-    Trace(L"B3bPmuDescSize", descSize);
-    Trace(L"B3bPmuImageSize", imageSize);
-    Trace(L"B3cPmuAppVersion", Le32(pmuDesc + 12));
-    Trace(L"B3bPmuBootSize", pmuBootSize);
-    Trace(L"B3bPmuAppSize", pmuAppSize);
+    TraceDetail(L"B3bPmuDescSize", descSize);
+    TraceDetail(L"B3bPmuImageSize", imageSize);
+    TraceDetail(L"B3cPmuAppVersion", Le32(pmuDesc + 12));
+    TraceDetail(L"B3bPmuBootSize", pmuBootSize);
+    TraceDetail(L"B3bPmuAppSize", pmuAppSize);
     if (descSize < 132 || descSize > pmuDescLen || imageSize == 0 || imageSize > pmuImageLen ||
         pmuBootSize == 0 || pmuAppSize == 0 ||
         !InBlob(imageSize, pmuBootStart, pmuBootSize) ||
@@ -1681,9 +1415,9 @@ static ULONG BuildWprB3b(ULONG PmuDmemSize, ULONGLONG WprBase, PUCHAR *OutWpr, P
     fecsStartTag = Le32(fecsBl + blDescOff);
     fecsCodeOff = Le32(fecsBl + blDescOff + 8);
     fecsCodeSize = Le32(fecsBl + blDescOff + 12);
-    Trace(L"B3bFecsStartTag", fecsStartTag);
-    Trace(L"B3bFecsCodeOff", fecsCodeOff);
-    Trace(L"B3bFecsCodeSize", fecsCodeSize);
+    TraceDetail(L"B3bFecsStartTag", fecsStartTag);
+    TraceDetail(L"B3bFecsCodeOff", fecsCodeOff);
+    TraceDetail(L"B3bFecsCodeSize", fecsCodeSize);
     if (fecsCodeSize == 0 || fecsCodeSize > 0x1FFFFu ||
         !InBlob(blDataSize, 0, fecsCodeSize) || fecsStartTag > 0xFFFFu ||
         fecsInstLen > 0x1FFFFu || fecsDataLen > 0x1FFFFu) {
@@ -1715,14 +1449,14 @@ static ULONG BuildWprB3b(ULONG PmuDmemSize, ULONGLONG WprBase, PUCHAR *OutWpr, P
     totalUsed = fecsBldOff + 256u;
     allocLen = (totalUsed + 0x3FFFFu) & ~0x3FFFFu;
     if (allocLen != 0x40000u) { result = 0xE000005Eu; goto done; }
-    Trace(L"B3bPmuLsbOff", pmuLsbOff);
-    Trace(L"B3bPmuImgOff", pmuImgOff);
-    Trace(L"B3bPmuBldOff", pmuBldOff);
-    Trace(L"B3bFecsLsbOff", fecsLsbOff);
-    Trace(L"B3bFecsImgOff", fecsImgOff);
-    Trace(L"B3bFecsBldOff", fecsBldOff);
-    Trace(L"B3bWprUsed", totalUsed);
-    Trace(L"B3bWprAlloc", allocLen);
+    TraceDetail(L"B3bPmuLsbOff", pmuLsbOff);
+    TraceDetail(L"B3bPmuImgOff", pmuImgOff);
+    TraceDetail(L"B3bPmuBldOff", pmuBldOff);
+    TraceDetail(L"B3bFecsLsbOff", fecsLsbOff);
+    TraceDetail(L"B3bFecsImgOff", fecsImgOff);
+    TraceDetail(L"B3bFecsBldOff", fecsBldOff);
+    TraceDetail(L"B3bWprUsed", totalUsed);
+    TraceDetail(L"B3bWprAlloc", allocLen);
     if (OutUsed != NULL) *OutUsed = totalUsed;
 
     wpr = (PUCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, allocLen, SWGPU_TAG);
@@ -1772,9 +1506,7 @@ static ULONG BuildWprB3b(ULONG PmuDmemSize, ULONGLONG WprBase, PUCHAR *OutWpr, P
     WprPutLe32(wpr + fecsLsbOff + 120, 0);
 
     RtlZeroMemory(pmuBld, sizeof(pmuBld));
-    /* The PMU ACR loader uses DMAIDX_UCODE (0), whose FBIF TRANSCFG is
-     * physical local FB. DMA_IDX=4 is PHYS_SYS_NCOH for the separate B2a
-     * system-memory DMA probe and would send these WPR addresses to sysmem. */
+    /* DMAIDX_UCODE (0) sends these addresses to the protected local WPR. */
     pmuBld[0] = PMU_UCODE_DMA_IDX;
     pmuCodeAddr = WprBase + (ULONGLONG)pmuImgOff + pmuCodeOffset;
     pmuDataAddr = WprBase + (ULONGLONG)pmuImgOff + pmuDataOffset;
@@ -1828,17 +1560,17 @@ static ULONG BuildWprB3b(ULONG PmuDmemSize, ULONGLONG WprBase, PUCHAR *OutWpr, P
           Le32(wpr + fecsBldOff + 60) == fecsBld[15] &&
           RtlCompareMemory(wpr + pmuImgOff, pmuImage, imageSize) == imageSize &&
           RtlCompareMemory(wpr + fecsImgOff, fecsImage, fecsImageLen) == fecsImageLen) ? 1u : 0u;
-    Trace(L"B3cPmuCodeDmaBase", pmuBld[1]);
-    Trace(L"B3bPmuDmaIdx", pmuBld[0]);
-    Trace(L"B3cPmuDataDmaBase", pmuBld[5]);
-    Trace(L"B3cPmuWprBaseLo", (ULONG)WprBase);
-    Trace(L"B3cPmuWprBaseHi", (ULONG)(WprBase >> 32));
-    Trace(L"B3cPmuDmaBaseAbsolute", WprBase != 0 ? 1u : 0u);
-    Trace(L"B3bPmuArgv", pmuBld[9]);
-    Trace(L"B3cFecsDmaIdx", fecsBld[8]);
-    Trace(L"B3cFecsCodeDmaBase", fecsBld[9]);
-    Trace(L"B3cFecsDataDmaBase", fecsBld[15]);
-    Trace(L"B3cFecsDmaBaseAbsolute", WprBase != 0 ? 1u : 0u);
+    TraceDetail(L"B3cPmuCodeDmaBase", pmuBld[1]);
+    TraceDetail(L"B3bPmuDmaIdx", pmuBld[0]);
+    TraceDetail(L"B3cPmuDataDmaBase", pmuBld[5]);
+    TraceDetail(L"B3cPmuWprBaseLo", (ULONG)WprBase);
+    TraceDetail(L"B3cPmuWprBaseHi", (ULONG)(WprBase >> 32));
+    TraceDetail(L"B3cPmuDmaBaseAbsolute", WprBase != 0 ? 1u : 0u);
+    TraceDetail(L"B3bPmuArgv", pmuBld[9]);
+    TraceDetail(L"B3cFecsDmaIdx", fecsBld[8]);
+    TraceDetail(L"B3cFecsCodeDmaBase", fecsBld[9]);
+    TraceDetail(L"B3cFecsDataDmaBase", fecsBld[15]);
+    TraceDetail(L"B3cFecsDmaBaseAbsolute", WprBase != 0 ? 1u : 0u);
     TraceBin(L"B3cFecsBldWords", fecsBld, sizeof(fecsBld));
     TraceDurable(L"B3bWprCpuReadback", ok);
     result = ok ? 0 : 0xE0000060u;
@@ -1886,10 +1618,10 @@ static ULONG B3cStartPmuLs(PSWGPU_DEVICE Dev, ULONG PmuArgv)
 
     Step(58);
     cpuctl = Rd(B, PMU_FALCON + FALCON_CPUCTL);
-    Trace(L"B3cLsPmuPreCpuctl", cpuctl);
-    Trace(L"B3cLsPmuPreSctl", Rd(B, PMU_FALCON + FALCON_SCTL));
-    Trace(L"B3cLsPmuPreMailbox0", Rd(B, PMU_FALCON + FALCON_MAILBOX0));
-    Trace(L"B3cLsPmuPreMailbox1", Rd(B, PMU_FALCON + FALCON_MAILBOX1));
+    TraceDetail(L"B3cLsPmuPreCpuctl", cpuctl);
+    TraceDetail(L"B3cLsPmuPreSctl", Rd(B, PMU_FALCON + FALCON_SCTL));
+    TraceDetail(L"B3cLsPmuPreMailbox0", Rd(B, PMU_FALCON + FALCON_MAILBOX0));
+    TraceDetail(L"B3cLsPmuPreMailbox1", Rd(B, PMU_FALCON + FALCON_MAILBOX1));
     if ((cpuctl & 0x50u) != 0x50u ||
         Rd(B, PMU_FALCON + FALCON_MAILBOX0) != 0 ||
         Rd(B, PMU_FALCON + FALCON_MAILBOX1) != 0) {
@@ -1898,27 +1630,27 @@ static ULONG B3cStartPmuLs(PSWGPU_DEVICE Dev, ULONG PmuArgv)
     }
     hwcfg = Rd(B, PMU_FALCON + FALCON_HWCFG);
     dmemSize = ((hwcfg >> 9) & 0x1FFu) << 8;
-    Trace(L"B3cLsPmuDmemSize", dmemSize);
+    TraceDetail(L"B3cLsPmuDmemSize", dmemSize);
     if (dmemSize < 256u || dmemSize > 0xFFFFu) {
         result = 0xE000006Eu;
         goto done;
     }
     Wr(B, PMU_FALCON + 0x004, 0x10u);
     irq = Rd(B, PMU_FALCON + 0x008);
-    Trace(L"B3cLsPmuIrqAfterClear", irq);
+    TraceDetail(L"B3cLsPmuIrqAfterClear", irq);
     if (irq & 0x10u) {
         result = 0xE000006Fu;
         goto done;
     }
     for (i = 0; i < RTL_NUMBER_OF(aperture); ++i)
         Wr(B, PMU_FALCON + 0xE00 + i * 4u, aperture[i]);
-    Trace(L"B3cLsPmuAperture0", Rd(B, PMU_FALCON + 0xE00));
-    Trace(L"B3cLsPmuAperture4", Rd(B, PMU_FALCON + 0xE10));
+    TraceDetail(L"B3cLsPmuAperture0", Rd(B, PMU_FALCON + 0xE00));
+    TraceDetail(L"B3cLsPmuAperture4", Rd(B, PMU_FALCON + 0xE10));
 
     argsOff = dmemSize - sizeof(args);
-    Trace(L"B3cLsPmuArgvAdvertised", PmuArgv);
-    Trace(L"B3cLsPmuArgvComputed", argsOff);
-    Trace(L"B3cLsPmuArgsSize", sizeof(args));
+    TraceDetail(L"B3cLsPmuArgvAdvertised", PmuArgv);
+    TraceDetail(L"B3cLsPmuArgvComputed", argsOff);
+    TraceDetail(L"B3cLsPmuArgsSize", sizeof(args));
     TraceDurable(L"B3cLsPmuArgvMatch", argsOff == PmuArgv ? 1u : 0u);
     if (argsOff != PmuArgv) {
         result = 0xE0000074u;
@@ -1934,8 +1666,8 @@ static ULONG B3cStartPmuLs(PSWGPU_DEVICE Dev, ULONG PmuArgv)
         if (argsReadback[i] != args[i]) argsOk = 0;
     }
     argsCursor = Rd(B, PMU_FALCON + FALCON_DMEMC0) & 0xFFFFu;
-    Trace(L"B3cLsPmuArgsOff", argsOff);
-    Trace(L"B3cLsPmuArgsCursor", argsCursor);
+    TraceDetail(L"B3cLsPmuArgsOff", argsOff);
+    TraceDetail(L"B3cLsPmuArgsCursor", argsCursor);
     TraceDurable(L"B3cLsPmuArgsOk", argsOk);
     TraceBin(L"B3cLsPmuArgvReadback", argsReadback, sizeof(argsReadback));
     if (!argsOk || argsCursor != argsOff + sizeof(args)) {
@@ -1943,17 +1675,17 @@ static ULONG B3cStartPmuLs(PSWGPU_DEVICE Dev, ULONG PmuArgv)
         goto done;
     }
 
-    Trace(L"B3cLsPmuItfenBeforeStart", Rd(B, PMU_FALCON + FALCON_ITFEN));
-    Trace(L"B3cLsPmuCpuctlAliasBefore", Rd(B, PMU_FALCON + 0x130));
+    TraceDetail(L"B3cLsPmuItfenBeforeStart", Rd(B, PMU_FALCON + FALCON_ITFEN));
+    TraceDetail(L"B3cLsPmuCpuctlAliasBefore", Rd(B, PMU_FALCON + 0x130));
     /* ACR leaves DMACTL=1 on this device. Snapshot only; host writes are
      * ignored in this post-ACR secure state, as observed in 0.4.24. */
     Step(63);
     dmaCtlBeforeStart = Rd(B, PMU_FALCON + FALCON_DMACTL);
-    Trace(L"B3cLsPmuDmaCtlBeforeStart", dmaCtlBeforeStart);
+    TraceDetail(L"B3cLsPmuDmaCtlBeforeStart", dmaCtlBeforeStart);
     dmaCtlAtStart = Rd(B, PMU_FALCON + FALCON_DMACTL);
-    Trace(L"B3cLsPmuDmaCtlAtStart", dmaCtlAtStart);
+    TraceDetail(L"B3cLsPmuDmaCtlAtStart", dmaCtlAtStart);
     Wr(B, PMU_FALCON + 0x130, 2u); /* CPUCTL_ALIAS starts the LS RTOS. */
-    Trace(L"B3cLsPmuCpuctlAliasAfter", Rd(B, PMU_FALCON + 0x130));
+    TraceDetail(L"B3cLsPmuCpuctlAliasAfter", Rd(B, PMU_FALCON + 0x130));
     Step(59);
     for (polls = 0; polls < 2000u; ++polls) {
         head = Rd(B, PMU_FALCON + 0x4C8);
@@ -1977,11 +1709,11 @@ static ULONG B3cStartPmuLs(PSWGPU_DEVICE Dev, ULONG PmuArgv)
         }
         Ms(1);
     }
-    Trace(L"B3cLsPmuInitBadPairs", initBadPairs);
+    TraceDetail(L"B3cLsPmuInitBadPairs", initBadPairs);
     if (initBadPairs) {
-        Trace(L"B3cLsPmuInitBadHead", initBadHead);
-        Trace(L"B3cLsPmuInitBadTail", initBadTail);
-        Trace(L"B3cLsPmuInitBadPoll", initBadPoll);
+        TraceDetail(L"B3cLsPmuInitBadHead", initBadHead);
+        TraceDetail(L"B3cLsPmuInitBadTail", initBadTail);
+        TraceDetail(L"B3cLsPmuInitBadPoll", initBadPoll);
     }
     if (polls == 2000u) result = initBadPairs ? 0xE0000071u : 0xE0000070u;
     else {
@@ -1994,9 +1726,9 @@ static ULONG B3cStartPmuLs(PSWGPU_DEVICE Dev, ULONG PmuArgv)
             initCursor = Rd(B, PMU_FALCON + FALCON_DMEMC0) & 0xFFFFu;
             initHdr = initWords[0];
             initType = initWords[1] & 0xFFu;
-            Trace(L"B3cLsPmuInitHdr", initHdr);
-            Trace(L"B3cLsPmuInitType", initType);
-            Trace(L"B3cLsPmuInitPioCursor", initCursor);
+            TraceDetail(L"B3cLsPmuInitHdr", initHdr);
+            TraceDetail(L"B3cLsPmuInitType", initType);
+            TraceDetail(L"B3cLsPmuInitPioCursor", initCursor);
             TraceBin(L"B3cLsPmuInitWords", initWords, sizeof(initWords));
             if ((initHdr & 0xFFu) != 7u || ((initHdr >> 8) & 0xFFu) != 42u ||
                 initType != 0u || initCursor != tail + 44u)
@@ -2005,24 +1737,24 @@ static ULONG B3cStartPmuLs(PSWGPU_DEVICE Dev, ULONG PmuArgv)
     }
 done:
     Step(60);
-    Trace(L"B3cLsPmuIrqStat", Rd(B, PMU_FALCON + 0x008));
+    TraceDetail(L"B3cLsPmuIrqStat", Rd(B, PMU_FALCON + 0x008));
     Trace(L"B3cLsPmuInitPolls", polls);
     head = Rd(B, PMU_FALCON + 0x4C8);
     tail = Rd(B, PMU_FALCON + 0x4CC);
-    Trace(L"B3cLsPmuMsgHead", head);
-    Trace(L"B3cLsPmuMsgTail", tail);
-    Trace(L"B3cLsPmuCpuctl", Rd(B, PMU_FALCON + FALCON_CPUCTL));
-    Trace(L"B3cLsPmuSctl", Rd(B, PMU_FALCON + FALCON_SCTL));
-    Trace(L"B3cLsPmuMailbox0", Rd(B, PMU_FALCON + FALCON_MAILBOX0));
-    Trace(L"B3cLsPmuMailbox1", Rd(B, PMU_FALCON + FALCON_MAILBOX1));
+    TraceDetail(L"B3cLsPmuMsgHead", head);
+    TraceDetail(L"B3cLsPmuMsgTail", tail);
+    TraceDetail(L"B3cLsPmuCpuctl", Rd(B, PMU_FALCON + FALCON_CPUCTL));
+    TraceDetail(L"B3cLsPmuSctl", Rd(B, PMU_FALCON + FALCON_SCTL));
+    TraceDetail(L"B3cLsPmuMailbox0", Rd(B, PMU_FALCON + FALCON_MAILBOX0));
+    TraceDetail(L"B3cLsPmuMailbox1", Rd(B, PMU_FALCON + FALCON_MAILBOX1));
     /* Falcon register offsets follow the MIT nvgpu GK20A Falcon register map. */
-    Trace(L"B3cLsPmuIrqMode", Rd(B, PMU_FALCON + 0x00C));
-    Trace(L"B3cLsPmuIrqMask", Rd(B, PMU_FALCON + 0x018));
-    Trace(L"B3cLsPmuIrqDest", Rd(B, PMU_FALCON + 0x01C));
-    Trace(L"B3cLsPmuGptmrInt", Rd(B, PMU_FALCON + 0x028));
-    Trace(L"B3cLsPmuGptmrVal", Rd(B, PMU_FALCON + 0x02C));
-    Trace(L"B3cLsPmuPtimerLow", Rd(B, NV_PTIMER_TIME_0));
-    Trace(L"B3cLsPmuPtimerHigh", Rd(B, NV_PTIMER_TIME_1));
+    TraceDetail(L"B3cLsPmuIrqMode", Rd(B, PMU_FALCON + 0x00C));
+    TraceDetail(L"B3cLsPmuIrqMask", Rd(B, PMU_FALCON + 0x018));
+    TraceDetail(L"B3cLsPmuIrqDest", Rd(B, PMU_FALCON + 0x01C));
+    TraceDetail(L"B3cLsPmuGptmrInt", Rd(B, PMU_FALCON + 0x028));
+    TraceDetail(L"B3cLsPmuGptmrVal", Rd(B, PMU_FALCON + 0x02C));
+    TraceDetail(L"B3cLsPmuPtimerLow", Rd(B, NV_PTIMER_TIME_0));
+    TraceDetail(L"B3cLsPmuPtimerHigh", Rd(B, NV_PTIMER_TIME_1));
     diagOff = argsOff >= 16u ? argsOff - 16u : 0u;
     diagCount = (diagOff < dmemSize) ? (dmemSize - diagOff) / 4u : 0u;
     if (diagCount > RTL_NUMBER_OF(diagWords)) diagCount = RTL_NUMBER_OF(diagWords);
@@ -2030,8 +1762,8 @@ done:
         Wr(B, PMU_FALCON + FALCON_DMEMC0, (1u << 25) | diagOff);
         for (diagI = 0; diagI < diagCount; ++diagI)
             diagWords[diagI] = Rd(B, PMU_FALCON + FALCON_DMEMD0);
-        Trace(L"B3cLsPmuArgsWindowOff", diagOff);
-        Trace(L"B3cLsPmuArgsWindowWords", diagCount);
+        TraceDetail(L"B3cLsPmuArgsWindowOff", diagOff);
+        TraceDetail(L"B3cLsPmuArgsWindowWords", diagCount);
         TraceBin(L"B3cLsPmuArgsWindow", diagWords, diagCount * sizeof(ULONG));
     }
     diagOff = (tail != 0xFFFFFFFFu && tail >= 16u) ? (tail & ~3u) - 16u : 0u;
@@ -2041,15 +1773,15 @@ done:
         Wr(B, PMU_FALCON + FALCON_DMEMC0, (1u << 25) | diagOff);
         for (diagI = 0; diagI < diagCount; ++diagI)
             diagWords[diagI] = Rd(B, PMU_FALCON + FALCON_DMEMD0);
-        Trace(L"B3cLsPmuQueueDataOff", diagOff);
-        Trace(L"B3cLsPmuQueueDataWords", diagCount);
+        TraceDetail(L"B3cLsPmuQueueDataOff", diagOff);
+        TraceDetail(L"B3cLsPmuQueueDataWords", diagCount);
         TraceBin(L"B3cLsPmuQueueDataWindow", diagWords, diagCount * sizeof(ULONG));
     }
     TraceDurable(L"B3cLsPmuStepResult", result);
     traceIdx = Rd(B, PMU_FALCON + 0x148);
     traceNr = (traceIdx >> 16) & 0xFFu;
-    Trace(L"B3cLsPmuTraceIdx", traceIdx);
-    Trace(L"B3cLsPmuTraceNr", traceNr);
+    TraceDetail(L"B3cLsPmuTraceIdx", traceIdx);
+    TraceDetail(L"B3cLsPmuTraceNr", traceNr);
     if (traceNr > RTL_NUMBER_OF(tracePc)) traceNr = RTL_NUMBER_OF(tracePc);
     for (traceSlot = 0; traceSlot < traceNr; ++traceSlot) {
         Wr(B, PMU_FALCON + 0x148, traceSlot);
@@ -2065,36 +1797,36 @@ done:
     imemSize = (imemHwcfg & 0x1FFu) << 8;
     imemOk = (traceNr != 0 && tracePc[traceNr - 1] < imemSize) ? 1u : 0u;
     imemOff = imemOk ? (tracePc[traceNr - 1] & ~0x3Fu) : 0u;
-    Trace(L"B3cLsPmuImemHwcfg", imemHwcfg);
-    Trace(L"B3cLsPmuImemSize", imemSize);
-    Trace(L"B3cLsPmuImemTagBefore", Rd(B, PMU_FALCON + FALCON_IMEMT0));
-    Trace(L"B3cLsPmuImemReadOff", imemOff);
+    TraceDetail(L"B3cLsPmuImemHwcfg", imemHwcfg);
+    TraceDetail(L"B3cLsPmuImemSize", imemSize);
+    TraceDetail(L"B3cLsPmuImemTagBefore", Rd(B, PMU_FALCON + FALCON_IMEMT0));
+    TraceDetail(L"B3cLsPmuImemReadOff", imemOff);
     TraceDurable(L"B3cLsPmuImemReadOk", imemOk);
     if (imemOk && imemOff + sizeof(imemWords) <= imemSize) {
         Wr(B, PMU_FALCON + FALCON_IMEMC0,
            ((imemOff >> 8) << 8) | (((imemOff >> 2) & 0x3Fu) << 2) | FALCON_IMEMC_AINCR);
-        Trace(L"B3cLsPmuImemTagSelected", Rd(B, PMU_FALCON + FALCON_IMEMT0));
+        TraceDetail(L"B3cLsPmuImemTagSelected", Rd(B, PMU_FALCON + FALCON_IMEMT0));
         for (diagI = 0; diagI < RTL_NUMBER_OF(imemWords); ++diagI)
             imemWords[diagI] = Rd(B, PMU_FALCON + FALCON_IMEMD0);
         TraceBin(L"B3cLsPmuImemPcWindow", imemWords, sizeof(imemWords));
     }
-    Trace(L"B3cLsPmuImemTagAfter", Rd(B, PMU_FALCON + FALCON_IMEMT0));
-    Trace(L"B3cLsPmuDmaCmd", Rd(B, PMU_FALCON + FALCON_DMATRFCMD));
-    Trace(L"B3cLsPmuDmaBase", Rd(B, PMU_FALCON + FALCON_DMATRFBASE));
-    Trace(L"B3cLsPmuDmaMoffs", Rd(B, PMU_FALCON + FALCON_DMATRFMOFFS));
-    Trace(L"B3cLsPmuDmaFboffs", Rd(B, PMU_FALCON + FALCON_DMATRFFBOFFS));
-    Trace(L"B3cLsPmuDmaCtl", Rd(B, PMU_FALCON + FALCON_DMACTL));
-    Trace(L"B3cLsPmuBindStatus", Rd(B, PMU_FALCON + FALCON_BIND_STATUS));
-    Trace(L"B3cLsPmuBindInst", Rd(B, PMU_FALCON + FALCON_BIND_INST));
-    Trace(L"B3cLsPmuCtxEnable", Rd(B, PMU_FALCON + FALCON_CTX_ENABLE));
-    Trace(L"B3cLsPmuCtxAction", Rd(B, PMU_FALCON + FALCON_CTX_ACTION));
+    TraceDetail(L"B3cLsPmuImemTagAfter", Rd(B, PMU_FALCON + FALCON_IMEMT0));
+    TraceDetail(L"B3cLsPmuDmaCmd", Rd(B, PMU_FALCON + FALCON_DMATRFCMD));
+    TraceDetail(L"B3cLsPmuDmaBase", Rd(B, PMU_FALCON + FALCON_DMATRFBASE));
+    TraceDetail(L"B3cLsPmuDmaMoffs", Rd(B, PMU_FALCON + FALCON_DMATRFMOFFS));
+    TraceDetail(L"B3cLsPmuDmaFboffs", Rd(B, PMU_FALCON + FALCON_DMATRFFBOFFS));
+    TraceDetail(L"B3cLsPmuDmaCtl", Rd(B, PMU_FALCON + FALCON_DMACTL));
+    TraceDetail(L"B3cLsPmuBindStatus", Rd(B, PMU_FALCON + FALCON_BIND_STATUS));
+    TraceDetail(L"B3cLsPmuBindInst", Rd(B, PMU_FALCON + FALCON_BIND_INST));
+    TraceDetail(L"B3cLsPmuCtxEnable", Rd(B, PMU_FALCON + FALCON_CTX_ENABLE));
+    TraceDetail(L"B3cLsPmuCtxAction", Rd(B, PMU_FALCON + FALCON_CTX_ACTION));
     for (diagI = 0; diagI < RTL_NUMBER_OF(transcfg); ++diagI)
         transcfg[diagI] = Rd(B, PMU_FALCON + PMU_FBIF_TRANSCFG(diagI));
     TraceBin(L"B3cLsPmuTranscfg", transcfg, sizeof(transcfg));
-    Trace(L"B3cLsPmuFbifCtl", Rd(B, PMU_FALCON + PMU_FBIF_CTL));
-    Trace(L"B3cLsPmuPfifoIntr0", Rd(B, 0x2100));
+    TraceDetail(L"B3cLsPmuFbifCtl", Rd(B, PMU_FALCON + PMU_FBIF_CTL));
+    TraceDetail(L"B3cLsPmuPfifoIntr0", Rd(B, 0x2100));
     faultId = Rd(B, 0x259C);
-    Trace(L"B3cLsPmuFaultId", faultId);
+    TraceDetail(L"B3cLsPmuFaultId", faultId);
     faultNr = 0;
     for (faultUnit = 0; faultUnit < 32; ++faultUnit) {
         if (!(faultId & (1u << faultUnit)) && faultUnit != 0x17u) continue;
@@ -2105,11 +1837,11 @@ done:
         faultRecs[faultNr][4] = Rd(B, 0x280C + faultUnit * 0x10);
         ++faultNr;
     }
-    Trace(L"B3cLsPmuFaultRecCount", faultNr);
-    if (faultNr) TraceBin(L"B3cLsPmuFaultRecs", faultRecs, faultNr * sizeof(faultRecs[0]));
-    Trace(L"B3cLsPmuMcInt", Rd(Dev->Mc, MC_INTSTATUS));
-    Trace(L"B3cLsPmuMcErr", Rd(Dev->Mc, MC_ERR_STATUS));
-    Trace(L"B3cLsPmuMcErrAdr", Rd(Dev->Mc, MC_ERR_ADR));
+    TraceDetail(L"B3cLsPmuFaultRecCount", faultNr);
+    if (faultNr) TraceErrorBin(L"B3cLsPmuFaultRecs", faultRecs, faultNr * sizeof(faultRecs[0]));
+    TraceDetail(L"B3cLsPmuMcInt", Rd(Dev->Mc, MC_INTSTATUS));
+    TraceDetail(L"B3cLsPmuMcErr", Rd(Dev->Mc, MC_ERR_STATUS));
+    TraceDetail(L"B3cLsPmuMcErrAdr", Rd(Dev->Mc, MC_ERR_ADR));
     /* Expand both bounded DMEM snapshots to 256 bytes for loader/runtime data. */
     diagOff = argsOff >= 0x80u ? argsOff - 0x80u : 0u;
     diagCount = (diagOff < dmemSize) ? (dmemSize - diagOff) / sizeof(ULONG) : 0u; /* Claude: no underflow on a bogus tail */
@@ -2117,8 +1849,8 @@ done:
     if (diagCount) {
         Wr(B, PMU_FALCON + FALCON_DMEMC0, (1u << 25) | diagOff);
         for (diagI = 0; diagI < diagCount; ++diagI) diagWords[diagI] = Rd(B, PMU_FALCON + FALCON_DMEMD0);
-        Trace(L"B3cLsPmuArgsWindowOff", diagOff);
-        Trace(L"B3cLsPmuArgsWindowWords", diagCount);
+        TraceDetail(L"B3cLsPmuArgsWindowOff", diagOff);
+        TraceDetail(L"B3cLsPmuArgsWindowWords", diagCount);
         TraceBin(L"B3cLsPmuArgsWindow", diagWords, diagCount * sizeof(ULONG));
     }
     diagOff = (tail != 0xFFFFFFFFu && tail >= 0x80u) ? ((tail & ~3u) - 0x80u) : 0u;
@@ -2127,8 +1859,8 @@ done:
     if (diagCount) {
         Wr(B, PMU_FALCON + FALCON_DMEMC0, (1u << 25) | diagOff);
         for (diagI = 0; diagI < diagCount; ++diagI) diagWords[diagI] = Rd(B, PMU_FALCON + FALCON_DMEMD0);
-        Trace(L"B3cLsPmuQueueDataOff", diagOff);
-        Trace(L"B3cLsPmuQueueDataWords", diagCount);
+        TraceDetail(L"B3cLsPmuQueueDataOff", diagOff);
+        TraceDetail(L"B3cLsPmuQueueDataWords", diagCount);
         TraceBin(L"B3cLsPmuQueueDataWindow", diagWords, diagCount * sizeof(ULONG));
     }
     TraceDurable(L"B3cLsPmuStartResult", result);
@@ -2219,9 +1951,9 @@ static ULONG B3cQueryFecsImageSizes(PSWGPU_DEVICE Dev, PULONG goldenOut,
 
     Step(76);
     pmcEnable = Rd(B, NV_PMC_ENABLE);
-    Trace(L"B3cC1PmcEnable", pmcEnable);
-    Trace(L"B3cC1MailboxPassValue", 1u); /* gr_fecs_ctxsw_mailbox_value_pass_v() */
-    Trace(L"B3cC1MailboxFailValue", 2u); /* gr_fecs_ctxsw_mailbox_value_fail_v() */
+    TraceDetail(L"B3cC1PmcEnable", pmcEnable);
+    TraceDetail(L"B3cC1MailboxPassValue", 1u); /* gr_fecs_ctxsw_mailbox_value_pass_v() */
+    TraceDetail(L"B3cC1MailboxFailValue", 2u); /* gr_fecs_ctxsw_mailbox_value_fail_v() */
     if (!(pmcEnable & (1u << 12))) {
         result = 0xE0000083u;
         goto done;
@@ -2229,17 +1961,17 @@ static ULONG B3cQueryFecsImageSizes(PSWGPU_DEVICE Dev, PULONG goldenOut,
 
     /* hw_gr_gm20b.h: gr_fecs_method_push_adr_discover_image_size_v(). */
     result = B3cFecsQuerySize(B, 0x10u, L"B3cC1GoldenQueryWords", &goldenImageSize);
-    Trace(L"B3cC1GoldenImageSize", goldenImageSize);
+    TraceDetail(L"B3cC1GoldenImageSize", goldenImageSize);
     if (result != 0u) goto done;
 
     /* hw_gr_gm20b.h: gr_fecs_method_push_adr_discover_zcull_image_size_v(). */
     result = B3cFecsQuerySize(B, 0x16u, L"B3cC1ZcullQueryWords", &zcullImageSize);
-    Trace(L"B3cC1ZcullImageSize", zcullImageSize);
+    TraceDetail(L"B3cC1ZcullImageSize", zcullImageSize);
     if (result != 0u) goto done;
 
     /* hw_gr_gm20b.h: gr_fecs_method_push_adr_discover_pm_image_size_v(). */
     result = B3cFecsQuerySize(B, 0x25u, L"B3cC1PmQueryWords", &pmImageSize);
-    Trace(L"B3cC1PmImageSize", pmImageSize);
+    TraceDetail(L"B3cC1PmImageSize", pmImageSize);
 
 done:
     if (result == 0u) {
@@ -2326,7 +2058,7 @@ static ULONG B3cValidateGrInitLists(PSWGPU_DEVICE Dev)
 
     Step(77);
     pmcEnable = Rd(Dev->Bar0, NV_PMC_ENABLE);
-    Trace(L"B3cC2aPmcEnable", pmcEnable);
+    TraceDetail(L"B3cC2aPmcEnable", pmcEnable);
     if (!(pmcEnable & (1u << 12))) {
         TraceDurable(L"B3cC2aResult", 0xE0000086u);
         return 0xE0000086u;
@@ -2437,9 +2169,9 @@ static VOID B3cPrivRingTraceWriteLog(PCWSTR countName,
     Trace(droppedName, g_B3cPrivRingWriteLogDropped);
     Trace(timeoutName, g_B3cPrivRingAckTimeouts);
     Trace(L"B3cPrivRingLastAckPolls", g_B3cPrivRingLastAckPolls);
-    Trace(L"B3cPrivRingLastCommand", g_B3cPrivRingLastCommand);
+    TraceDetail(L"B3cPrivRingLastCommand", g_B3cPrivRingLastCommand);
     if (g_B3cPrivRingWriteLogCount != 0u)
-        TraceBin(recordsName, g_B3cPrivRingWriteLog,
+        TraceErrorBin(recordsName, g_B3cPrivRingWriteLog,
             g_B3cPrivRingWriteLogCount * B3C_PRIV_RING_LOG_WORDS * sizeof(ULONG));
 }
 
@@ -2617,11 +2349,11 @@ static ULONG B3cInitGpcMmu(PSWGPU_DEVICE Dev)
     values[5][0] = 0x004188B8u; values[5][1] = Rd(B, 0x00100CCCu);
     values[6][0] = 0x004188ACu; values[6][1] = Rd(B, 0x00100800u);
 
-    Trace(L"B3cC2bGpcMmuSourceMmuCtrl", Rd(B, 0x00100C80u));
-    Trace(L"B3cC2bGpcMmuSourceDebugCtl", Rd(B, 0x00100CC4u));
-    Trace(L"B3cC2bGpcMmuSourceDebugWr", Rd(B, 0x00100CC8u));
-    Trace(L"B3cC2bGpcMmuSourceDebugRd", Rd(B, 0x00100CCCu));
-    Trace(L"B3cC2bGpcMmuSourceFbConfig", Rd(B, 0x00100800u));
+    TraceDetail(L"B3cC2bGpcMmuSourceMmuCtrl", Rd(B, 0x00100C80u));
+    TraceDetail(L"B3cC2bGpcMmuSourceDebugCtl", Rd(B, 0x00100CC4u));
+    TraceDetail(L"B3cC2bGpcMmuSourceDebugWr", Rd(B, 0x00100CC8u));
+    TraceDetail(L"B3cC2bGpcMmuSourceDebugRd", Rd(B, 0x00100CCCu));
+    TraceDetail(L"B3cC2bGpcMmuSourceFbConfig", Rd(B, 0x00100800u));
     B3cPrivRingResetWriteLog();
     if (!B3cPrivRingDrainBeforeWrites(B)) { result = 0xE0000095u; goto done; }
 
@@ -2641,8 +2373,8 @@ static ULONG B3cInitGpcMmu(PSWGPU_DEVICE Dev)
         if (values[i][2] != values[i][1]) ++mismatchCount;
     }
     KeMemoryBarrier();
-    Trace(L"B3cC2bGpcMmuWriteCount", RTL_NUMBER_OF(values));
-    Trace(L"B3cC2bGpcMmuMismatchCount", mismatchCount);
+    TraceDetail(L"B3cC2bGpcMmuWriteCount", RTL_NUMBER_OF(values));
+    TraceDetail(L"B3cC2bGpcMmuMismatchCount", mismatchCount);
     TraceBin(L"B3cC2bGpcMmuReadback", values, sizeof(values));
     if (mismatchCount != 0u) result = 0xE0000093u;
 
@@ -2661,7 +2393,7 @@ done:
 static ULONG B3cPrepareGrContext(PSWGPU_DEVICE Dev, ULONG goldenBytes,
                                  ULONG zcullBytes, ULONG pmBytes)
 {
-    PHYSICAL_ADDRESS low, high, boundary, acrArenaPa, smmuPtPa;
+    PHYSICAL_ADDRESS acrArenaPa, smmuPtPa;
     volatile UCHAR *B = Dev->Bar0;
     volatile ULONG *smmuPd = NULL, *smmuPt = NULL;
     ULONGLONG *gpuPgd, *gpuPgt, *bar1GpuPgt, *inst;
@@ -2681,15 +2413,13 @@ static ULONG B3cPrepareGrContext(PSWGPU_DEVICE Dev, ULONG goldenBytes,
     ULONG bar1PdeIndex, bar1PteIndex;
     ULONGLONG gpuPdb, gpuPdeExpected, wfiGpuVa, bar1PdeExpected, bar1PteExpected;
     ULONG *instWords;
-    BOOLEAN smmuEnabled;
 
     Step(80);
     RtlZeroMemory(&g_GrVm, sizeof(g_GrVm));
-    g_GrVm.Attempted = TRUE;
     pmcEnable = Rd(B, NV_PMC_ENABLE);
-    Trace(L"B3cC2dPmcEnable", pmcEnable);
+    TraceDetail(L"B3cC2dPmcEnable", pmcEnable);
     if (!(pmcEnable & (1u << 12))) { failPoint = 1u; result = 0xE0000089u; goto done; }
-    if (!g_AcrVm.Active || goldenBytes == 0 || zcullBytes == 0 || pmBytes == 0 ||
+    if (!g_AcrVm.Active || !g_AcrVm.PtbChanged || goldenBytes == 0 || zcullBytes == 0 || pmBytes == 0 ||
         goldenBytes > 0x20000u || zcullBytes > 0x20000u || pmBytes > 0x10000u) {
         failPoint = 2u; result = 0xE0000089u; goto done;
     }
@@ -2703,17 +2433,17 @@ static ULONG B3cPrepareGrContext(PSWGPU_DEVICE Dev, ULONG goldenBytes,
     goldenAligned = (goldenBytes + 0xFFFu) & ~0xFFFu;
     zcullAligned = (zcullBytes + 0xFFFu) & ~0xFFFu;
     pmAligned = (pmBytes + 0xFFFu) & ~0xFFFu;
-    Trace(L"B3cC2dGoldenBytes", goldenBytes);
-    Trace(L"B3cC2dZcullBytes", zcullBytes);
-    Trace(L"B3cC2dPmBytes", pmBytes);
-    Trace(L"B3cC2dAttribBytes", attribBytes);
-    Trace(L"B3cC2dBundleBytes", bundleBytes);
-    Trace(L"B3cC2dPagepoolBytes", pagepoolBytes);
-    Trace(L"B3cC2dPrivMapBytes", privBytes);
-    Trace(L"B3cC2dTopologyTpcs", maxTpcCount);
-    Trace(L"B3cC2dChannelCtxBytes", goldenAligned);
-    Trace(L"B3cC2dZcullAligned", zcullAligned);
-    Trace(L"B3cC2dPmAligned", pmAligned);
+    TraceDetail(L"B3cC2dGoldenBytes", goldenBytes);
+    TraceDetail(L"B3cC2dZcullBytes", zcullBytes);
+    TraceDetail(L"B3cC2dPmBytes", pmBytes);
+    TraceDetail(L"B3cC2dAttribBytes", attribBytes);
+    TraceDetail(L"B3cC2dBundleBytes", bundleBytes);
+    TraceDetail(L"B3cC2dPagepoolBytes", pagepoolBytes);
+    TraceDetail(L"B3cC2dPrivMapBytes", privBytes);
+    TraceDetail(L"B3cC2dTopologyTpcs", maxTpcCount);
+    TraceDetail(L"B3cC2dChannelCtxBytes", goldenAligned);
+    TraceDetail(L"B3cC2dZcullAligned", zcullAligned);
+    TraceDetail(L"B3cC2dPmAligned", pmAligned);
     if (attribBytes != 0x48000u || bundleBytes != 0x1800u || pagepoolBytes != 0x8000u ||
         GR_VM_PM_OFF + pmAligned > GR_VM_ARENA_SIZE ||
         GR_VM_PM_OFF + pmAligned > GR_VM_PATCH_OFF ||
@@ -2723,22 +2453,16 @@ static ULONG B3cPrepareGrContext(PSWGPU_DEVICE Dev, ULONG goldenBytes,
         failPoint = 3u; result = 0xE0000089u; goto done;
     }
 
-    low.QuadPart = 0;
-    high.QuadPart = 0xFFFFFFFFll;
-    boundary.QuadPart = ACR_SMMU_WINDOW;
-    g_GrVm.Arena = MmAllocateContiguousMemorySpecifyCache(
-        GR_VM_ARENA_SIZE, low, high, boundary, MmNonCached);
+    g_GrVm.Arena = E4Checkout(Dev, SwGpuPoolGr, GR_VM_ARENA_SIZE);
     if (g_GrVm.Arena == NULL) {
         allocRetry = 1u;
-        g_GrVm.Arena = MmAllocateContiguousMemorySpecifyCache(
-            GR_VM_ARENA_SIZE, low, high, boundary, MmNonCached);
-        Trace(L"B3cC2dAllocRetry", allocRetry);
+        g_GrVm.Arena = E4Checkout(Dev, SwGpuPoolGr, GR_VM_ARENA_SIZE);
+        TraceDetail(L"B3cC2dAllocRetry", allocRetry);
         if (g_GrVm.Arena == NULL) { failPoint = 4u; result = 0xE0000089u; goto done; }
     }
     g_GrVm.GoldenBytes = goldenBytes;
     g_GrVm.ZcullBytes = zcullBytes;
     g_GrVm.PmBytes = pmBytes;
-    RtlZeroMemory(g_GrVm.Arena, GR_VM_ARENA_SIZE);
     g_GrVm.Pa = MmGetPhysicalAddress(g_GrVm.Arena);
     if (g_GrVm.Pa.HighPart != 0 || (g_GrVm.Pa.LowPart & 0xFFFu) != 0 ||
         g_GrVm.Pa.LowPart > 0xFFFFFFFFu - GR_VM_ARENA_SIZE) {
@@ -2751,7 +2475,7 @@ static ULONG B3cPrepareGrContext(PSWGPU_DEVICE Dev, ULONG goldenBytes,
         if (g_GrVm.Pa.LowPart < acrEnd && acrPa.LowPart < grEnd) {
             failPoint = 6u; result = 0xE0000089u; goto done;
         }
-        Trace(L"B3cC2dArenaDistinct", 1u);
+        TraceDetail(L"B3cC2dArenaDistinct", 1u);
     }
     g_GrVm.SmmuWin = g_GrVm.Pa.LowPart & ~(ACR_SMMU_WINDOW - 1u);
     g_GrVm.SmmuPteFirst = (g_GrVm.Pa.LowPart - g_GrVm.SmmuWin) >> 12;
@@ -2759,8 +2483,7 @@ static ULONG B3cPrepareGrContext(PSWGPU_DEVICE Dev, ULONG goldenBytes,
     if (g_GrVm.SmmuPteFirst + pageCount > (ACR_SMMU_WINDOW >> 12)) {
         failPoint = 7u; result = 0xE0000089u; goto done;
     }
-    smmuEnabled = g_AcrVm.PtbChanged ? TRUE : FALSE;
-    if (smmuEnabled) {
+    {
         smmuPd = (volatile ULONG *)((PUCHAR)g_AcrVm.Arena);
         g_GrVm.SmmuPdeIndex = g_GrVm.SmmuWin >> 22;
         g_GrVm.OldSmmuPde = smmuPd[g_GrVm.SmmuPdeIndex];
@@ -2791,10 +2514,10 @@ static ULONG B3cPrepareGrContext(PSWGPU_DEVICE Dev, ULONG goldenBytes,
         smmuPtPa = MmGetPhysicalAddress((PVOID)smmuPt);
         outerPdeExpected = (smmuPtPa.LowPart >> 12) | SMMU_ATTR_RWNS | SMMU_PDE_NEXT;
         outerPdeRead = smmuPd[g_GrVm.SmmuPdeIndex];
-        Trace(L"B3cC2dOuterPdeIndex", g_GrVm.SmmuPdeIndex);
-        Trace(L"B3cC2dOuterPdeBefore", g_GrVm.OldSmmuPde);
-        Trace(L"B3cC2dOuterPdeExpected", outerPdeExpected);
-        Trace(L"B3cC2dOuterPdeRead", outerPdeRead);
+        TraceDetail(L"B3cC2dOuterPdeIndex", g_GrVm.SmmuPdeIndex);
+        TraceDetail(L"B3cC2dOuterPdeBefore", g_GrVm.OldSmmuPde);
+        TraceDetail(L"B3cC2dOuterPdeExpected", outerPdeExpected);
+        TraceDetail(L"B3cC2dOuterPdeRead", outerPdeRead);
         if (outerPdeRead != outerPdeExpected) { failPoint = 8u; result = 0xE000008Au; goto done; }
         for (i = 0; i < pageCount; ++i) {
             ULONG outerExpected = ((g_GrVm.Pa.LowPart >> 12) + i) | SMMU_ATTR_RWNS;
@@ -2803,8 +2526,8 @@ static ULONG B3cPrepareGrContext(PSWGPU_DEVICE Dev, ULONG goldenBytes,
                 break;
             }
         }
-        Trace(L"B3cC2dOuterPteVerified", i);
-        Trace(L"B3cC2dOuterPteBadIndex", outerBadIndex);
+        TraceDetail(L"B3cC2dOuterPteVerified", i);
+        TraceDetail(L"B3cC2dOuterPteBadIndex", outerBadIndex);
         if (i != pageCount) { failPoint = 9u; result = 0xE000008Au; goto done; }
         {
             ULONG oldPteSample[3][3];
@@ -2817,10 +2540,8 @@ static ULONG B3cPrepareGrContext(PSWGPU_DEVICE Dev, ULONG goldenBytes,
             }
             TraceBin(L"B3cC2dOuterPteBeforeAfter", oldPteSample, sizeof(oldPteSample));
         }
-    } else {
-        g_GrVm.Iova = g_GrVm.Pa.LowPart;
     }
-    if (smmuEnabled) g_GrVm.Iova = (ULONGLONG)g_GrVm.Pa.LowPart | ACR_GM20B_IOMMU_TAG;
+    g_GrVm.Iova = (ULONGLONG)g_GrVm.Pa.LowPart | ACR_GM20B_IOMMU_TAG;
 
     /* Fill the isolated GPU 4 KiB page table, PDB and RAMIN context pointer.
      * Layout follows nvgpu global buffers and W4T's MIT cross-check layout. */
@@ -2868,57 +2589,57 @@ static ULONG B3cPrepareGrContext(PSWGPU_DEVICE Dev, ULONG goldenBytes,
             break;
         }
     }
-    Trace(L"B3cC2dGpuPteVerified", i);
-    Trace(L"B3cC2dGpuPteBadIndex", gpuBadIndex);
+    TraceDetail(L"B3cC2dGpuPteVerified", i);
+    TraceDetail(L"B3cC2dGpuPteBadIndex", gpuBadIndex);
     if (i != pageCount) { failPoint = 11u; result = 0xE000008Au; goto done; }
 
     instPdbLo = (ULONG)inst[0x200 / sizeof(ULONGLONG)];
     instPdbHi = (ULONG)(inst[0x200 / sizeof(ULONGLONG)] >> 32);
     instLimitLo = (ULONG)inst[0x208 / sizeof(ULONGLONG)];
     instLimitHi = (ULONG)(inst[0x208 / sizeof(ULONGLONG)] >> 32);
-    Trace(L"B3cC2dArenaPa", g_GrVm.Pa.LowPart);
-    Trace(L"B3cC2dArenaBytes", GR_VM_ARENA_SIZE);
-    Trace(L"B3cC2dArenaIovaLo", (ULONG)g_GrVm.Iova);
-    Trace(L"B3cC2dArenaIovaHi", (ULONG)(g_GrVm.Iova >> 32));
-    Trace(L"B3cC2dGpuVa", GR_VM_GPU_VA);
-    Trace(L"B3cC2dGpuPdeIndex", gpuPdeIndex);
-    Trace(L"B3cC2dGpuPdeExpectedLo", (ULONG)gpuPdeExpected);
-    Trace(L"B3cC2dGpuPdeExpectedHi", (ULONG)(gpuPdeExpected >> 32));
-    Trace(L"B3cC2dGpuPdeReadLo", (ULONG)gpuPgd[gpuPdeIndex]);
-    Trace(L"B3cC2dGpuPdeReadHi", (ULONG)(gpuPgd[gpuPdeIndex] >> 32));
-    Trace(L"B3cD3UserdAliasGpuVa", BAR1_D3_LOW_VA);
-    Trace(L"B3cD3UserdAliasPdeIndex", bar1PdeIndex);
-    Trace(L"B3cD3UserdAliasPdeExpectedLo", (ULONG)bar1PdeExpected);
-    Trace(L"B3cD3UserdAliasPdeExpectedHi", (ULONG)(bar1PdeExpected >> 32));
-    Trace(L"B3cD3UserdAliasPdeReadLo", (ULONG)gpuPgd[bar1PdeIndex]);
-    Trace(L"B3cD3UserdAliasPdeReadHi", (ULONG)(gpuPgd[bar1PdeIndex] >> 32));
-    Trace(L"B3cD3UserdAliasPteIndex", bar1PteIndex);
-    Trace(L"B3cD3UserdAliasPteExpectedLo", (ULONG)bar1PteExpected);
-    Trace(L"B3cD3UserdAliasPteExpectedHi", (ULONG)(bar1PteExpected >> 32));
-    Trace(L"B3cD3UserdAliasPteReadLo", (ULONG)bar1GpuPgt[bar1PteIndex]);
-    Trace(L"B3cD3UserdAliasPteReadHi", (ULONG)(bar1GpuPgt[bar1PteIndex] >> 32));
-    Trace(L"B3cC2dGpuPdeLo", (ULONG)gpuPgd[gpuPdeIndex]);
-    Trace(L"B3cC2dGpuPdeHi", (ULONG)(gpuPgd[gpuPdeIndex] >> 32));
-    Trace(L"B3cC2dInstPdbLo", instPdbLo);
-    Trace(L"B3cC2dInstPdbHi", instPdbHi);
-    Trace(L"B3cC2dInstLimitLo", instLimitLo);
-    Trace(L"B3cC2dInstLimitHi", instLimitHi);
-    Trace(L"B3cC2dInstWfiPtrLo", instWords[132]);
-    Trace(L"B3cC2dInstWfiPtrHi", instWords[133]);
-    Trace(L"B3cC2dGoldenCommitVa", GR_VM_GPU_VA + GR_VM_GLOBAL_OFF);
-    Trace(L"B3cC2dGoldenVa", GR_VM_GPU_VA + GR_VM_GLOBAL_OFF);
-    Trace(L"B3cC2dBundleVa", GR_VM_GPU_VA + GR_VM_BUNDLE_OFF);
-    Trace(L"B3cC2dPagepoolVa", GR_VM_GPU_VA + GR_VM_PAGEPOOL_OFF);
-    Trace(L"B3cC2dAttribVa", GR_VM_GPU_VA + GR_VM_ATTRIB_OFF);
-    Trace(L"B3cC2dAttribBaseReg", 0x00418810u);
-    Trace(L"B3cC2dAttribBaseField",
+    TraceDetail(L"B3cC2dArenaPa", g_GrVm.Pa.LowPart);
+    TraceDetail(L"B3cC2dArenaBytes", GR_VM_ARENA_SIZE);
+    TraceDetail(L"B3cC2dArenaIovaLo", (ULONG)g_GrVm.Iova);
+    TraceDetail(L"B3cC2dArenaIovaHi", (ULONG)(g_GrVm.Iova >> 32));
+    TraceDetail(L"B3cC2dGpuVa", GR_VM_GPU_VA);
+    TraceDetail(L"B3cC2dGpuPdeIndex", gpuPdeIndex);
+    TraceDetail(L"B3cC2dGpuPdeExpectedLo", (ULONG)gpuPdeExpected);
+    TraceDetail(L"B3cC2dGpuPdeExpectedHi", (ULONG)(gpuPdeExpected >> 32));
+    TraceDetail(L"B3cC2dGpuPdeReadLo", (ULONG)gpuPgd[gpuPdeIndex]);
+    TraceDetail(L"B3cC2dGpuPdeReadHi", (ULONG)(gpuPgd[gpuPdeIndex] >> 32));
+    TraceDetail(L"B3cD3UserdAliasGpuVa", BAR1_D3_LOW_VA);
+    TraceDetail(L"B3cD3UserdAliasPdeIndex", bar1PdeIndex);
+    TraceDetail(L"B3cD3UserdAliasPdeExpectedLo", (ULONG)bar1PdeExpected);
+    TraceDetail(L"B3cD3UserdAliasPdeExpectedHi", (ULONG)(bar1PdeExpected >> 32));
+    TraceDetail(L"B3cD3UserdAliasPdeReadLo", (ULONG)gpuPgd[bar1PdeIndex]);
+    TraceDetail(L"B3cD3UserdAliasPdeReadHi", (ULONG)(gpuPgd[bar1PdeIndex] >> 32));
+    TraceDetail(L"B3cD3UserdAliasPteIndex", bar1PteIndex);
+    TraceDetail(L"B3cD3UserdAliasPteExpectedLo", (ULONG)bar1PteExpected);
+    TraceDetail(L"B3cD3UserdAliasPteExpectedHi", (ULONG)(bar1PteExpected >> 32));
+    TraceDetail(L"B3cD3UserdAliasPteReadLo", (ULONG)bar1GpuPgt[bar1PteIndex]);
+    TraceDetail(L"B3cD3UserdAliasPteReadHi", (ULONG)(bar1GpuPgt[bar1PteIndex] >> 32));
+    TraceDetail(L"B3cC2dGpuPdeLo", (ULONG)gpuPgd[gpuPdeIndex]);
+    TraceDetail(L"B3cC2dGpuPdeHi", (ULONG)(gpuPgd[gpuPdeIndex] >> 32));
+    TraceDetail(L"B3cC2dInstPdbLo", instPdbLo);
+    TraceDetail(L"B3cC2dInstPdbHi", instPdbHi);
+    TraceDetail(L"B3cC2dInstLimitLo", instLimitLo);
+    TraceDetail(L"B3cC2dInstLimitHi", instLimitHi);
+    TraceDetail(L"B3cC2dInstWfiPtrLo", instWords[132]);
+    TraceDetail(L"B3cC2dInstWfiPtrHi", instWords[133]);
+    TraceDetail(L"B3cC2dGoldenCommitVa", GR_VM_GPU_VA + GR_VM_GLOBAL_OFF);
+    TraceDetail(L"B3cC2dGoldenVa", GR_VM_GPU_VA + GR_VM_GLOBAL_OFF);
+    TraceDetail(L"B3cC2dBundleVa", GR_VM_GPU_VA + GR_VM_BUNDLE_OFF);
+    TraceDetail(L"B3cC2dPagepoolVa", GR_VM_GPU_VA + GR_VM_PAGEPOOL_OFF);
+    TraceDetail(L"B3cC2dAttribVa", GR_VM_GPU_VA + GR_VM_ATTRIB_OFF);
+    TraceDetail(L"B3cC2dAttribBaseReg", 0x00418810u);
+    TraceDetail(L"B3cC2dAttribBaseField",
           (((GR_VM_GPU_VA + GR_VM_ATTRIB_OFF) >> 12) & 0x0FFFFFFFu) | 0x80000000u);
-    Trace(L"B3cC2dPrivMapVa", GR_VM_GPU_VA + GR_VM_PRIV_OFF);
-    Trace(L"B3cC2dChannelCtxVa", GR_VM_GPU_VA + GR_VM_CTX_OFF);
-    Trace(L"B3cC2dZcullVa", GR_VM_GPU_VA + GR_VM_ZCULL_OFF);
-    Trace(L"B3cC2dPmVa", GR_VM_GPU_VA + GR_VM_PM_OFF);
-    Trace(L"B3cC2dPatchVa", GR_VM_GPU_VA + GR_VM_PATCH_OFF);
-    Trace(L"B3cC2dPatchBytes", GR_VM_PATCH_BYTES);
+    TraceDetail(L"B3cC2dPrivMapVa", GR_VM_GPU_VA + GR_VM_PRIV_OFF);
+    TraceDetail(L"B3cC2dChannelCtxVa", GR_VM_GPU_VA + GR_VM_CTX_OFF);
+    TraceDetail(L"B3cC2dZcullVa", GR_VM_GPU_VA + GR_VM_ZCULL_OFF);
+    TraceDetail(L"B3cC2dPmVa", GR_VM_GPU_VA + GR_VM_PM_OFF);
+    TraceDetail(L"B3cC2dPatchVa", GR_VM_GPU_VA + GR_VM_PATCH_OFF);
+    TraceDetail(L"B3cC2dPatchBytes", GR_VM_PATCH_BYTES);
 
     /* The whole arena was zeroed. Read both edges of each backing allocation
      * so the next run distinguishes a valid mapped allocation from only a
@@ -2957,14 +2678,14 @@ static ULONG B3cPrepareGrContext(PSWGPU_DEVICE Dev, ULONG goldenBytes,
     sample[2][1] = (ULONG)(((g_GrVm.Iova + ((ULONGLONG)(pageCount - 1u) << 12)) >> 8) | 1ull);
     sample[2][2] = (ULONG)gpuPgt[gpuPteIndex + pageCount - 1u];
     TraceBin(L"B3cC2dGpuPteSamples", sample, sampleCount * sizeof(sample[0]));
-    TraceDurable(L"B3cC2dSmmuMode", smmuEnabled ? 1u : 0u);
-    if (smmuEnabled) {
+    TraceDurable(L"B3cC2dSmmuMode", 1u);
+    {
         grPageFirst = g_GrVm.SmmuPteFirst;
         grPteExpected = ((g_GrVm.Pa.LowPart >> 12) + (pageCount >> 1)) | SMMU_ATTR_RWNS;
         grPteRead = smmuPt[grPageFirst + (pageCount >> 1)];
-        Trace(L"B3cC2dOuterPteIndex", grPageFirst + (pageCount >> 1));
-        Trace(L"B3cC2dOuterPteExpected", grPteExpected);
-        Trace(L"B3cC2dOuterPteRead", grPteRead);
+        TraceDetail(L"B3cC2dOuterPteIndex", grPageFirst + (pageCount >> 1));
+        TraceDetail(L"B3cC2dOuterPteExpected", grPteExpected);
+        TraceDetail(L"B3cC2dOuterPteRead", grPteRead);
         if (grPteRead != grPteExpected) { failPoint = 13u; result = 0xE000008Au; goto done; }
     }
     if (instPdbLo != (ULONG)gpuPdb || instPdbHi != (ULONG)(gpuPdb >> 32) ||
@@ -2979,8 +2700,8 @@ static ULONG B3cPrepareGrContext(PSWGPU_DEVICE Dev, ULONG goldenBytes,
     g_GrVm.Active = TRUE;
 
 done:
-    Trace(L"B3cC2dFailPoint", failPoint);
-    Trace(L"B3cC2dAllocRetry", allocRetry);
+    TraceDetail(L"B3cC2dFailPoint", failPoint);
+    TraceDetail(L"B3cC2dAllocRetry", allocRetry);
     TraceDurable(L"B3cC2dResult", result);
     return result;
 }
@@ -3043,62 +2764,62 @@ static VOID B3cC2eCaptureDiagnostics(PSWGPU_DEVICE Dev)
     ULONG goldenHead[16] = { 0 };
     ULONG value;
     value = Rd(B, 0x00404000u);
-    Trace(L"B3cC2ePostFeHwwEsr", value); Trace(L"B3cC2eFeHwwEsr", value);
+    TraceDetail(L"B3cC2ePostFeHwwEsr", value); TraceDetail(L"B3cC2eFeHwwEsr", value);
     value = Rd(B, 0x004041B0u);
-    Trace(L"B3cC2ePostFeHwwEsrInfo", value); Trace(L"B3cC2eFeHwwEsrInfo", value);
-    Trace(L"B3cC2ePostFeInfoRaw404004", Rd(B, 0x00404004u));
-    Trace(L"B3cC2ePostGrIntr", Rd(B, 0x00400100u));
-    Trace(L"B3cC2ePostGrIntrEnable", Rd(B, 0x0040013Cu));
-    Trace(L"B3cC2ePostGrException", Rd(B, 0x00400108u));
-    Trace(L"B3cC2ePostGrExceptionEnable", Rd(B, 0x00400138u));
-    Trace(L"B3cC2ePostGrException1", Rd(B, 0x00400118u));
-    Trace(L"B3cC2ePostGrException1Enable", Rd(B, 0x00400130u));
-    Trace(L"B3cC2ePostGrException2", Rd(B, 0x0040011Cu));
-    Trace(L"B3cC2ePostGrException2Enable", Rd(B, 0x00400134u));
-    Trace(L"B3cC2ePostGrStatus1", Rd(B, 0x00400604u));
-    Trace(L"B3cC2ePostGrStatus2", Rd(B, 0x00400608u));
-    Trace(L"B3cC2eGrStatus1", Rd(B, 0x00400604u));
-    Trace(L"B3cC2eGrStatus2", Rd(B, 0x00400608u));
+    TraceDetail(L"B3cC2ePostFeHwwEsrInfo", value); TraceDetail(L"B3cC2eFeHwwEsrInfo", value);
+    TraceDetail(L"B3cC2ePostFeInfoRaw404004", Rd(B, 0x00404004u));
+    TraceDetail(L"B3cC2ePostGrIntr", Rd(B, 0x00400100u));
+    TraceDetail(L"B3cC2ePostGrIntrEnable", Rd(B, 0x0040013Cu));
+    TraceDetail(L"B3cC2ePostGrException", Rd(B, 0x00400108u));
+    TraceDetail(L"B3cC2ePostGrExceptionEnable", Rd(B, 0x00400138u));
+    TraceDetail(L"B3cC2ePostGrException1", Rd(B, 0x00400118u));
+    TraceDetail(L"B3cC2ePostGrException1Enable", Rd(B, 0x00400130u));
+    TraceDetail(L"B3cC2ePostGrException2", Rd(B, 0x0040011Cu));
+    TraceDetail(L"B3cC2ePostGrException2Enable", Rd(B, 0x00400134u));
+    TraceDetail(L"B3cC2ePostGrStatus1", Rd(B, 0x00400604u));
+    TraceDetail(L"B3cC2ePostGrStatus2", Rd(B, 0x00400608u));
+    TraceDetail(L"B3cC2eGrStatus1", Rd(B, 0x00400604u));
+    TraceDetail(L"B3cC2eGrStatus2", Rd(B, 0x00400608u));
     value = Rd(B, 0x00409C18u);
-    Trace(L"B3cC2ePostFecsHostIntStatus", value); Trace(L"B3cC2eFecsHostIntStatus", value);
-    Trace(L"B3cC2ePostFecsHostIntClear", Rd(B, 0x00409C20u));
-    Trace(L"B3cC2ePostFecsHostIntEnable", Rd(B, 0x00409C24u));
-    Trace(L"B3cC2ePostMemfmtHwwEsr", Rd(B, 0x00404600u));
-    Trace(L"B3cC2ePostSccHwwEsr", Rd(B, 0x00408030u));
-    Trace(L"B3cC2ePostMmeHwwEsr", Rd(B, 0x00404490u));
-    Trace(L"B3cC2ePostPdHwwEsr", Rd(B, 0x00406018u));
-    Trace(L"B3cC2ePostSkedHwwEsr", Rd(B, 0x00407020u));
-    Trace(L"B3cC2ePostDsHwwEsr", Rd(B, 0x00405840u));
+    TraceDetail(L"B3cC2ePostFecsHostIntStatus", value); TraceDetail(L"B3cC2eFecsHostIntStatus", value);
+    TraceDetail(L"B3cC2ePostFecsHostIntClear", Rd(B, 0x00409C20u));
+    TraceDetail(L"B3cC2ePostFecsHostIntEnable", Rd(B, 0x00409C24u));
+    TraceDetail(L"B3cC2ePostMemfmtHwwEsr", Rd(B, 0x00404600u));
+    TraceDetail(L"B3cC2ePostSccHwwEsr", Rd(B, 0x00408030u));
+    TraceDetail(L"B3cC2ePostMmeHwwEsr", Rd(B, 0x00404490u));
+    TraceDetail(L"B3cC2ePostPdHwwEsr", Rd(B, 0x00406018u));
+    TraceDetail(L"B3cC2ePostSkedHwwEsr", Rd(B, 0x00407020u));
+    TraceDetail(L"B3cC2ePostDsHwwEsr", Rd(B, 0x00405840u));
     value = Rd(B, 0x00400700u);
-    Trace(L"B3cC2ePostGrStatus", value); Trace(L"B3cC2eGrStatus", value);
-    Trace(L"B3cC2ePostGrStatusBit0", value & 1u);
-    Trace(L"B3cC2ePostGrStatusBit5", (value >> 5) & 1u);
-    Trace(L"B3cC2ePostGrStatusBit7", (value >> 7) & 1u);
-    Trace(L"B3cC2ePostGrStatusFeGi", (value >> 21) & 1u);
+    TraceDetail(L"B3cC2ePostGrStatus", value); TraceDetail(L"B3cC2eGrStatus", value);
+    TraceDetail(L"B3cC2ePostGrStatusBit0", value & 1u);
+    TraceDetail(L"B3cC2ePostGrStatusBit5", (value >> 5) & 1u);
+    TraceDetail(L"B3cC2ePostGrStatusBit7", (value >> 7) & 1u);
+    TraceDetail(L"B3cC2ePostGrStatusFeGi", (value >> 21) & 1u);
     value = Rd(B, 0x0040060Cu);
-    Trace(L"B3cC2ePostGrEngineStatus", value); Trace(L"B3cC2eGrEngineStatus", value);
-    Trace(L"B3cC2ePostFifoEngineStatus", Rd(B, 0x00002640u));
-    Trace(L"B3cC2ePostGrActivity0", Rd(B, 0x00400380u));
-    Trace(L"B3cC2ePostGrActivity1", Rd(B, 0x00400384u));
-    Trace(L"B3cC2ePostGrActivity2", Rd(B, 0x00400388u));
-    Trace(L"B3cC2ePostGrActivity3Present", 0u); /* no gr_activity_3_r() in GM20B header */
-    Trace(L"B3cC2ePostGrActivity4", Rd(B, 0x00400390u));
-    Trace(L"B3cC2ePostFeGoIdle", Rd(B, 0x00404154u));
-    Trace(L"B3cC2ePostFeGoIdleOnStatus", Rd(B, 0x00404150u));
-    Trace(L"B3cC2ePostFePowerMode", Rd(B, 0x00404170u));
-    Trace(L"B3cC2ePostFeGoIdleCheck", Rd(B, 0x00404158u));
-    Trace(L"B3cC2ePostFeGoIdleInfo", Rd(B, 0x00404194u));
+    TraceDetail(L"B3cC2ePostGrEngineStatus", value); TraceDetail(L"B3cC2eGrEngineStatus", value);
+    TraceDetail(L"B3cC2ePostFifoEngineStatus", Rd(B, 0x00002640u));
+    TraceDetail(L"B3cC2ePostGrActivity0", Rd(B, 0x00400380u));
+    TraceDetail(L"B3cC2ePostGrActivity1", Rd(B, 0x00400384u));
+    TraceDetail(L"B3cC2ePostGrActivity2", Rd(B, 0x00400388u));
+    TraceDetail(L"B3cC2ePostGrActivity3Present", 0u); /* no gr_activity_3_r() in GM20B header */
+    TraceDetail(L"B3cC2ePostGrActivity4", Rd(B, 0x00400390u));
+    TraceDetail(L"B3cC2ePostFeGoIdle", Rd(B, 0x00404154u));
+    TraceDetail(L"B3cC2ePostFeGoIdleOnStatus", Rd(B, 0x00404150u));
+    TraceDetail(L"B3cC2ePostFePowerMode", Rd(B, 0x00404170u));
+    TraceDetail(L"B3cC2ePostFeGoIdleCheck", Rd(B, 0x00404158u));
+    TraceDetail(L"B3cC2ePostFeGoIdleInfo", Rd(B, 0x00404194u));
     value = Rd(B, 0x00409100u);
-    Trace(L"B3cC2ePostFecsCpuctl", value); Trace(L"B3cC2eFecsCpuctl", value);
+    TraceDetail(L"B3cC2ePostFecsCpuctl", value); TraceDetail(L"B3cC2eFecsCpuctl", value);
     value = Rd(B, 0x00409040u);
-    Trace(L"B3cC2ePostFecsMailbox0", value); Trace(L"B3cC2eFecsMailbox0", value);
+    TraceDetail(L"B3cC2ePostFecsMailbox0", value); TraceDetail(L"B3cC2eFecsMailbox0", value);
     value = Rd(B, 0x00409044u);
-    Trace(L"B3cC2ePostFecsMailbox1", value); Trace(L"B3cC2eFecsMailbox1", value);
+    TraceDetail(L"B3cC2ePostFecsMailbox1", value); TraceDetail(L"B3cC2eFecsMailbox1", value);
     value = Rd(B, 0x00409008u);
-    Trace(L"B3cC2ePostFecsIrqstat", value); Trace(L"B3cC2eFecsIrqstat", value);
-    Trace(L"B3cC2ePostFecsIrqmask", Rd(B, 0x0040900Cu));
+    TraceDetail(L"B3cC2ePostFecsIrqstat", value); TraceDetail(L"B3cC2eFecsIrqstat", value);
+    TraceDetail(L"B3cC2ePostFecsIrqmask", Rd(B, 0x0040900Cu));
     value = Rd(B, 0x00409240u);
-    Trace(L"B3cC2ePostFecsSctl", value); Trace(L"B3cC2eFecsSctl", value);
+    TraceDetail(L"B3cC2ePostFecsSctl", value); TraceDetail(L"B3cC2eFecsSctl", value);
     for (i = 0; i < RTL_NUMBER_OF(fecsCtxsw); ++i) {
         fecsCtxsw[i] = Rd(B, 0x00409800u + i * 4u);
         gpccsCtxsw[i] = Rd(B, 0x0041A800u + i * 4u);
@@ -3107,27 +2828,27 @@ static VOID B3cC2eCaptureDiagnostics(PSWGPU_DEVICE Dev)
     TraceBin(L"B3cC2eGpccsCtxswMailboxes", gpccsCtxsw, sizeof(gpccsCtxsw));
     idx = Rd(B, 0x00409148u); nr = (idx >> 16) & 0xFFu;
     if (nr > RTL_NUMBER_OF(pc)) nr = RTL_NUMBER_OF(pc);
-    Trace(L"B3cC2ePostFecsTraceIdx", idx); Trace(L"B3cC2ePostFecsTraceCount", nr);
+    TraceDetail(L"B3cC2ePostFecsTraceIdx", idx); TraceDetail(L"B3cC2ePostFecsTraceCount", nr);
     for (i = 0; i < nr; ++i) { Wr(B, 0x00409148u, i); pc[i] = Rd(B, 0x0040914Cu); }
     if (nr) TraceBin(L"B3cC2ePostFecsTracePc", pc, nr * sizeof(ULONG));
     value = Rd(B, 0x0041A100u);
-    Trace(L"B3cC2ePostGpccsCpuctl", value); Trace(L"B3cC2eGpccsCpuctl", value);
+    TraceDetail(L"B3cC2ePostGpccsCpuctl", value); TraceDetail(L"B3cC2eGpccsCpuctl", value);
     value = Rd(B, 0x0041A240u);
-    Trace(L"B3cC2ePostGpccsSctl", value); Trace(L"B3cC2eGpccsSctl", value);
+    TraceDetail(L"B3cC2ePostGpccsSctl", value); TraceDetail(L"B3cC2eGpccsSctl", value);
     value = Rd(B, 0x0041A040u);
-    Trace(L"B3cC2ePostGpccsMailbox0", value); Trace(L"B3cC2eGpccsMailbox0", value);
+    TraceDetail(L"B3cC2ePostGpccsMailbox0", value); TraceDetail(L"B3cC2eGpccsMailbox0", value);
     value = Rd(B, 0x0041A044u);
-    Trace(L"B3cC2ePostGpccsMailbox1", value); Trace(L"B3cC2eGpccsMailbox1", value);
-    Trace(L"B3cC2ePostGpccsIrqstat", Rd(B, 0x0041A008u));
-    Trace(L"B3cC2ePostGpccsIrqmask", Rd(B, 0x0041A00Cu));
+    TraceDetail(L"B3cC2ePostGpccsMailbox1", value); TraceDetail(L"B3cC2eGpccsMailbox1", value);
+    TraceDetail(L"B3cC2ePostGpccsIrqstat", Rd(B, 0x0041A008u));
+    TraceDetail(L"B3cC2ePostGpccsIrqmask", Rd(B, 0x0041A00Cu));
     idx = Rd(B, 0x0041A148u); nr = (idx >> 16) & 0xFFu;
     if (nr > RTL_NUMBER_OF(pc)) nr = RTL_NUMBER_OF(pc);
-    Trace(L"B3cC2ePostGpccsTraceIdx", idx); Trace(L"B3cC2ePostGpccsTraceCount", nr);
+    TraceDetail(L"B3cC2ePostGpccsTraceIdx", idx); TraceDetail(L"B3cC2ePostGpccsTraceCount", nr);
     for (i = 0; i < nr; ++i) { Wr(B, 0x0041A148u, i); pc[i] = Rd(B, 0x0041A14Cu); }
     if (nr) TraceBin(L"B3cC2ePostGpccsTracePc", pc, nr * sizeof(ULONG));
     value = Rd(B, 0x2100u);
-    Trace(L"B3cC2ePostPfifoIntr0", value); Trace(L"B3cC2ePfifoIntr0", value);
-    id = Rd(B, 0x259Cu); Trace(L"B3cC2ePostFaultId", id); Trace(L"B3cC2eFaultId", id);
+    TraceDetail(L"B3cC2ePostPfifoIntr0", value); TraceDetail(L"B3cC2ePfifoIntr0", value);
+    id = Rd(B, 0x259Cu); TraceDetail(L"B3cC2ePostFaultId", id); TraceDetail(L"B3cC2eFaultId", id);
     for (i = 0; i < 32u && count < RTL_NUMBER_OF(rec); ++i) {
         if (!(id & (1u << i))) continue;
         rec[count][0] = i; rec[count][1] = Rd(B, 0x2800u + i * 0x10u);
@@ -3135,65 +2856,65 @@ static VOID B3cC2eCaptureDiagnostics(PSWGPU_DEVICE Dev)
         rec[count][3] = Rd(B, 0x2808u + i * 0x10u);
         rec[count][4] = Rd(B, 0x280Cu + i * 0x10u); ++count;
     }
-    Trace(L"B3cC2ePostFaultCount", count); Trace(L"B3cC2eFaultCount", count);
+    TraceDetail(L"B3cC2ePostFaultCount", count); TraceDetail(L"B3cC2eFaultCount", count);
     if (count) {
-        TraceBin(L"B3cC2ePostFaultRecords", rec, count * sizeof(rec[0]));
-        TraceBin(L"B3cC2eFaultRecords", rec, count * sizeof(rec[0]));
+        TraceErrorBin(L"B3cC2ePostFaultRecords", rec, count * sizeof(rec[0]));
+        TraceErrorBin(L"B3cC2eFaultRecords", rec, count * sizeof(rec[0]));
     }
     value = Rd(Dev->Mc, MC_INTSTATUS);
-    Trace(L"B3cC2ePostMcInt", value); Trace(L"B3cC2eMcInt", value);
+    TraceDetail(L"B3cC2ePostMcInt", value); TraceDetail(L"B3cC2eMcInt", value);
     value = Rd(Dev->Mc, MC_ERR_STATUS);
-    Trace(L"B3cC2ePostMcErr", value); Trace(L"B3cC2eMcErr", value);
+    TraceDetail(L"B3cC2ePostMcErr", value); TraceDetail(L"B3cC2eMcErr", value);
     value = Rd(Dev->Mc, MC_ERR_ADR);
-    Trace(L"B3cC2ePostMcErrAdr", value); Trace(L"B3cC2eMcErrAdr", value);
+    TraceDetail(L"B3cC2ePostMcErrAdr", value); TraceDetail(L"B3cC2eMcErrAdr", value);
     if (g_GrVm.Active && g_GrVm.Arena != NULL) {
         for (i = 0; i < RTL_NUMBER_OF(goldenHead); ++i)
             goldenHead[i] = *(volatile ULONG *)((PUCHAR)g_GrVm.Arena + GR_VM_GLOBAL_OFF + i * sizeof(ULONG));
         TraceBin(L"B3cC2eGoldenRawOnExit", goldenHead, sizeof(goldenHead));
         /* Claude: goldenHead holds only the first 16 words; read the 0xFC magic directly. */
-        Trace(L"B3cC2eGoldenMagicOnExit",
+        TraceDetail(L"B3cC2eGoldenMagicOnExit",
               *(volatile ULONG *)((PUCHAR)g_GrVm.Arena + GR_VM_GLOBAL_OFF + 0xFCu));
     }
 }
 
 static VOID B3cC2eCapturePreBundle(volatile UCHAR *B)
 {
-    Trace(L"B3cC2ePreBundleFeHwwEsr", Rd(B, 0x00404000u));
-    Trace(L"B3cC2ePreBundleFeHwwEsrInfo", Rd(B, 0x004041B0u));
-    Trace(L"B3cC2ePreBundleFeInfoRaw404004", Rd(B, 0x00404004u));
-    Trace(L"B3cC2ePreBundleGrIntr", Rd(B, 0x00400100u));
-    Trace(L"B3cC2ePreBundleGrIntrEnable", Rd(B, 0x0040013Cu));
-    Trace(L"B3cC2ePreBundleGrException", Rd(B, 0x00400108u));
-    Trace(L"B3cC2ePreBundleGrExceptionEnable", Rd(B, 0x00400138u));
-    Trace(L"B3cC2ePreBundleGrException1", Rd(B, 0x00400118u));
-    Trace(L"B3cC2ePreBundleGrException1Enable", Rd(B, 0x00400130u));
-    Trace(L"B3cC2ePreBundleGrException2", Rd(B, 0x0040011Cu));
-    Trace(L"B3cC2ePreBundleGrException2Enable", Rd(B, 0x00400134u));
-    Trace(L"B3cC2ePreBundleGrStatus1", Rd(B, 0x00400604u));
-    Trace(L"B3cC2ePreBundleGrStatus2", Rd(B, 0x00400608u));
-    Trace(L"B3cC2ePreBundleFecsHostIntStatus", Rd(B, 0x00409C18u));
-    Trace(L"B3cC2ePreBundleFecsHostIntClear", Rd(B, 0x00409C20u));
-    Trace(L"B3cC2ePreBundleFecsHostIntEnable", Rd(B, 0x00409C24u));
+    TraceDetail(L"B3cC2ePreBundleFeHwwEsr", Rd(B, 0x00404000u));
+    TraceDetail(L"B3cC2ePreBundleFeHwwEsrInfo", Rd(B, 0x004041B0u));
+    TraceDetail(L"B3cC2ePreBundleFeInfoRaw404004", Rd(B, 0x00404004u));
+    TraceDetail(L"B3cC2ePreBundleGrIntr", Rd(B, 0x00400100u));
+    TraceDetail(L"B3cC2ePreBundleGrIntrEnable", Rd(B, 0x0040013Cu));
+    TraceDetail(L"B3cC2ePreBundleGrException", Rd(B, 0x00400108u));
+    TraceDetail(L"B3cC2ePreBundleGrExceptionEnable", Rd(B, 0x00400138u));
+    TraceDetail(L"B3cC2ePreBundleGrException1", Rd(B, 0x00400118u));
+    TraceDetail(L"B3cC2ePreBundleGrException1Enable", Rd(B, 0x00400130u));
+    TraceDetail(L"B3cC2ePreBundleGrException2", Rd(B, 0x0040011Cu));
+    TraceDetail(L"B3cC2ePreBundleGrException2Enable", Rd(B, 0x00400134u));
+    TraceDetail(L"B3cC2ePreBundleGrStatus1", Rd(B, 0x00400604u));
+    TraceDetail(L"B3cC2ePreBundleGrStatus2", Rd(B, 0x00400608u));
+    TraceDetail(L"B3cC2ePreBundleFecsHostIntStatus", Rd(B, 0x00409C18u));
+    TraceDetail(L"B3cC2ePreBundleFecsHostIntClear", Rd(B, 0x00409C20u));
+    TraceDetail(L"B3cC2ePreBundleFecsHostIntEnable", Rd(B, 0x00409C24u));
 }
 
 static VOID B3cC2eCaptureBeforeExceptionSetup(volatile UCHAR *B)
 {
-    Trace(L"B3cC2eBeforeSetupFeHwwEsr", Rd(B, 0x00404000u));
-    Trace(L"B3cC2eBeforeSetupFeHwwEsrInfo", Rd(B, 0x004041B0u));
-    Trace(L"B3cC2eBeforeSetupFeInfoRaw404004", Rd(B, 0x00404004u));
-    Trace(L"B3cC2eBeforeSetupGrIntr", Rd(B, 0x00400100u));
-    Trace(L"B3cC2eBeforeSetupGrIntrEnable", Rd(B, 0x0040013Cu));
-    Trace(L"B3cC2eBeforeSetupGrException", Rd(B, 0x00400108u));
-    Trace(L"B3cC2eBeforeSetupGrExceptionEnable", Rd(B, 0x00400138u));
-    Trace(L"B3cC2eBeforeSetupGrException1", Rd(B, 0x00400118u));
-    Trace(L"B3cC2eBeforeSetupGrException1Enable", Rd(B, 0x00400130u));
-    Trace(L"B3cC2eBeforeSetupGrException2", Rd(B, 0x0040011Cu));
-    Trace(L"B3cC2eBeforeSetupGrException2Enable", Rd(B, 0x00400134u));
-    Trace(L"B3cC2eBeforeSetupGrStatus1", Rd(B, 0x00400604u));
-    Trace(L"B3cC2eBeforeSetupGrStatus2", Rd(B, 0x00400608u));
-    Trace(L"B3cC2eBeforeSetupFecsHostIntStatus", Rd(B, 0x00409C18u));
-    Trace(L"B3cC2eBeforeSetupFecsHostIntClear", Rd(B, 0x00409C20u));
-    Trace(L"B3cC2eBeforeSetupFecsHostIntEnable", Rd(B, 0x00409C24u));
+    TraceDetail(L"B3cC2eBeforeSetupFeHwwEsr", Rd(B, 0x00404000u));
+    TraceDetail(L"B3cC2eBeforeSetupFeHwwEsrInfo", Rd(B, 0x004041B0u));
+    TraceDetail(L"B3cC2eBeforeSetupFeInfoRaw404004", Rd(B, 0x00404004u));
+    TraceDetail(L"B3cC2eBeforeSetupGrIntr", Rd(B, 0x00400100u));
+    TraceDetail(L"B3cC2eBeforeSetupGrIntrEnable", Rd(B, 0x0040013Cu));
+    TraceDetail(L"B3cC2eBeforeSetupGrException", Rd(B, 0x00400108u));
+    TraceDetail(L"B3cC2eBeforeSetupGrExceptionEnable", Rd(B, 0x00400138u));
+    TraceDetail(L"B3cC2eBeforeSetupGrException1", Rd(B, 0x00400118u));
+    TraceDetail(L"B3cC2eBeforeSetupGrException1Enable", Rd(B, 0x00400130u));
+    TraceDetail(L"B3cC2eBeforeSetupGrException2", Rd(B, 0x0040011Cu));
+    TraceDetail(L"B3cC2eBeforeSetupGrException2Enable", Rd(B, 0x00400134u));
+    TraceDetail(L"B3cC2eBeforeSetupGrStatus1", Rd(B, 0x00400604u));
+    TraceDetail(L"B3cC2eBeforeSetupGrStatus2", Rd(B, 0x00400608u));
+    TraceDetail(L"B3cC2eBeforeSetupFecsHostIntStatus", Rd(B, 0x00409C18u));
+    TraceDetail(L"B3cC2eBeforeSetupFecsHostIntClear", Rd(B, 0x00409C20u));
+    TraceDetail(L"B3cC2eBeforeSetupFecsHostIntEnable", Rd(B, 0x00409C24u));
 }
 
 /* Mirror gk20a_mm_l2_flush(g, true): flush dirty L2 lines, then invalidate.
@@ -3249,7 +2970,7 @@ static VOID B3cCaptureGrStatusDump(volatile UCHAR *B, PCWSTR Name, PULONG Pairs)
         Pairs[i * 2u] = offsets[i];
         Pairs[i * 2u + 1u] = Rd(B, offsets[i]);
     }
-    TraceBin(Name, Pairs, B3C_GR_STATUS_DUMP_REGS * 2u * sizeof(ULONG));
+    TraceErrorBin(Name, Pairs, B3C_GR_STATUS_DUMP_REGS * 2u * sizeof(ULONG));
 }
 
 /* C2e: follow nvgpu gr_gk20a_init_golden_ctx_image() and Nouveau
@@ -3340,20 +3061,20 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
     Step(81);
     B3cPrivRingResetWriteLog();
     mcUnk260AtEntry = Rd(B, 0x00000260u);
-    Trace(L"B3cC2eMcUnk260AtEntry", mcUnk260AtEntry);
+    TraceDetail(L"B3cC2eMcUnk260AtEntry", mcUnk260AtEntry);
     pmcEnable = Rd(B, NV_PMC_ENABLE);
-    Trace(L"B3cC2ePmcEnable", pmcEnable);
+    TraceDetail(L"B3cC2ePmcEnable", pmcEnable);
     if (!(pmcEnable & (1u << 12)) || !g_GrVm.Active || g_GrVm.Arena == NULL) {
         result = 0xE000008Bu; goto done;
     }
     gr5044b0AtEntry = Rd(B, 0x005044B0u);
-    Trace(L"B3cC2eGr5044B0AtEntry", gr5044b0AtEntry);
-    Trace(L"B3cC2eGr5044B0Bit27AtEntry", (gr5044b0AtEntry >> 27) & 1u);
-    waitHistory = (PULONG)ExAllocatePool2(POOL_FLAG_NON_PAGED,
+    TraceDetail(L"B3cC2eGr5044B0AtEntry", gr5044b0AtEntry);
+    TraceDetail(L"B3cC2eGr5044B0Bit27AtEntry", (gr5044b0AtEntry >> 27) & 1u);
+    if (g_Verbose) waitHistory = (PULONG)ExAllocatePool2(POOL_FLAG_NON_PAGED,
         waitHistoryCapacity * 10u * sizeof(ULONG), SWGPU_TAG);
     if (waitHistory != NULL) RtlZeroMemory(waitHistory,
         waitHistoryCapacity * 10u * sizeof(ULONG));
-    Trace(L"B3cC2eWaitHistoryCapacity", waitHistory != NULL ? waitHistoryCapacity : 0u);
+    TraceDetail(L"B3cC2eWaitHistoryCapacity", waitHistory != NULL ? waitHistoryCapacity : 0u);
 
     /* Step 82: nvgpu's FE-on, ctxsw reset pulse, FE-auto, then SCC clear. */
     Step(82);
@@ -3365,7 +3086,7 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
     }
     waitState[0] = 10u; waitState[1] = 0xFFFFFFFFu; waitState[2] = polls;
     waitState[3] = fePowerStatus; waitState[6] = 0u; waitState[7] = (polls < 200u);
-    Trace(L"B3cC2eForceOnPolls", polls); Trace(L"B3cC2eForceOnStatus", fePowerStatus);
+    Trace(L"B3cC2eForceOnPolls", polls); TraceDetail(L"B3cC2eForceOnStatus", fePowerStatus);
     if (polls == 200u) { result = 0xE000008Du; goto done; }
     Wr(B, 0x00409614u, 0x70u);
     resetAssertRead = Rd(B, 0x00409614u);
@@ -3373,8 +3094,8 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
     Wr(B, 0x00409614u, 0x770u);
     resetReleaseRead = Rd(B, 0x00409614u);
     Us(10);
-    Trace(L"B3cC2eCtxswResetAssert", resetAssertRead);
-    Trace(L"B3cC2eCtxswResetRelease", resetReleaseRead);
+    TraceDetail(L"B3cC2eCtxswResetAssert", resetAssertRead);
+    TraceDetail(L"B3cC2eCtxswResetRelease", resetReleaseRead);
     if (resetAssertRead != 0x70u || resetReleaseRead != 0x770u) {
         result = 0xE000008Du; goto done;
     }
@@ -3386,10 +3107,10 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
     }
     waitState[0] = 11u; waitState[1] = 0xFFFFFFFFu; waitState[2] = polls;
     waitState[3] = fePowerStatus; waitState[6] = 0u; waitState[7] = (polls < 200u);
-    Trace(L"B3cC2eAutoPolls", polls); Trace(L"B3cC2eAutoStatus", fePowerStatus);
+    Trace(L"B3cC2eAutoPolls", polls); TraceDetail(L"B3cC2eAutoStatus", fePowerStatus);
     if (polls == 200u) { result = 0xE000008Du; goto done; }
     Wr(B, 0x0040802Cu, 1u); /* SCC RAM clear */
-    Trace(L"B3cC2eSccInit", Rd(B, 0x0040802Cu));
+    TraceDetail(L"B3cC2eSccInit", Rd(B, 0x0040802Cu));
     bundleBase = (GR_VM_GPU_VA + GR_VM_BUNDLE_OFF) >> 8;
     pagepoolBase = (GR_VM_GPU_VA + GR_VM_PAGEPOOL_OFF) >> 8;
     attribBase = (GR_VM_GPU_VA + GR_VM_ATTRIB_OFF) >> 12;
@@ -3415,19 +3136,18 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
     instWords = (ULONG *)((PUCHAR)g_GrVm.Arena + GR_VM_INST_OFF);
     /* Claude: FECS must see the instance block through the same GPU-visible
      * address as the C2d PDB (IOMMU-tagged IOVA when the SMMU is active),
-     * like the ACR PMU bind (inst 0x704FDC68 carries the tag bit 22). An
-     * untagged physical address is the PRIV_VIOLATION path from B2a. */
+     * like the ACR PMU bind (inst 0x704FDC68 carries the tag bit 22). */
     instBlockPa = (ULONG)(((g_GrVm.Iova + GR_VM_INST_OFF) >> 12) & 0x0FFFFFFFu);
     bindData = instBlockPa | 0xB0000000u;
-    Trace(L"B3cC2eInstIovaPage", instBlockPa);
+    TraceDetail(L"B3cC2eInstIovaPage", instBlockPa);
     saveData = bindData;
     /* Claude: invalidate the GPU MMU for the new GR PDB before FECS first
      * walks it, using the same bounded helper as the ACR path. */
     if (!AcrMmuInvalidatePdb(B, g_GrVm.Iova + GR_VM_GPU_PGD_OFF)) {
-        Trace(L"B3cC2eGrPdbInvalidate", 0u);
+        TraceDetail(L"B3cC2eGrPdbInvalidate", 0u);
         result = 0xE000008Du; goto done;
     }
-    Trace(L"B3cC2eGrPdbInvalidate", 1u);
+    TraceDetail(L"B3cC2eGrPdbInvalidate", 1u);
     /* Steps 98-100 follow the front of nvgpu gk20a_init_gr_setup_hw():
      * PE stream-master + zcull setup, Nouveau's GM20B ROP active-FBP count,
      * then GPFIFO/semaphore access.  The fixed 1-GPC/2-TPC values reuse the
@@ -3487,7 +3207,7 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
     /* Claude: 0.4.55 HW read 0x120074 = 0. Do not program 0 active units;
      * skip Nouveau's FBP-count variant and let Step 92 (nvgpu, LTC count 2,
      * verified on 0.4.54) set ZROP/CROP. */
-    Trace(L"B3cC2eNouveauRopSkippedZeroFbp", fbpCount == 0u ? 1u : 0u);
+    TraceDetail(L"B3cC2eNouveauRopSkippedZeroFbp", fbpCount == 0u ? 1u : 0u);
     if (fbpCount != 0u && !B3cPrivRingDrainBeforeWrites(B)) { result = 0xE0000095u; goto done; }
     for (i = 0; fbpCount != 0u && i < RTL_NUMBER_OF(nouveauRopWrites); ++i) {
         Wr(B, nouveauRopWrites[i][0], nouveauRopWrites[i][2]);
@@ -3515,9 +3235,9 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
      * before the FECS bind/golden-generation sequence, as setup_hw precedes
      * gr_gk20a_init_golden_ctx_image(). MC/CPU interrupt outputs stay off. */
     Step(84);
-    B3cC2eCaptureBeforeExceptionSetup(B);
+    if (g_Verbose) B3cC2eCaptureBeforeExceptionSetup(B);
     preBundleFeEsr = Rd(B, 0x00404000u);
-    Trace(L"B3cC2ePreSetupFeEsr", preBundleFeEsr);
+    TraceDetail(L"B3cC2ePreSetupFeEsr", preBundleFeEsr);
     if (preBundleFeEsr & 0x3FFFFFFFu) {
         result = 0xE000008Fu; goto done;
     }
@@ -3550,7 +3270,7 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
                 result = 0xE000008Eu; goto done;
             }
         }
-        Trace(L"B3cC2eExceptionSetupCount", setupCount);
+        TraceDetail(L"B3cC2eExceptionSetupCount", setupCount);
         for (setupIndex = 0; setupIndex < setupCount; ++setupIndex) {
             setupTrace[setupIndex][0] = setupAddr[setupIndex];
             setupTrace[setupIndex][1] = setupValue[setupIndex];
@@ -3566,25 +3286,25 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
                 result = 0xE0000095u; goto done;
             }
         }
-        Trace(L"B3cC2eGrIntrAfterEnable", Rd(B, 0x00400100u));
-        Trace(L"B3cC2eGrIntrEnableReadback", Rd(B, 0x0040013Cu));
-        Trace(L"B3cC2eFecsHostIntStatusAfterEnable", Rd(B, 0x00409C18u));
-        Trace(L"B3cC2eFecsHostIntClearAfterEnable", Rd(B, 0x00409C20u));
-        Trace(L"B3cC2eFecsHostIntEnableReadback", Rd(B, 0x00409C24u));
-        Trace(L"B3cC2eExceptionAfterEnable", Rd(B, 0x00400108u));
-        Trace(L"B3cC2eException1AfterEnable", Rd(B, 0x00400118u));
-        Trace(L"B3cC2eException2AfterEnable", Rd(B, 0x0040011Cu));
-        Trace(L"B3cC2eFeHwwEsrAfterEnable", Rd(B, 0x00404000u));
-        Trace(L"B3cC2eMemfmtHwwEsrAfterEnable", Rd(B, 0x00404600u));
-        Trace(L"B3cC2eSccHwwEsrAfterEnable", Rd(B, 0x00408030u));
-        Trace(L"B3cC2eMmeHwwEsrAfterEnable", Rd(B, 0x00404490u));
-        Trace(L"B3cC2ePdHwwEsrAfterEnable", Rd(B, 0x00406018u));
-        Trace(L"B3cC2eSkedHwwEsrAfterEnable", Rd(B, 0x00407020u));
-        Trace(L"B3cC2eDsHwwEsrAfterEnable", Rd(B, 0x00405840u));
-        Trace(L"B3cC2eFeHwwInfoDecodeAvailable", 0u);
+        TraceDetail(L"B3cC2eGrIntrAfterEnable", Rd(B, 0x00400100u));
+        TraceDetail(L"B3cC2eGrIntrEnableReadback", Rd(B, 0x0040013Cu));
+        TraceDetail(L"B3cC2eFecsHostIntStatusAfterEnable", Rd(B, 0x00409C18u));
+        TraceDetail(L"B3cC2eFecsHostIntClearAfterEnable", Rd(B, 0x00409C20u));
+        TraceDetail(L"B3cC2eFecsHostIntEnableReadback", Rd(B, 0x00409C24u));
+        TraceDetail(L"B3cC2eExceptionAfterEnable", Rd(B, 0x00400108u));
+        TraceDetail(L"B3cC2eException1AfterEnable", Rd(B, 0x00400118u));
+        TraceDetail(L"B3cC2eException2AfterEnable", Rd(B, 0x0040011Cu));
+        TraceDetail(L"B3cC2eFeHwwEsrAfterEnable", Rd(B, 0x00404000u));
+        TraceDetail(L"B3cC2eMemfmtHwwEsrAfterEnable", Rd(B, 0x00404600u));
+        TraceDetail(L"B3cC2eSccHwwEsrAfterEnable", Rd(B, 0x00408030u));
+        TraceDetail(L"B3cC2eMmeHwwEsrAfterEnable", Rd(B, 0x00404490u));
+        TraceDetail(L"B3cC2ePdHwwEsrAfterEnable", Rd(B, 0x00406018u));
+        TraceDetail(L"B3cC2eSkedHwwEsrAfterEnable", Rd(B, 0x00407020u));
+        TraceDetail(L"B3cC2eDsHwwEsrAfterEnable", Rd(B, 0x00405840u));
+        TraceDetail(L"B3cC2eFeHwwInfoDecodeAvailable", 0u);
     }
-    Trace(L"B3cC2eBindMethod", 3u); Trace(L"B3cC2eBindData", bindData);
-    Trace(L"B3cC2eBindMailboxClear", 0x30u);
+    TraceDetail(L"B3cC2eBindMethod", 3u); TraceDetail(L"B3cC2eBindData", bindData);
+    TraceDetail(L"B3cC2eBindMailboxClear", 0x30u);
     Wr(B, 0x00409840u, 0x30u);
     Wr(B, 0x00409500u, bindData);
     Wr(B, 0x00409504u, 3u);
@@ -3594,7 +3314,7 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
         if (mailbox & 0x30u) break;
         Ms(1);
     }
-    Trace(L"B3cC2eBindMailbox", mailbox); Trace(L"B3cC2eBindPolls", polls);
+    TraceDetail(L"B3cC2eBindMailbox", mailbox); Trace(L"B3cC2eBindPolls", polls);
     waitState[0] = 20u; waitState[1] = 0xFFFFFFFFu; waitState[2] = polls;
     waitState[3] = mailbox; waitState[7] = (polls < 2000u);
     if (polls == 2000u) { result = 0xE000008Bu; goto done; }
@@ -3610,10 +3330,10 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
     *(ULONG *)((PUCHAR)g_GrVm.Arena + GR_VM_CTX_OFF + 0x20u) = 0u;
     *(ULONG *)((PUCHAR)g_GrVm.Arena + GR_VM_CTX_OFF + 0x28u) = 0u;
     *(ULONG *)((PUCHAR)g_GrVm.Arena + GR_VM_CTX_OFF + 0x2Cu) = 0u;
-    Trace(L"B3cC2eChannelHeader1C", *(ULONG *)((PUCHAR)g_GrVm.Arena + GR_VM_CTX_OFF + 0x1Cu));
-    Trace(L"B3cC2eChannelHeader20", *(ULONG *)((PUCHAR)g_GrVm.Arena + GR_VM_CTX_OFF + 0x20u));
-    Trace(L"B3cC2eChannelHeader28", *(ULONG *)((PUCHAR)g_GrVm.Arena + GR_VM_CTX_OFF + 0x28u));
-    Trace(L"B3cC2eChannelHeader2C", *(ULONG *)((PUCHAR)g_GrVm.Arena + GR_VM_CTX_OFF + 0x2Cu));
+    TraceDetail(L"B3cC2eChannelHeader1C", *(ULONG *)((PUCHAR)g_GrVm.Arena + GR_VM_CTX_OFF + 0x1Cu));
+    TraceDetail(L"B3cC2eChannelHeader20", *(ULONG *)((PUCHAR)g_GrVm.Arena + GR_VM_CTX_OFF + 0x20u));
+    TraceDetail(L"B3cC2eChannelHeader28", *(ULONG *)((PUCHAR)g_GrVm.Arena + GR_VM_CTX_OFF + 0x28u));
+    TraceDetail(L"B3cC2eChannelHeader2C", *(ULONG *)((PUCHAR)g_GrVm.Arena + GR_VM_CTX_OFF + 0x2Cu));
     KeMemoryBarrier();
 
     /* Step 92: gm20b_ltc_init_fs_state() establishes active LTC/slice state
@@ -3628,14 +3348,14 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
     ltcSlicesPerLtc = (ltcParamRaw >> 28) & 0xFu;
     ltcCacheLineBytes = 512u << ((ltcParamRaw >> 24) & 0xFu);
     ltcTagsPerCacheLine = ltcParamRaw & 0xFFFFu;
-    Trace(L"B3cC2eTopNumLtcsRaw", ltcCountRaw);
-    Trace(L"B3cC2eLtcActiveCountRaw", ltcActiveCountRaw);
-    Trace(L"B3cC2eLtcMaxCount", ltcMaxCount);
-    Trace(L"B3cC2eLtcCount", ltcCountDetected);
-    Trace(L"B3cC2eLtcCbcParam", ltcParamRaw);
-    Trace(L"B3cC2eLtcSlicesPerLtc", ltcSlicesPerLtc);
-    Trace(L"B3cC2eLtcCacheLineBytes", ltcCacheLineBytes);
-    Trace(L"B3cC2eLtcComptagsPerCacheline", ltcTagsPerCacheLine);
+    TraceDetail(L"B3cC2eTopNumLtcsRaw", ltcCountRaw);
+    TraceDetail(L"B3cC2eLtcActiveCountRaw", ltcActiveCountRaw);
+    TraceDetail(L"B3cC2eLtcMaxCount", ltcMaxCount);
+    TraceDetail(L"B3cC2eLtcCount", ltcCountDetected);
+    TraceDetail(L"B3cC2eLtcCbcParam", ltcParamRaw);
+    TraceDetail(L"B3cC2eLtcSlicesPerLtc", ltcSlicesPerLtc);
+    TraceDetail(L"B3cC2eLtcCacheLineBytes", ltcCacheLineBytes);
+    TraceDetail(L"B3cC2eLtcComptagsPerCacheline", ltcTagsPerCacheLine);
     if (ltcCountDetected == 0u || ltcCountDetected > ltcMaxCount ||
         ltcSlicesPerLtc == 0u || ltcTagsPerCacheLine == 0u) {
         result = 0xE0000097u; goto done;
@@ -3667,7 +3387,7 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
         }
     }
     TraceBin(L"B3cC2eLtcFsReadback", ltcFsWrites, sizeof(ltcFsWrites));
-    Trace(L"B3cC2eLtcFsWriteCount", ltcFsWriteCount);
+    TraceDetail(L"B3cC2eLtcFsWriteCount", ltcFsWriteCount);
     ltcFsConfigured = 1u;
 
     /* Step 93: fb_gm20b_init_fs_state() publishes the active LTC count to
@@ -3680,7 +3400,7 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
     fbFsWrites[0][3] = Rd(B, fbFsWrites[0][0]);
     ++fbFsWriteCount;
     TraceBin(L"B3cC2eFbFsReadback", fbFsWrites, sizeof(fbFsWrites));
-    Trace(L"B3cC2eFbFsWriteCount", fbFsWriteCount);
+    TraceDetail(L"B3cC2eFbFsWriteCount", fbFsWriteCount);
     if (fbFsWrites[0][3] != fbFsWrites[0][2]) {
         result = 0xE0000098u; goto done;
     }
@@ -3692,7 +3412,7 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
     Step(94);
     zbcIdleOk = B3cC2eWaitNouveauGrIdle(B, 0x5A424349u, 0xFFFFFFFFu, zbcIdleState);
     Trace(L"B3cC2eZbcIdlePolls", zbcIdleState[2]);
-    Trace(L"B3cC2eZbcIdleOk", zbcIdleOk);
+    TraceDetail(L"B3cC2eZbcIdleOk", zbcIdleOk);
     if (!zbcIdleOk) { result = 0xE0000099u; goto done; }
     zbcWriteCount = 0u;
 #define B3C_C2E_ZBC_ADD(a, v) do { \
@@ -3752,8 +3472,8 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
         }
     }
     TraceBin(L"B3cC2eZbcReadback", zbcWrites, sizeof(zbcWrites));
-    Trace(L"B3cC2eZbcWriteCount", zbcWriteCount);
-    Trace(L"B3cC2eZbcPmuSyncSkipped", 1u); /* ELPG ZBC-save path is not enabled here. */
+    TraceDetail(L"B3cC2eZbcWriteCount", zbcWriteCount);
+    TraceDetail(L"B3cC2eZbcPmuSyncSkipped", 1u); /* ELPG ZBC-save path is not enabled here. */
     zbcConfigured = 1u;
 
     /* Step 95: nvgpu's comptag path accepts max_comptag_mem == 0: init_comptags
@@ -3768,9 +3488,9 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
     cbcWrites[0][3] = Rd(B, cbcWrites[0][0]);
     ++cbcWriteCount;
     TraceBin(L"B3cC2eCbcReadback", cbcWrites, sizeof(cbcWrites));
-    Trace(L"B3cC2eCbcWriteCount", cbcWriteCount);
-    Trace(L"B3cC2eCbcNoComptag", cbcNoComptag);
-    Trace(L"B3cC2eCbcBackingBytes", 0u);
+    TraceDetail(L"B3cC2eCbcWriteCount", cbcWriteCount);
+    TraceDetail(L"B3cC2eCbcNoComptag", cbcNoComptag);
+    TraceDetail(L"B3cC2eCbcBackingBytes", 0u);
     if (cbcWrites[0][3] != cbcWrites[0][2]) { result = 0xE000009Au; goto done; }
     cbcConfigured = 1u;
 
@@ -3784,9 +3504,9 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
         result = 0xE0000095u; goto done;
     }
     rdCoalesceAfter = Rd(B, 0x00419A3Cu);
-    Trace(L"B3cC2eRdCoalesceBefore", rdCoalesceBefore);
-    Trace(L"B3cC2eRdCoalesceMask", rdCoalesceMask);
-    Trace(L"B3cC2eRdCoalesceAfter", rdCoalesceAfter);
+    TraceDetail(L"B3cC2eRdCoalesceBefore", rdCoalesceBefore);
+    TraceDetail(L"B3cC2eRdCoalesceMask", rdCoalesceMask);
+    TraceDetail(L"B3cC2eRdCoalesceAfter", rdCoalesceAfter);
     if (rdCoalesceAfter & rdCoalesceMask) { result = 0xE000009Bu; goto done; }
 
     /* nvgpu gr_gk20a_init_golden_ctx_image() binds FECS, waits idle, then
@@ -3800,9 +3520,9 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
     if (!trueIdleAfterSwCtxOk) { result = 0xE0000092u; goto done; }
     feGoIdleTimeoutSaved = Rd(B, 0x00404154u);
     feGoIdleTimeoutSavedValid = 1u;
-    Trace(L"B3cC2eFeGoIdleTimeoutSaved", feGoIdleTimeoutSaved);
+    TraceDetail(L"B3cC2eFeGoIdleTimeoutSaved", feGoIdleTimeoutSaved);
     Wr(B, 0x00404154u, 0u);
-    Trace(L"B3cC2eFeGoIdleTimeoutDisabled", Rd(B, 0x00404154u));
+    TraceDetail(L"B3cC2eFeGoIdleTimeoutDisabled", Rd(B, 0x00404154u));
 
     /* GM20B global backing commits and enabled timeslice state. */
     TraceBin(L"B3cC2eGlobalWrites", globalWrites, sizeof(globalWrites));
@@ -3835,7 +3555,7 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
         }
     }
     TraceBin(L"B3cC2eTimesliceWrites", timesliceTrace, sizeof(timesliceTrace));
-    Trace(L"B3cC2eGlobalWriteCount", written);
+    TraceDetail(L"B3cC2eGlobalWriteCount", written);
     for (i = 0; i < sampleCount; ++i) sample[i][2] = Rd(B, sample[i][0]);
     TraceBin(L"B3cC2eGlobalReadback", sample, sampleCount * sizeof(sample[0]));
     for (i = 0; i < sampleCount; ++i) {
@@ -3882,10 +3602,10 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
         ltcActiveCountRaw = Rd(B, 0x0012006Cu);
         ltcMaxCount = ltcCountRaw;
         ltcCountDetected = ltcActiveCountRaw & 0x1Fu;
-        Trace(L"B3cC2eTopNumLtcsRaw", ltcCountRaw);
-        Trace(L"B3cC2eLtcActiveCountRaw", ltcActiveCountRaw);
-        Trace(L"B3cC2eLtcMaxCount", ltcMaxCount);
-        Trace(L"B3cC2eLtcCount", ltcCountDetected);
+        TraceDetail(L"B3cC2eTopNumLtcsRaw", ltcCountRaw);
+        TraceDetail(L"B3cC2eLtcActiveCountRaw", ltcActiveCountRaw);
+        TraceDetail(L"B3cC2eLtcMaxCount", ltcMaxCount);
+        TraceDetail(L"B3cC2eLtcCount", ltcCountDetected);
         for (i = 0; i < fsCount; ++i) {
             if ((fsAddr[i] & 3u) || !B3cIsGrPriAddress(fsAddr[i])) {
                 result = 0xE000008Eu; goto done;
@@ -3901,13 +3621,13 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
                 fsSample[i][2] = Rd(B, fsAddr[i]); fsSampleCount = i + 1u;
             }
         }
-        Trace(L"B3cC2eFsWriteCount", fsWrites);
-        Trace(L"B3cC2eFsSampleCount", fsSampleCount);
+        TraceDetail(L"B3cC2eFsWriteCount", fsWrites);
+        TraceDetail(L"B3cC2eFsSampleCount", fsSampleCount);
         TraceBin(L"B3cC2eFsReadback", fsSample, fsSampleCount * sizeof(fsSample[0]));
         for (i = 0; i < fsSampleCount; ++i) {
             if (fsSample[i][1] != fsSample[i][2]) { result = 0xE000008Eu; goto done; }
         }
-        Trace(L"B3cC2ePreemptionInitPresent", 0u); /* GM20B ops have no init_preemption_state hook here. */
+        TraceDetail(L"B3cC2ePreemptionInitPresent", 0u); /* GM20B ops have no init_preemption_state hook here. */
     }
     /* Step 97: GM20B gr_gm20b_init_fs_state() BE tail. The source writes
      * zrop/crop active-LTC counts, then ORs comp_vdc_4to2_disable into the
@@ -3944,22 +3664,22 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
         }
     }
     TraceBin(L"B3cC2eRopSetupReadback", ropWrites, sizeof(ropWrites));
-    Trace(L"B3cC2eRopSetupWriteCount", ropWriteCount);
+    TraceDetail(L"B3cC2eRopSetupWriteCount", ropWriteCount);
     /* Nouveau gk104 uses FBP count (0x120074) in the low nibble; GM20B
      * nvgpu gr_gm20b_init_fs_state() separately writes active LTC count. */
     beRopConfigured = 1u;
-    Trace(L"B3cC2eLtcCbcSetupSkipped", cbcConfigured ? 0u : 1u);
-    Trace(L"B3cC2eZbcSetupSkipped", zbcConfigured ? 0u : 1u);
-    Trace(L"B3cC2eLtcBasedRopSetupSkipped", (ltcFsConfigured && fbFsConfigured && beRopConfigured) ? 0u : 1u);
+    TraceDetail(L"B3cC2eLtcCbcSetupSkipped", cbcConfigured ? 0u : 1u);
+    TraceDetail(L"B3cC2eZbcSetupSkipped", zbcConfigured ? 0u : 1u);
+    TraceDetail(L"B3cC2eLtcBasedRopSetupSkipped", (ltcFsConfigured && fbFsConfigured && beRopConfigured) ? 0u : 1u);
     if (!B3cC2eWait(B, 35u, 0xFFFFFFFFu, FALSE, waitState, waitHistory, &waitHistoryCount, &waitHistoryDropped, waitHistoryCapacity)) {
         result = 0xE000008Bu; goto done;
     }
     trueIdleAfterSetupOk = B3cC2eWaitNouveauGrIdle(B, 0x53455455u, 0xFFFFFFFFu, trueIdleAfterSetup);
-    Trace(L"B3cC2eNouveauIdleAfterSetupOk", trueIdleAfterSetupOk);
+    TraceDetail(L"B3cC2eNouveauIdleAfterSetupOk", trueIdleAfterSetupOk);
     if (!trueIdleAfterSetupOk) { result = 0xE0000092u; goto done; }
 
     bundle = ReadBinParam(L"FwGrSwBundleInit", 0x20000u, &bundleBytes);
-    Trace(L"B3cC2eBundleBytes", bundleBytes);
+    TraceDetail(L"B3cC2eBundleBytes", bundleBytes);
     if (bundle == NULL || bundleBytes == 0u || (bundleBytes % 8u) != 0u) {
         result = 0xE000008Cu; goto done;
     }
@@ -3970,20 +3690,20 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
         Wr(B, 0x00404154u, feGoIdleTimeoutSaved);
         KeMemoryBarrier();
     }
-    Trace(L"B3cC2eFeGoIdleTimeoutRestoredBeforeBundle", Rd(B, 0x00404154u));
+    TraceDetail(L"B3cC2eFeGoIdleTimeoutRestoredBeforeBundle", Rd(B, 0x00404154u));
     trueIdleAfterRestoreOk = B3cC2eWaitNouveauGrIdle(B, 0x52535452u, 0xFFFFFFFFu, trueIdleAfterRestore);
-    Trace(L"B3cC2eNouveauIdleAfterTimeoutRestoreOk", trueIdleAfterRestoreOk);
+    TraceDetail(L"B3cC2eNouveauIdleAfterTimeoutRestoreOk", trueIdleAfterRestoreOk);
     if (!trueIdleAfterRestoreOk) { result = 0xE0000092u; goto done; }
     /* GM20B has no sw_method_init.bin; Nouveau's method-init pack is empty.
      * Preserve its following idle boundary before gf100_gr_icmd(). */
-    Trace(L"B3cC2eMethodInitCount", 0u);
+    TraceDetail(L"B3cC2eMethodInitCount", 0u);
     trueIdleAfterMethodInitOk = B3cC2eWaitNouveauGrIdle(B, 0x4D544844u, 0xFFFFFFFFu, trueIdleAfterMethodInit);
-    Trace(L"B3cC2eNouveauIdleAfterMethodInitOk", trueIdleAfterMethodInitOk);
+    TraceDetail(L"B3cC2eNouveauIdleAfterMethodInitOk", trueIdleAfterMethodInitOk);
     if (!trueIdleAfterMethodInitOk) { result = 0xE0000092u; goto done; }
     Wr(B, 0x00400208u, 0x80000000u); /* pipe mode override */
-    B3cC2eCapturePreBundle(B);
+    if (g_Verbose) B3cC2eCapturePreBundle(B);
     preBundleFeEsr = Rd(B, 0x00404000u);
-    Trace(L"B3cC2ePreBundleFeEsr", preBundleFeEsr);
+    TraceDetail(L"B3cC2ePreBundleFeEsr", preBundleFeEsr);
     if (preBundleFeEsr & 0x3FFFFFFFu) {
         result = 0xE000008Fu; goto done;
     }
@@ -3991,7 +3711,7 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
     B3cCaptureGpcPriDiag(B, L"B3cC2ePreBundleGpcPri", L"B3cC2ePreBundleGpcPriBadfCount",
                          &preBundleGpcPriBadfCount);
     Step(91);
-    B3cCaptureGrStatusDump(B, L"B3cC2eGrStatusDumpBeforeBundle", grDumpBefore);
+    if (g_Verbose) B3cCaptureGrStatusDump(B, L"B3cC2eGrStatusDumpBeforeBundle", grDumpBefore);
     grDumpBeforeCaptured = 1u;
     bundleBaseline[0] = Rd(B, 0x00404000u);
     bundleBaseline[1] = Rd(B, 0x004041B0u);
@@ -4024,7 +3744,7 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
             bundleEntry0[6] = bundleGrException;
             bundleEntry0[7] = bundleGrStatus;
             TraceBin(L"B3cC2eBundleEntry0State", bundleEntry0, sizeof(bundleEntry0));
-            B3cCaptureGrStatusDump(B, L"B3cC2eGrStatusDumpAfterEntry0", grDumpEntry0);
+            if (g_Verbose) B3cCaptureGrStatusDump(B, L"B3cC2eGrStatusDumpAfterEntry0", grDumpEntry0);
             grDumpEntry0Captured = 1u;
         }
         if (bundleFirstChangeFound == 0u &&
@@ -4042,19 +3762,19 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
             bundleFirstChange[5] = bundleGrIntr;
             bundleFirstChange[6] = bundleGrException;
             bundleFirstChange[7] = bundleGrStatus;
-            TraceBin(L"B3cC2eBundleFirstChangeState", bundleFirstChange,
+            TraceErrorBin(L"B3cC2eBundleFirstChangeState", bundleFirstChange,
                      sizeof(bundleFirstChange));
-            Trace(L"B3cC2eBundleFirstChangeIndex", bundleFirstChangeIndex);
-            Trace(L"B3cC2eBundleFirstChangeMethod", bundleMethodId);
-            Trace(L"B3cC2eBundleFirstChangeData", value);
-            Trace(L"B3cC2eBundleFirstChangeFeEsr", bundleFeEsr);
-            Trace(L"B3cC2eBundleFirstChangeFeInfo", bundleFeInfo);
-            Trace(L"B3cC2eBundleFirstChangeGrIntr", bundleGrIntr);
-            Trace(L"B3cC2eBundleFirstChangeGrException", bundleGrException);
-            Trace(L"B3cC2eBundleFirstChangeGrStatus", bundleGrStatus);
+            TraceDetail(L"B3cC2eBundleFirstChangeIndex", bundleFirstChangeIndex);
+            TraceDetail(L"B3cC2eBundleFirstChangeMethod", bundleMethodId);
+            TraceDetail(L"B3cC2eBundleFirstChangeData", value);
+            TraceDetail(L"B3cC2eBundleFirstChangeFeEsr", bundleFeEsr);
+            TraceDetail(L"B3cC2eBundleFirstChangeFeInfo", bundleFeInfo);
+            TraceDetail(L"B3cC2eBundleFirstChangeGrIntr", bundleGrIntr);
+            TraceDetail(L"B3cC2eBundleFirstChangeGrException", bundleGrException);
+            TraceDetail(L"B3cC2eBundleFirstChangeGrStatus", bundleGrStatus);
+            result = 0xE0000094u;
             B3cCaptureGrStatusDump(B, L"B3cC2eGrStatusDumpAtStop", grDumpStop);
             grDumpStopCaptured = 1u;
-            result = 0xE0000094u;
             goto done;
         }
         if (firstBusyIndex == 0xFFFFFFFFu) {
@@ -4078,37 +3798,37 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
     }
     Step(85);
     Wr(B, 0x00400208u, 0u); /* nvgpu disables pipe mode override first */
-    Trace(L"B3cC2ePipeOverrideAfterBundle", Rd(B, 0x00400208u));
+    TraceDetail(L"B3cC2ePipeOverrideAfterBundle", Rd(B, 0x00400208u));
     if (!B3cC2eWait(B, 60u, bundleCount, FALSE, waitState, waitHistory, &waitHistoryCount, &waitHistoryDropped, waitHistoryCapacity)) {
         if (feGoIdleTimeoutSavedValid) Wr(B, 0x00404154u, feGoIdleTimeoutSaved);
         result = 0xE000008Bu; goto done;
     }
     if (feGoIdleTimeoutSavedValid) Wr(B, 0x00404154u, feGoIdleTimeoutSaved);
-    Trace(L"B3cC2eFeGoIdleTimeoutRestored", Rd(B, 0x00404154u));
+    TraceDetail(L"B3cC2eFeGoIdleTimeoutRestored", Rd(B, 0x00404154u));
     Trace(L"B3cC2eFinalIdlePolls", waitState[2]);
-    Trace(L"B3cC2eFinalGrStatus", waitState[3]);
-    Trace(L"B3cC2eFinalEngineStatus", waitState[4]);
-    Trace(L"B3cC2eBundleEntries", bundleBytes / 8u);
-    Trace(L"B3cC2eBundleLastAddress", bundleMethodId);
-    Trace(L"B3cC2eBundleLastValue", value);
-    Trace(L"B3cC2eBundleFirstChangeFound", bundleFirstChangeFound);
-    Trace(L"B3cC2eBundleFirstChangeIndex", bundleFirstChangeIndex);
+    TraceDetail(L"B3cC2eFinalGrStatus", waitState[3]);
+    TraceDetail(L"B3cC2eFinalEngineStatus", waitState[4]);
+    TraceDetail(L"B3cC2eBundleEntries", bundleBytes / 8u);
+    TraceDetail(L"B3cC2eBundleLastAddress", bundleMethodId);
+    TraceDetail(L"B3cC2eBundleLastValue", value);
+    TraceDetail(L"B3cC2eBundleFirstChangeFound", bundleFirstChangeFound);
+    TraceDetail(L"B3cC2eBundleFirstChangeIndex", bundleFirstChangeIndex);
     TraceBin(L"B3cC2eBundleEntry0State", bundleEntry0, sizeof(bundleEntry0));
-    Trace(L"B3cC2eMethodInitCount", 0u); /* GM20B linux-firmware has no sw_method_init.bin */
+    TraceDetail(L"B3cC2eMethodInitCount", 0u); /* GM20B linux-firmware has no sw_method_init.bin */
     if (!B3cC2eWait(B, 61u, bundleCount, FALSE, waitState, waitHistory, &waitHistoryCount, &waitHistoryDropped, waitHistoryCapacity)) {
         result = 0xE000008Bu; goto done;
     }
     if (!B3cC2eL2Flush(B, l2FlushState)) {
         Trace(L"B3cC2eL2FlushPolls", l2FlushState[0]);
-        Trace(L"B3cC2eL2FlushStatus", l2FlushState[1]);
+        TraceDetail(L"B3cC2eL2FlushStatus", l2FlushState[1]);
         Trace(L"B3cC2eL2InvalidatePolls", l2FlushState[2]);
-        Trace(L"B3cC2eL2InvalidateStatus", l2FlushState[3]);
+        TraceDetail(L"B3cC2eL2InvalidateStatus", l2FlushState[3]);
         result = 0xE0000090u; goto done;
     }
     Trace(L"B3cC2eL2FlushPolls", l2FlushState[0]);
-    Trace(L"B3cC2eL2FlushStatus", l2FlushState[1]);
+    TraceDetail(L"B3cC2eL2FlushStatus", l2FlushState[1]);
     Trace(L"B3cC2eL2InvalidatePolls", l2FlushState[2]);
-    Trace(L"B3cC2eL2InvalidateStatus", l2FlushState[3]);
+    TraceDetail(L"B3cC2eL2InvalidateStatus", l2FlushState[3]);
 
     /* nvgpu flushes/invalidates L2, copies the FECS header from the channel
      * context, sets zcull no-ctxsw and ptr=0, then commits GOLDEN_CTX_VA. */
@@ -4121,34 +3841,34 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
     instWords[132] = (GR_VM_GPU_VA + GR_VM_GLOBAL_OFF) | 4u;
     instWords[133] = 0u;
     KeMemoryBarrier();
-    Trace(L"B3cC2eGoldenCommitVa", GR_VM_GPU_VA + GR_VM_GLOBAL_OFF);
-    Trace(L"B3cC2eWfiPtrDuringSave", instWords[132]);
+    TraceDetail(L"B3cC2eGoldenCommitVa", GR_VM_GPU_VA + GR_VM_GLOBAL_OFF);
+    TraceDetail(L"B3cC2eWfiPtrDuringSave", instWords[132]);
     /* Snapshot immediately before submitting FECS golden-save method 9. */
     preSaveGrStatus = Rd(B, 0x00400700u);
     preSaveGrStatus1 = Rd(B, 0x00400604u);
     preSaveGrStatus2 = Rd(B, 0x00400608u);
     preSaveGrEngineStatus = Rd(B, 0x0040060Cu);
     preSaveFifoEngineStatus = Rd(B, 0x00002640u);
-    Trace(L"B3cC2ePreSaveGrStatus", preSaveGrStatus);
-    Trace(L"B3cC2ePreSaveGrStatus1", preSaveGrStatus1);
-    Trace(L"B3cC2ePreSaveGrStatus2", preSaveGrStatus2);
-    Trace(L"B3cC2ePreSaveGrEngineStatus", preSaveGrEngineStatus);
-    Trace(L"B3cC2ePreSaveFifoEngineStatus", preSaveFifoEngineStatus);
-    Trace(L"B3cC2ePreSaveGrBusyBit", preSaveGrEngineStatus & 1u);
-    Trace(L"B3cC2ePreSaveGrStatusBit0", preSaveGrStatus & 1u);
-    Trace(L"B3cC2ePreSaveGrStatusBit5", (preSaveGrStatus >> 5) & 1u);
-    Trace(L"B3cC2ePreSaveGrStatusBit7", (preSaveGrStatus >> 7) & 1u);
-    Trace(L"B3cC2ePreSaveGrStatusFeGi", (preSaveGrStatus >> 21) & 1u);
-    Trace(L"B3cC2ePreSaveGrActivity0", Rd(B, 0x00400380u));
-    Trace(L"B3cC2ePreSaveGrActivity1", Rd(B, 0x00400384u));
-    Trace(L"B3cC2ePreSaveGrActivity2", Rd(B, 0x00400388u));
-    Trace(L"B3cC2ePreSaveGrActivity3Present", 0u);
-    Trace(L"B3cC2ePreSaveGrActivity4", Rd(B, 0x00400390u));
+    TraceDetail(L"B3cC2ePreSaveGrStatus", preSaveGrStatus);
+    TraceDetail(L"B3cC2ePreSaveGrStatus1", preSaveGrStatus1);
+    TraceDetail(L"B3cC2ePreSaveGrStatus2", preSaveGrStatus2);
+    TraceDetail(L"B3cC2ePreSaveGrEngineStatus", preSaveGrEngineStatus);
+    TraceDetail(L"B3cC2ePreSaveFifoEngineStatus", preSaveFifoEngineStatus);
+    TraceDetail(L"B3cC2ePreSaveGrBusyBit", preSaveGrEngineStatus & 1u);
+    TraceDetail(L"B3cC2ePreSaveGrStatusBit0", preSaveGrStatus & 1u);
+    TraceDetail(L"B3cC2ePreSaveGrStatusBit5", (preSaveGrStatus >> 5) & 1u);
+    TraceDetail(L"B3cC2ePreSaveGrStatusBit7", (preSaveGrStatus >> 7) & 1u);
+    TraceDetail(L"B3cC2ePreSaveGrStatusFeGi", (preSaveGrStatus >> 21) & 1u);
+    TraceDetail(L"B3cC2ePreSaveGrActivity0", Rd(B, 0x00400380u));
+    TraceDetail(L"B3cC2ePreSaveGrActivity1", Rd(B, 0x00400384u));
+    TraceDetail(L"B3cC2ePreSaveGrActivity2", Rd(B, 0x00400388u));
+    TraceDetail(L"B3cC2ePreSaveGrActivity3Present", 0u);
+    TraceDetail(L"B3cC2ePreSaveGrActivity4", Rd(B, 0x00400390u));
     Step(87);
     trueIdlePreSaveOk = B3cC2eWaitNouveauGrIdle(B, 0x53415645u, bundleCount, trueIdlePreSave); /* 'SAVE' */
     if (!trueIdlePreSaveOk) { result = 0xE0000091u; goto done; }
-    Trace(L"B3cC2eSaveMethod", 9u); Trace(L"B3cC2eSaveData", saveData);
-    Trace(L"B3cC2eSaveMailboxClear", 3u);
+    TraceDetail(L"B3cC2eSaveMethod", 9u); TraceDetail(L"B3cC2eSaveData", saveData);
+    TraceDetail(L"B3cC2eSaveMailboxClear", 3u);
     Wr(B, 0x00409840u, 3u);
     Wr(B, 0x00409500u, saveData);
     Wr(B, 0x00409504u, 9u);
@@ -4158,7 +3878,7 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
         if (mailbox & 3u) break;
         Ms(1);
     }
-    Trace(L"B3cC2eSaveMailbox", mailbox); Trace(L"B3cC2eSavePolls", polls);
+    TraceDetail(L"B3cC2eSaveMailbox", mailbox); Trace(L"B3cC2eSavePolls", polls);
     waitState[0] = 70u; waitState[1] = bundleCount; waitState[2] = polls;
     waitState[3] = mailbox; waitState[7] = (polls < 2000u);
     if (polls == 2000u) { result = 0xE000008Bu; goto done; }
@@ -4171,43 +3891,43 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
     goldenSamples[2][0] = 0x20u; goldenSamples[2][1] = *(ULONG *)((PUCHAR)g_GrVm.Arena + GR_VM_GLOBAL_OFF + 0x20u);
     goldenSamples[3][0] = 0xFCu; goldenSamples[3][1] = *(ULONG *)((PUCHAR)g_GrVm.Arena + GR_VM_GLOBAL_OFF + 0xFCu);
     goldenSamples[4][0] = 0x100u; goldenSamples[4][1] = *(ULONG *)((PUCHAR)g_GrVm.Arena + GR_VM_GLOBAL_OFF + 0x100u);
-    Trace(L"B3cC2eGoldenMagic", goldenSamples[3][1]);
+    TraceDetail(L"B3cC2eGoldenMagic", goldenSamples[3][1]);
     TraceBin(L"B3cC2eGoldenSamples", goldenSamples, sizeof(goldenSamples));
     if (goldenSamples[3][1] != 0x600DC0DEu) { result = 0xE000008Cu; goto done; }
 
     instWords[132] = 0u;
     instWords[133] = 0u;
     KeMemoryBarrier();
-    Trace(L"B3cC2eWfiPtrAfterSaveLo", instWords[132]);
-    Trace(L"B3cC2eWfiPtrAfterSaveHi", instWords[133]);
+    TraceDetail(L"B3cC2eWfiPtrAfterSaveLo", instWords[132]);
+    TraceDetail(L"B3cC2eWfiPtrAfterSaveHi", instWords[133]);
     mailbox = Rd(B, 0x00409B00u) & ~0x80000000u;
     Wr(B, 0x00409B00u, mailbox); /* Nouveau clears FECS current-context valid */
     KeMemoryBarrier();
-    Trace(L"B3cC2eFecsCurrentCtxAfterUnbind", Rd(B, 0x00409B00u));
-    Trace(L"B3cC2eFeHwwEsr", Rd(B, 0x00404000u));
-    Trace(L"B3cC2eFecsCpuctl", Rd(B, 0x00409100u));
-    Trace(L"B3cC2eFecsSctl", Rd(B, 0x00409240u));
-    Trace(L"B3cC2eFecsMailbox0", Rd(B, 0x00409040u));
-    Trace(L"B3cC2eFecsMailbox1", Rd(B, 0x00409044u));
-    Trace(L"B3cC2eFecsIrqstat", Rd(B, 0x00409008u));
-    Trace(L"B3cC2eFecsIrqmask", Rd(B, 0x0040900Cu));
+    TraceDetail(L"B3cC2eFecsCurrentCtxAfterUnbind", Rd(B, 0x00409B00u));
+    TraceDetail(L"B3cC2eFeHwwEsr", Rd(B, 0x00404000u));
+    TraceDetail(L"B3cC2eFecsCpuctl", Rd(B, 0x00409100u));
+    TraceDetail(L"B3cC2eFecsSctl", Rd(B, 0x00409240u));
+    TraceDetail(L"B3cC2eFecsMailbox0", Rd(B, 0x00409040u));
+    TraceDetail(L"B3cC2eFecsMailbox1", Rd(B, 0x00409044u));
+    TraceDetail(L"B3cC2eFecsIrqstat", Rd(B, 0x00409008u));
+    TraceDetail(L"B3cC2eFecsIrqmask", Rd(B, 0x0040900Cu));
     fecsTraceIdx = Rd(B, 0x00409148u);
     fecsTraceCount = (fecsTraceIdx >> 16) & 0xFFu;
     if (fecsTraceCount > RTL_NUMBER_OF(fecsPc)) fecsTraceCount = RTL_NUMBER_OF(fecsPc);
-    Trace(L"B3cC2eFecsTraceIdx", fecsTraceIdx);
-    Trace(L"B3cC2eFecsTraceCount", fecsTraceCount);
+    TraceDetail(L"B3cC2eFecsTraceIdx", fecsTraceIdx);
+    TraceDetail(L"B3cC2eFecsTraceCount", fecsTraceCount);
     for (i = 0; i < fecsTraceCount; ++i) {
         Wr(B, 0x00409148u, i);
         fecsPc[i] = Rd(B, 0x0040914Cu);
     }
     if (fecsTraceCount) TraceBin(L"B3cC2eFecsTracePc", fecsPc, fecsTraceCount * sizeof(ULONG));
-    Trace(L"B3cC2eGpccsCpuctl", Rd(B, 0x0041A100u));
-    Trace(L"B3cC2eGpccsSctl", Rd(B, 0x0041A240u));
-    Trace(L"B3cC2eGpccsMailbox0", Rd(B, 0x0041A040u));
-    Trace(L"B3cC2eGpccsMailbox1", Rd(B, 0x0041A044u));
-    Trace(L"B3cC2ePfifoIntr0", Rd(B, 0x2100u));
+    TraceDetail(L"B3cC2eGpccsCpuctl", Rd(B, 0x0041A100u));
+    TraceDetail(L"B3cC2eGpccsSctl", Rd(B, 0x0041A240u));
+    TraceDetail(L"B3cC2eGpccsMailbox0", Rd(B, 0x0041A040u));
+    TraceDetail(L"B3cC2eGpccsMailbox1", Rd(B, 0x0041A044u));
+    TraceDetail(L"B3cC2ePfifoIntr0", Rd(B, 0x2100u));
     faultId = Rd(B, 0x259Cu);
-    Trace(L"B3cC2eFaultId", faultId);
+    TraceDetail(L"B3cC2eFaultId", faultId);
     for (unit = 0; unit < 32u && faultCount < RTL_NUMBER_OF(faultRecs); ++unit) {
         if (!(faultId & (1u << unit))) continue;
         faultRecs[faultCount][0] = unit;
@@ -4217,139 +3937,139 @@ static ULONG B3cCreateGoldenContext(PSWGPU_DEVICE Dev)
         faultRecs[faultCount][4] = Rd(B, 0x280Cu + unit * 0x10u);
         ++faultCount;
     }
-    Trace(L"B3cC2eFaultCount", faultCount);
-    if (faultCount) TraceBin(L"B3cC2eFaultRecords", faultRecs, faultCount * sizeof(faultRecs[0]));
-    Trace(L"B3cC2eMcInt", Rd(Dev->Mc, MC_INTSTATUS));
-    Trace(L"B3cC2eMcErr", Rd(Dev->Mc, MC_ERR_STATUS));
-    Trace(L"B3cC2eMcErrAdr", Rd(Dev->Mc, MC_ERR_ADR));
+    TraceDetail(L"B3cC2eFaultCount", faultCount);
+    if (faultCount) TraceErrorBin(L"B3cC2eFaultRecords", faultRecs, faultCount * sizeof(faultRecs[0]));
+    TraceDetail(L"B3cC2eMcInt", Rd(Dev->Mc, MC_INTSTATUS));
+    TraceDetail(L"B3cC2eMcErr", Rd(Dev->Mc, MC_ERR_STATUS));
+    TraceDetail(L"B3cC2eMcErrAdr", Rd(Dev->Mc, MC_ERR_ADR));
 
 done:
     pmcEnable = Rd(B, NV_PMC_ENABLE);
     if (!grDumpStopCaptured && (pmcEnable & (1u << 12))) {
-        B3cCaptureGrStatusDump(B, L"B3cC2eGrStatusDumpAtStop", grDumpStop);
+        if (g_Verbose || result != 0u) B3cCaptureGrStatusDump(B, L"B3cC2eGrStatusDumpAtStop", grDumpStop);
         grDumpStopCaptured = 1u;
     }
-    Trace(L"B3cC2eGrStatusDumpRegisterCount", B3C_GR_STATUS_DUMP_REGS);
-    Trace(L"B3cC2eGrStatusDumpBeforeCaptured", grDumpBeforeCaptured);
-    Trace(L"B3cC2eGrStatusDumpEntry0Captured", grDumpEntry0Captured);
-    Trace(L"B3cC2eGrStatusDumpStopCaptured", grDumpStopCaptured);
+    TraceDetail(L"B3cC2eGrStatusDumpRegisterCount", B3C_GR_STATUS_DUMP_REGS);
+    TraceDetail(L"B3cC2eGrStatusDumpBeforeCaptured", grDumpBeforeCaptured);
+    TraceDetail(L"B3cC2eGrStatusDumpEntry0Captured", grDumpEntry0Captured);
+    TraceDetail(L"B3cC2eGrStatusDumpStopCaptured", grDumpStopCaptured);
     Trace(L"B3cC2eNouveauIdleAfterSwCtxPolls", trueIdleAfterSwCtx[2]);
-    Trace(L"B3cC2eNouveauIdleAfterSwCtxGrStatus", trueIdleAfterSwCtx[3]);
-    Trace(L"B3cC2eNouveauIdleAfterSwCtxEngineStatus", trueIdleAfterSwCtx[4]);
-    Trace(L"B3cC2eNouveauIdleAfterSwCtxFifoStatus", trueIdleAfterSwCtx[5]);
-    Trace(L"B3cC2eNouveauIdleAfterSwCtxMcEnable", trueIdleAfterSwCtx[6]);
-    Trace(L"B3cC2eNouveauIdleAfterSwCtxOk", trueIdleAfterSwCtxOk);
+    TraceDetail(L"B3cC2eNouveauIdleAfterSwCtxGrStatus", trueIdleAfterSwCtx[3]);
+    TraceDetail(L"B3cC2eNouveauIdleAfterSwCtxEngineStatus", trueIdleAfterSwCtx[4]);
+    TraceDetail(L"B3cC2eNouveauIdleAfterSwCtxFifoStatus", trueIdleAfterSwCtx[5]);
+    TraceDetail(L"B3cC2eNouveauIdleAfterSwCtxMcEnable", trueIdleAfterSwCtx[6]);
+    TraceDetail(L"B3cC2eNouveauIdleAfterSwCtxOk", trueIdleAfterSwCtxOk);
     Trace(L"B3cC2eNouveauIdleAfterSetupPolls", trueIdleAfterSetup[2]);
-    Trace(L"B3cC2eNouveauIdleAfterSetupGrStatus", trueIdleAfterSetup[3]);
-    Trace(L"B3cC2eNouveauIdleAfterSetupEngineStatus", trueIdleAfterSetup[4]);
-    Trace(L"B3cC2eNouveauIdleAfterSetupFifoStatus", trueIdleAfterSetup[5]);
-    Trace(L"B3cC2eNouveauIdleAfterSetupMcEnable", trueIdleAfterSetup[6]);
-    Trace(L"B3cC2eNouveauIdleAfterSetupOk", trueIdleAfterSetupOk);
+    TraceDetail(L"B3cC2eNouveauIdleAfterSetupGrStatus", trueIdleAfterSetup[3]);
+    TraceDetail(L"B3cC2eNouveauIdleAfterSetupEngineStatus", trueIdleAfterSetup[4]);
+    TraceDetail(L"B3cC2eNouveauIdleAfterSetupFifoStatus", trueIdleAfterSetup[5]);
+    TraceDetail(L"B3cC2eNouveauIdleAfterSetupMcEnable", trueIdleAfterSetup[6]);
+    TraceDetail(L"B3cC2eNouveauIdleAfterSetupOk", trueIdleAfterSetupOk);
     Trace(L"B3cC2eNouveauIdleAfterRestorePolls", trueIdleAfterRestore[2]);
-    Trace(L"B3cC2eNouveauIdleAfterRestoreGrStatus", trueIdleAfterRestore[3]);
-    Trace(L"B3cC2eNouveauIdleAfterRestoreEngineStatus", trueIdleAfterRestore[4]);
-    Trace(L"B3cC2eNouveauIdleAfterRestoreFifoStatus", trueIdleAfterRestore[5]);
-    Trace(L"B3cC2eNouveauIdleAfterRestoreMcEnable", trueIdleAfterRestore[6]);
-    Trace(L"B3cC2eNouveauIdleAfterRestoreOk", trueIdleAfterRestoreOk);
+    TraceDetail(L"B3cC2eNouveauIdleAfterRestoreGrStatus", trueIdleAfterRestore[3]);
+    TraceDetail(L"B3cC2eNouveauIdleAfterRestoreEngineStatus", trueIdleAfterRestore[4]);
+    TraceDetail(L"B3cC2eNouveauIdleAfterRestoreFifoStatus", trueIdleAfterRestore[5]);
+    TraceDetail(L"B3cC2eNouveauIdleAfterRestoreMcEnable", trueIdleAfterRestore[6]);
+    TraceDetail(L"B3cC2eNouveauIdleAfterRestoreOk", trueIdleAfterRestoreOk);
     Trace(L"B3cC2eNouveauIdleAfterMethodPolls", trueIdleAfterMethodInit[2]);
-    Trace(L"B3cC2eNouveauIdleAfterMethodGrStatus", trueIdleAfterMethodInit[3]);
-    Trace(L"B3cC2eNouveauIdleAfterMethodEngineStatus", trueIdleAfterMethodInit[4]);
-    Trace(L"B3cC2eNouveauIdleAfterMethodFifoStatus", trueIdleAfterMethodInit[5]);
-    Trace(L"B3cC2eNouveauIdleAfterMethodMcEnable", trueIdleAfterMethodInit[6]);
-    Trace(L"B3cC2eNouveauIdleAfterMethodOk", trueIdleAfterMethodInitOk);
-    Trace(L"B3cC2eFirstBusyBundleIndex", firstBusyIndex);
-    Trace(L"B3cC2eFirstBusyBundleMethod", firstBusyMethod);
-    Trace(L"B3cC2eFirstBusyEngineStatus", firstBusyEngineStatus);
-    Trace(L"B3cC2eFirstBusyGrStatus", firstBusyGrStatus);
-    Trace(L"B3cC2eFirstBusyFifoStatus", firstBusyFifoStatus);
-    Trace(L"B3cC2eTrueIdleGoBundleStage", trueIdleGoBundle[0]);
-    Trace(L"B3cC2eTrueIdleGoBundleIndex", trueIdleGoBundle[1]);
+    TraceDetail(L"B3cC2eNouveauIdleAfterMethodGrStatus", trueIdleAfterMethodInit[3]);
+    TraceDetail(L"B3cC2eNouveauIdleAfterMethodEngineStatus", trueIdleAfterMethodInit[4]);
+    TraceDetail(L"B3cC2eNouveauIdleAfterMethodFifoStatus", trueIdleAfterMethodInit[5]);
+    TraceDetail(L"B3cC2eNouveauIdleAfterMethodMcEnable", trueIdleAfterMethodInit[6]);
+    TraceDetail(L"B3cC2eNouveauIdleAfterMethodOk", trueIdleAfterMethodInitOk);
+    TraceDetail(L"B3cC2eFirstBusyBundleIndex", firstBusyIndex);
+    TraceDetail(L"B3cC2eFirstBusyBundleMethod", firstBusyMethod);
+    TraceDetail(L"B3cC2eFirstBusyEngineStatus", firstBusyEngineStatus);
+    TraceDetail(L"B3cC2eFirstBusyGrStatus", firstBusyGrStatus);
+    TraceDetail(L"B3cC2eFirstBusyFifoStatus", firstBusyFifoStatus);
+    TraceDetail(L"B3cC2eTrueIdleGoBundleStage", trueIdleGoBundle[0]);
+    TraceDetail(L"B3cC2eTrueIdleGoBundleIndex", trueIdleGoBundle[1]);
     Trace(L"B3cC2eTrueIdleGoBundlePolls", trueIdleGoBundle[2]);
-    Trace(L"B3cC2eTrueIdleGoBundleGrStatus", trueIdleGoBundle[3]);
-    Trace(L"B3cC2eTrueIdleGoBundleEngineStatus", trueIdleGoBundle[4]);
-    Trace(L"B3cC2eTrueIdleGoBundleFifoStatus", trueIdleGoBundle[5]);
-    Trace(L"B3cC2eTrueIdleGoBundleMcEnable", trueIdleGoBundle[6]);
-    Trace(L"B3cC2eTrueIdleGoBundleOk", trueIdleGoBundleOk);
-    Trace(L"B3cC2eTrueIdlePreSaveStage", trueIdlePreSave[0]);
-    Trace(L"B3cC2eTrueIdlePreSaveBundleIndex", trueIdlePreSave[1]);
+    TraceDetail(L"B3cC2eTrueIdleGoBundleGrStatus", trueIdleGoBundle[3]);
+    TraceDetail(L"B3cC2eTrueIdleGoBundleEngineStatus", trueIdleGoBundle[4]);
+    TraceDetail(L"B3cC2eTrueIdleGoBundleFifoStatus", trueIdleGoBundle[5]);
+    TraceDetail(L"B3cC2eTrueIdleGoBundleMcEnable", trueIdleGoBundle[6]);
+    TraceDetail(L"B3cC2eTrueIdleGoBundleOk", trueIdleGoBundleOk);
+    TraceDetail(L"B3cC2eTrueIdlePreSaveStage", trueIdlePreSave[0]);
+    TraceDetail(L"B3cC2eTrueIdlePreSaveBundleIndex", trueIdlePreSave[1]);
     Trace(L"B3cC2eTrueIdlePreSavePolls", trueIdlePreSave[2]);
-    Trace(L"B3cC2eTrueIdlePreSaveGrStatus", trueIdlePreSave[3]);
-    Trace(L"B3cC2eTrueIdlePreSaveEngineStatus", trueIdlePreSave[4]);
-    Trace(L"B3cC2eTrueIdlePreSaveFifoStatus", trueIdlePreSave[5]);
-    Trace(L"B3cC2eTrueIdlePreSaveMcEnable", trueIdlePreSave[6]);
-    Trace(L"B3cC2eTrueIdlePreSaveOk", trueIdlePreSaveOk);
-    Trace(L"B3cC2eWaitHistoryCount", waitHistoryCount);
-    Trace(L"B3cC2eWaitHistoryDropped", waitHistoryDropped);
-    Trace(L"B3cC2eWaitHistoryCapacity", waitHistory != NULL ? waitHistoryCapacity : 0u);
+    TraceDetail(L"B3cC2eTrueIdlePreSaveGrStatus", trueIdlePreSave[3]);
+    TraceDetail(L"B3cC2eTrueIdlePreSaveEngineStatus", trueIdlePreSave[4]);
+    TraceDetail(L"B3cC2eTrueIdlePreSaveFifoStatus", trueIdlePreSave[5]);
+    TraceDetail(L"B3cC2eTrueIdlePreSaveMcEnable", trueIdlePreSave[6]);
+    TraceDetail(L"B3cC2eTrueIdlePreSaveOk", trueIdlePreSaveOk);
+    TraceDetail(L"B3cC2eWaitHistoryCount", waitHistoryCount);
+    TraceDetail(L"B3cC2eWaitHistoryDropped", waitHistoryDropped);
+    TraceDetail(L"B3cC2eWaitHistoryCapacity", waitHistory != NULL ? waitHistoryCapacity : 0u);
     if (waitHistory != NULL && waitHistoryCount != 0u)
         TraceBin(L"B3cC2eWaitHistory", waitHistory,
             waitHistoryCount * 10u * sizeof(ULONG));
-    Trace(L"B3cC2eWaitStage", waitState[0]);
-    Trace(L"B3cC2eWaitBundleIndex", waitState[1]);
+    TraceDetail(L"B3cC2eWaitStage", waitState[0]);
+    TraceDetail(L"B3cC2eWaitBundleIndex", waitState[1]);
     Trace(L"B3cC2eWaitPolls", waitState[2]);
-    Trace(L"B3cC2eWaitGrStatus", waitState[3]);
-    Trace(L"B3cC2eWaitEngineStatus", waitState[4]);
-    Trace(L"B3cC2eWaitFifoEngineStatus", waitState[5]);
-    Trace(L"B3cC2eWaitIsFe", waitState[6]);
-    Trace(L"B3cC2eWaitSucceeded", waitState[7]);
-    Trace(L"B3cC2eWaitIdleBranch", waitState[8]);
-    Trace(L"B3cC2eWaitFifoCtxStatus", waitState[9]);
-    Trace(L"B3cC2eWaitCtxswActive", waitState[10]);
-    Trace(L"B3cC2eWaitGrBusy", waitState[11]);
-    Trace(L"B3cC2eTopNumLtcsRaw", ltcCountRaw);
-    Trace(L"B3cC2eLtcActiveCountRaw", ltcActiveCountRaw);
-    Trace(L"B3cC2eLtcMaxCount", ltcMaxCount);
-    Trace(L"B3cC2eLtcCount", ltcCountDetected);
-    Trace(L"B3cC2eLtcCbcParam", ltcParamRaw);
-    Trace(L"B3cC2eLtcSlicesPerLtc", ltcSlicesPerLtc);
-    Trace(L"B3cC2eLtcCacheLineBytes", ltcCacheLineBytes);
-    Trace(L"B3cC2eLtcComptagsPerCacheline", ltcTagsPerCacheLine);
-    Trace(L"B3cC2eLtcFsConfigured", ltcFsConfigured);
-    Trace(L"B3cC2eLtcFsWriteCount", ltcFsWriteCount);
+    TraceDetail(L"B3cC2eWaitGrStatus", waitState[3]);
+    TraceDetail(L"B3cC2eWaitEngineStatus", waitState[4]);
+    TraceDetail(L"B3cC2eWaitFifoEngineStatus", waitState[5]);
+    TraceDetail(L"B3cC2eWaitIsFe", waitState[6]);
+    TraceDetail(L"B3cC2eWaitSucceeded", waitState[7]);
+    TraceDetail(L"B3cC2eWaitIdleBranch", waitState[8]);
+    TraceDetail(L"B3cC2eWaitFifoCtxStatus", waitState[9]);
+    TraceDetail(L"B3cC2eWaitCtxswActive", waitState[10]);
+    TraceDetail(L"B3cC2eWaitGrBusy", waitState[11]);
+    TraceDetail(L"B3cC2eTopNumLtcsRaw", ltcCountRaw);
+    TraceDetail(L"B3cC2eLtcActiveCountRaw", ltcActiveCountRaw);
+    TraceDetail(L"B3cC2eLtcMaxCount", ltcMaxCount);
+    TraceDetail(L"B3cC2eLtcCount", ltcCountDetected);
+    TraceDetail(L"B3cC2eLtcCbcParam", ltcParamRaw);
+    TraceDetail(L"B3cC2eLtcSlicesPerLtc", ltcSlicesPerLtc);
+    TraceDetail(L"B3cC2eLtcCacheLineBytes", ltcCacheLineBytes);
+    TraceDetail(L"B3cC2eLtcComptagsPerCacheline", ltcTagsPerCacheLine);
+    TraceDetail(L"B3cC2eLtcFsConfigured", ltcFsConfigured);
+    TraceDetail(L"B3cC2eLtcFsWriteCount", ltcFsWriteCount);
     TraceBin(L"B3cC2eLtcFsReadback", ltcFsWrites, sizeof(ltcFsWrites));
-    Trace(L"B3cC2eFbFsConfigured", fbFsConfigured);
-    Trace(L"B3cC2eFbFsWriteCount", fbFsWriteCount);
+    TraceDetail(L"B3cC2eFbFsConfigured", fbFsConfigured);
+    TraceDetail(L"B3cC2eFbFsWriteCount", fbFsWriteCount);
     TraceBin(L"B3cC2eFbFsReadback", fbFsWrites, sizeof(fbFsWrites));
-    Trace(L"B3cC2eZbcConfigured", zbcConfigured);
-    Trace(L"B3cC2eZbcWriteCount", zbcWriteCount);
+    TraceDetail(L"B3cC2eZbcConfigured", zbcConfigured);
+    TraceDetail(L"B3cC2eZbcWriteCount", zbcWriteCount);
     TraceBin(L"B3cC2eZbcReadback", zbcWrites, sizeof(zbcWrites));
-    Trace(L"B3cC2eZbcPmuSyncSkipped", 1u);
-    Trace(L"B3cC2eCbcConfigured", cbcConfigured);
-    Trace(L"B3cC2eCbcNoComptag", cbcNoComptag);
-    Trace(L"B3cC2eCbcBackingBytes", 0u);
-    Trace(L"B3cC2eCbcWriteCount", cbcWriteCount);
+    TraceDetail(L"B3cC2eZbcPmuSyncSkipped", 1u);
+    TraceDetail(L"B3cC2eCbcConfigured", cbcConfigured);
+    TraceDetail(L"B3cC2eCbcNoComptag", cbcNoComptag);
+    TraceDetail(L"B3cC2eCbcBackingBytes", 0u);
+    TraceDetail(L"B3cC2eCbcWriteCount", cbcWriteCount);
     TraceBin(L"B3cC2eCbcReadback", cbcWrites, sizeof(cbcWrites));
-    Trace(L"B3cC2eRopSetupWriteCount", ropWriteCount);
+    TraceDetail(L"B3cC2eRopSetupWriteCount", ropWriteCount);
     TraceBin(L"B3cC2eRopSetupReadback", ropWrites, sizeof(ropWrites));
-    Trace(L"B3cC2eEarlyZcullWriteCount", earlyZcullWriteCount);
+    TraceDetail(L"B3cC2eEarlyZcullWriteCount", earlyZcullWriteCount);
     TraceBin(L"B3cC2eEarlyZcullReadback", earlyZcullWrites, sizeof(earlyZcullWrites));
-    Trace(L"B3cC2eFbpCountRaw", fbpCountRaw);
-    Trace(L"B3cC2eFbpCount", fbpCount);
-    Trace(L"B3cC2eNouveauRopWriteCount", nouveauRopWriteCount);
+    TraceDetail(L"B3cC2eFbpCountRaw", fbpCountRaw);
+    TraceDetail(L"B3cC2eFbpCount", fbpCount);
+    TraceDetail(L"B3cC2eNouveauRopWriteCount", nouveauRopWriteCount);
     TraceBin(L"B3cC2eNouveauRopReadback", nouveauRopWrites, sizeof(nouveauRopWrites));
     TraceBin(L"B3cC2eFifoAccess", fifoCtlTrace, sizeof(fifoCtlTrace));
-    Trace(L"B3cC2eLtcCbcSetupSkipped", cbcConfigured ? 0u : 1u);
-    Trace(L"B3cC2eZbcSetupSkipped", zbcConfigured ? 0u : 1u);
-    Trace(L"B3cC2eLtcBasedRopSetupSkipped", (ltcFsConfigured && fbFsConfigured && beRopConfigured) ? 0u : 1u);
+    TraceDetail(L"B3cC2eLtcCbcSetupSkipped", cbcConfigured ? 0u : 1u);
+    TraceDetail(L"B3cC2eZbcSetupSkipped", zbcConfigured ? 0u : 1u);
+    TraceDetail(L"B3cC2eLtcBasedRopSetupSkipped", (ltcFsConfigured && fbFsConfigured && beRopConfigured) ? 0u : 1u);
     TraceBin(L"B3cC2eBundleBaseline", bundleBaseline, sizeof(bundleBaseline));
-    Trace(L"B3cC2eBundleFirstChangeFound", bundleFirstChangeFound);
-    Trace(L"B3cC2eBundleFirstChangeIndex", bundleFirstChangeIndex);
+    TraceDetail(L"B3cC2eBundleFirstChangeFound", bundleFirstChangeFound);
+    TraceDetail(L"B3cC2eBundleFirstChangeIndex", bundleFirstChangeIndex);
     TraceBin(L"B3cC2eBundleEntry0State", bundleEntry0, sizeof(bundleEntry0));
     if (bundleFirstChangeFound)
-        TraceBin(L"B3cC2eBundleFirstChangeState", bundleFirstChange,
+        TraceErrorBin(L"B3cC2eBundleFirstChangeState", bundleFirstChange,
                  sizeof(bundleFirstChange));
     B3cPrivRingTraceWriteLog(L"B3cC2ePrivWriteErrorCount",
         L"B3cC2ePrivWriteErrorDropped", L"B3cC2ePrivAckTimeouts",
         L"B3cC2ePrivWriteErrors");
     pmcEnable = Rd(B, NV_PMC_ENABLE);
-    Trace(L"B3cC2ePmcEnableAtDiagnostics", pmcEnable);
+    TraceDetail(L"B3cC2ePmcEnableAtDiagnostics", pmcEnable);
     if (pmcEnable & (1u << 12)) {
-        B3cC2eCaptureDiagnostics(Dev);
+        if (g_Verbose || result != 0u) B3cC2eCaptureDiagnostics(Dev);
         gr5044b0AtExit = Rd(B, 0x005044B0u);
-        Trace(L"B3cC2eGr5044B0AtExit", gr5044b0AtExit);
-        Trace(L"B3cC2eGr5044B0Bit27AtExit", (gr5044b0AtExit >> 27) & 1u);
+        TraceDetail(L"B3cC2eGr5044B0AtExit", gr5044b0AtExit);
+        TraceDetail(L"B3cC2eGr5044B0Bit27AtExit", (gr5044b0AtExit >> 27) & 1u);
     }
-    Trace(L"B3cC2eMcUnk260AtExit", Rd(B, 0x00000260u));
+    TraceDetail(L"B3cC2eMcUnk260AtExit", Rd(B, 0x00000260u));
     if (bundle != NULL) ExFreePoolWithTag(bundle, SWGPU_TAG);
     if (waitHistory != NULL) ExFreePoolWithTag(waitHistory, SWGPU_TAG);
     Wr(B, 0x00400208u, 0u);
@@ -4382,16 +4102,16 @@ static ULONG B3cInitFifoD1(PSWGPU_DEVICE Dev)
     Step(104);
     B3cPrivRingResetWriteLog();
     grEnabled = Rd(B, NV_PMC_ENABLE);
-    Trace(L"B3cD1PmcEnable", grEnabled);
+    TraceDetail(L"B3cD1PmcEnable", grEnabled);
 
     topNumGpcs = Rd(B, 0x0022430u);
     topTpcPerGpc = Rd(B, 0x0022434u);
     topNumFbps = Rd(B, 0x0022438u);
     topNumLtcs = Rd(B, 0x0022454u);
-    Trace(L"B3cD1TopNumGpcs", topNumGpcs);
-    Trace(L"B3cD1TopTpcPerGpc", topTpcPerGpc);
-    Trace(L"B3cD1TopNumFbps", topNumFbps);
-    Trace(L"B3cD1TopNumLtcs", topNumLtcs);
+    TraceDetail(L"B3cD1TopNumGpcs", topNumGpcs);
+    TraceDetail(L"B3cD1TopTpcPerGpc", topTpcPerGpc);
+    TraceDetail(L"B3cD1TopNumFbps", topNumFbps);
+    TraceDetail(L"B3cD1TopNumLtcs", topNumLtcs);
     for (i = 0; i < topCount; ++i) {
         topInfo[i] = Rd(B, 0x0022700u + i * 4u);
         if ((topInfo[i] & 0x80000000u) == 0u && i != 0u) {
@@ -4400,7 +4120,7 @@ static ULONG B3cInitFifoD1(PSWGPU_DEVICE Dev)
         }
     }
     topCount = i;
-    Trace(L"B3cD1TopDeviceInfoWords", topCount);
+    TraceDetail(L"B3cD1TopDeviceInfoWords", topCount);
     if (topCount != 0u) TraceBin(L"B3cD1TopDeviceInfo", topInfo, topCount * sizeof(ULONG));
 
     mcPbEnableBefore = Rd(B, 0x00000204u);
@@ -4411,14 +4131,14 @@ static ULONG B3cInitFifoD1(PSWGPU_DEVICE Dev)
     pbdmaStatusBefore = Rd(B, 0x00040100u);
     pbdmaIntrBefore = Rd(B, 0x00040108u);
     pbdmaIntrEnBefore = Rd(B, 0x0004010Cu);
-    Trace(L"B3cD1McEnablePbBefore", mcPbEnableBefore);
-    Trace(L"B3cD1FifoIntr0Before", fifoIntrBefore);
-    Trace(L"B3cD1FifoIntrEn0Before", fifoIntrEnBefore);
-    Trace(L"B3cD1FifoEngineStatus0Before", fifoEngineStatusBefore);
-    Trace(L"B3cD1FifoPbdmaStatus0Before", fifoPbdmaStatusBefore);
-    Trace(L"B3cD1PbdmaStatus0Before", pbdmaStatusBefore);
-    Trace(L"B3cD1PbdmaIntr0Before", pbdmaIntrBefore);
-    Trace(L"B3cD1PbdmaIntrEn0Before", pbdmaIntrEnBefore);
+    TraceDetail(L"B3cD1McEnablePbBefore", mcPbEnableBefore);
+    TraceDetail(L"B3cD1FifoIntr0Before", fifoIntrBefore);
+    TraceDetail(L"B3cD1FifoIntrEn0Before", fifoIntrEnBefore);
+    TraceDetail(L"B3cD1FifoEngineStatus0Before", fifoEngineStatusBefore);
+    TraceDetail(L"B3cD1FifoPbdmaStatus0Before", fifoPbdmaStatusBefore);
+    TraceDetail(L"B3cD1PbdmaStatus0Before", pbdmaStatusBefore);
+    TraceDetail(L"B3cD1PbdmaIntr0Before", pbdmaIntrBefore);
+    TraceDetail(L"B3cD1PbdmaIntrEn0Before", pbdmaIntrEnBefore);
 
     if (!(grEnabled & (1u << 12))) { result = 0xE000009Fu; goto done; }
     if (!B3cPrivRingDrainBeforeWrites(B)) { result = 0xE0000095u; goto done; }
@@ -4472,14 +4192,14 @@ static ULONG B3cInitFifoD1(PSWGPU_DEVICE Dev)
     KeMemoryBarrier();
 
 done:
-    Trace(L"B3cD1McEnablePbAfter", mcPbEnableAfter);
-    Trace(L"B3cD1FbTimeoutBefore", fbTimeoutBefore);
-    Trace(L"B3cD1FbTimeoutExpected", fbTimeoutExpected);
-    Trace(L"B3cD1FbTimeoutAfter", fbTimeoutAfter);
-    Trace(L"B3cD1PbdmaTimeoutBefore", pbdmaTimeoutBefore);
-    Trace(L"B3cD1PbdmaTimeoutAfter", pbdmaTimeoutAfter);
-    Trace(L"B3cD1FifoIntr0AfterClear", fifoIntrAfterClear);
-    Trace(L"B3cD1FifoIntrEn0After", fifoIntrEnAfter);
+    TraceDetail(L"B3cD1McEnablePbAfter", mcPbEnableAfter);
+    TraceDetail(L"B3cD1FbTimeoutBefore", fbTimeoutBefore);
+    TraceDetail(L"B3cD1FbTimeoutExpected", fbTimeoutExpected);
+    TraceDetail(L"B3cD1FbTimeoutAfter", fbTimeoutAfter);
+    TraceDetail(L"B3cD1PbdmaTimeoutBefore", pbdmaTimeoutBefore);
+    TraceDetail(L"B3cD1PbdmaTimeoutAfter", pbdmaTimeoutAfter);
+    TraceDetail(L"B3cD1FifoIntr0AfterClear", fifoIntrAfterClear);
+    TraceDetail(L"B3cD1FifoIntrEn0After", fifoIntrEnAfter);
     TraceBin(L"B3cD1Writes", writes, sizeof(writes));
     Trace(L"B3cD1Result", result);
     B3cPrivRingTraceWriteLog(L"B3cD1PrivWriteErrorCount",
@@ -4749,7 +4469,7 @@ static ULONG B3cPrepareD4ChannelContext(PSWGPU_DEVICE Dev)
     {
         ULONG postCopyL2[4] = { 0 };
         ULONG postCopyOk = B3cC2eL2Flush(Dev->Bar0, postCopyL2) ? 1u : 0u;
-        Trace(L"B3cD4PostCopyL2Ok", postCopyOk);
+        TraceDetail(L"B3cD4PostCopyL2Ok", postCopyOk);
         Trace(L"B3cD4PostCopyL2InvalidatePolls", postCopyL2[2]);
         if (!postCopyOk) result = 0xE00000A3u;
     }
@@ -4798,27 +4518,27 @@ static ULONG B3cPrepareD4ChannelContext(PSWGPU_DEVICE Dev)
     }
 
 done:
-    Trace(L"B3cD4CtxImageBytes", g_GrVm.GoldenBytes);
-    Trace(L"B3cD4CtxPmcEnable", pmcEnable);
-    Trace(L"B3cD4CtxCopyMatch", copyMatch);
-    Trace(L"B3cD4PatchVa", GR_VM_GPU_VA + GR_VM_PATCH_OFF);
-    Trace(L"B3cD4PatchBytes", GR_VM_PATCH_BYTES);
-    Trace(L"B3cD4PatchZeroOk", patchZeroOk);
+    TraceDetail(L"B3cD4CtxImageBytes", g_GrVm.GoldenBytes);
+    TraceDetail(L"B3cD4CtxPmcEnable", pmcEnable);
+    TraceDetail(L"B3cD4CtxCopyMatch", copyMatch);
+    TraceDetail(L"B3cD4PatchVa", GR_VM_GPU_VA + GR_VM_PATCH_OFF);
+    TraceDetail(L"B3cD4PatchBytes", GR_VM_PATCH_BYTES);
+    TraceDetail(L"B3cD4PatchZeroOk", patchZeroOk);
     Trace(L"B3cD4L2FlushPolls", l2FlushPolls);
     Trace(L"B3cD4L2InvalidatePolls", l2InvalidatePolls);
-    Trace(L"B3cD4L2Status", l2Status);
-    Trace(L"B3cD4HeaderMismatch", mismatch);
-    Trace(L"B3cD4WatchdogMethodData", 0x7FFFFFFFu);
-    Trace(L"B3cD4WatchdogMethodPush", 0x00000021u);
-    Trace(L"B3cD4WatchdogMailboxAfter", watchdogMailboxAfter);
-    Trace(L"B3cD4StartCtxswMethodData", 0xFFFFFFFFu);
-    Trace(L"B3cD4StartCtxswMethodPush", 0x00000039u);
-    Trace(L"B3cD4StartCtxswMailboxAfter", ctxswMailboxAfter);
+    TraceDetail(L"B3cD4L2Status", l2Status);
+    TraceDetail(L"B3cD4HeaderMismatch", mismatch);
+    TraceDetail(L"B3cD4WatchdogMethodData", 0x7FFFFFFFu);
+    TraceDetail(L"B3cD4WatchdogMethodPush", 0x00000021u);
+    TraceDetail(L"B3cD4WatchdogMailboxAfter", watchdogMailboxAfter);
+    TraceDetail(L"B3cD4StartCtxswMethodData", 0xFFFFFFFFu);
+    TraceDetail(L"B3cD4StartCtxswMethodPush", 0x00000039u);
+    TraceDetail(L"B3cD4StartCtxswMailboxAfter", ctxswMailboxAfter);
     Trace(L"B3cD4StartCtxswPolls", ctxswPolls);
-    Trace(L"B3cD4StartCtxswOk", ctxswStartOk);
+    TraceDetail(L"B3cD4StartCtxswOk", ctxswStartOk);
     if (g_GrVm.Arena != NULL) {
         TraceBin(L"B3cD4CtxHdr", (PUCHAR)g_GrVm.Arena + GR_VM_CTX_OFF, 0x100u);
-        Trace(L"B3cD4GoldenMagic", *(volatile ULONG *)((PUCHAR)g_GrVm.Arena + GR_VM_CTX_OFF + 0xFCu));
+        TraceDetail(L"B3cD4GoldenMagic", *(volatile ULONG *)((PUCHAR)g_GrVm.Arena + GR_VM_CTX_OFF + 0xFCu));
     }
     TraceBin(L"B3cD4CtxPrepWrites", writes, sizeof(writes));
     B3cPrivRingTraceWriteLog(L"B3cD4CtxPrepPrivWriteErrorCount",
@@ -4850,11 +4570,11 @@ static ULONG B3cRunD3(PSWGPU_DEVICE Dev, PULONG userd, PULONG gpfifo,
     ULONG i;
 
     Step(106);
-    Trace(L"B3cD3Bar1Phys", Dev->Bar1Phys.LowPart);
-    Trace(L"B3cD3Bar1PhysHi", (ULONG)Dev->Bar1Phys.HighPart);
-    Trace(L"B3cD3Bar1Len", Dev->Bar1Len);
-    Trace(L"B3cD3Bar1MapLen", Dev->Bar1MapLen);
-    Trace(L"B3cD3Bar1Mapped", Dev->Bar1Cpu != NULL ? 1u : 0u);
+    TraceDetail(L"B3cD3Bar1Phys", Dev->Bar1Phys.LowPart);
+    TraceDetail(L"B3cD3Bar1PhysHi", (ULONG)Dev->Bar1Phys.HighPart);
+    TraceDetail(L"B3cD3Bar1Len", Dev->Bar1Len);
+    TraceDetail(L"B3cD3Bar1MapLen", Dev->Bar1MapLen);
+    TraceDetail(L"B3cD3Bar1Mapped", Dev->Bar1Cpu != NULL ? 1u : 0u);
     if (userd == NULL || gpfifo == NULL || pushbuffer == NULL ||
         pushbufferGpuVa == 0u || (pushbufferGpuVa & 3u) != 0u ||
         semGpuVa + 16u > (ULONGLONG)GR_VM_GPU_VA + GR_VM_ARENA_SIZE ||
@@ -4881,19 +4601,19 @@ static ULONG B3cRunD3(PSWGPU_DEVICE Dev, PULONG userd, PULONG gpfifo,
     userdGpPutBefore = userd[0x8Cu >> 2];
     KeMemoryBarrier();
     fifoMmuFaultBefore = Rd(B, 0x00002A30u);
-    Trace(L"B3cD3FifoMmuFaultStatusBefore", fifoMmuFaultBefore);
-    Trace(L"B3cD3Bar1GpPutOffset", BAR1_D3_LOW_VA + 0x8Cu);
-    Trace(L"B3cD3Bar1GpPutValue", 1u);
+    TraceDetail(L"B3cD3FifoMmuFaultStatusBefore", fifoMmuFaultBefore);
+    TraceDetail(L"B3cD3Bar1GpPutOffset", BAR1_D3_LOW_VA + 0x8Cu);
+    TraceDetail(L"B3cD3Bar1GpPutValue", 1u);
     *bar1GpPut = 1u; /* nvgpu gk20a_bar1_writel(USERD GP_PUT) is the host doorbell. */
     KeMemoryBarrier();
     bar1GpPutReadback = *bar1GpPut;
     backingGpPutAfterBar1 = userd[0x8Cu >> 2];
     fifoMmuFaultAfter = Rd(B, 0x00002A30u);
     fifoIntrAfterBar1 = Rd(B, 0x00002100u);
-    Trace(L"B3cD3Bar1GpPutReadback", bar1GpPutReadback);
-    Trace(L"B3cD3BackingGpPutAfterBar1Write", backingGpPutAfterBar1);
-    Trace(L"B3cD3FifoMmuFaultStatusAfterBar1Write", fifoMmuFaultAfter);
-    Trace(L"B3cD3FifoIntr0AfterBar1Write", fifoIntrAfterBar1);
+    TraceDetail(L"B3cD3Bar1GpPutReadback", bar1GpPutReadback);
+    TraceDetail(L"B3cD3BackingGpPutAfterBar1Write", backingGpPutAfterBar1);
+    TraceDetail(L"B3cD3FifoMmuFaultStatusAfterBar1Write", fifoMmuFaultAfter);
+    TraceDetail(L"B3cD3FifoIntr0AfterBar1Write", fifoIntrAfterBar1);
     if (bar1GpPutReadback != 1u ||
         (bar1GpPutReadback & 0xFFF00000u) == 0xBAD00000u ||
         /* Claude 0.4.71: 0.4.70 hw read BAR1 back as 1 while the sysmem
@@ -4926,7 +4646,7 @@ static ULONG B3cRunD3(PSWGPU_DEVICE Dev, PULONG userd, PULONG gpfifo,
     pbGet = Rd(B, 0x00040018u);
     pbPut = Rd(B, 0x0004005Cu);
     semValue = semSlot[0];
-    Trace(L"B3cD3SemValueBeforeL2Flush", semValue);
+    TraceDetail(L"B3cD3SemValueBeforeL2Flush", semValue);
     /* Claude 0.4.73: 0.4.72 hw consumed the entry (GP_GET 1, PB GET == PUT
      * after 7 dwords) but the CPU still read 0: the host semaphore release
      * is held in GPU L2 (sysmem PTE not volatile). Flush/invalidate L2 the
@@ -4935,18 +4655,18 @@ static ULONG B3cRunD3(PSWGPU_DEVICE Dev, PULONG userd, PULONG gpfifo,
         ULONG l2State[4] = { 0 };
         ULONG l2Ok = B3cC2eL2Flush(B, l2State) ? 1u : 0u;
         KeMemoryBarrier();
-        Trace(L"B3cD3L2FlushOk", l2Ok);
+        TraceDetail(L"B3cD3L2FlushOk", l2Ok);
         Trace(L"B3cD3L2FlushPolls", l2State[0]);
-        Trace(L"B3cD3L2FlushStatus", l2State[1]);
+        TraceDetail(L"B3cD3L2FlushStatus", l2State[1]);
         Trace(L"B3cD3L2InvalidatePolls", l2State[2]);
-        Trace(L"B3cD3L2InvalidateStatus", l2State[3]);
+        TraceDetail(L"B3cD3L2InvalidateStatus", l2State[3]);
     }
     semValue = semSlot[0];
-    Trace(L"B3cD3SemWord1", semSlot[1]);
-    Trace(L"B3cD3SemWord2", semSlot[2]);
-    Trace(L"B3cD3SemWord3", semSlot[3]);
+    TraceDetail(L"B3cD3SemWord1", semSlot[1]);
+    TraceDetail(L"B3cD3SemWord2", semSlot[2]);
+    TraceDetail(L"B3cD3SemWord3", semSlot[3]);
     refCount = *(volatile ULONG *)(Dev->Bar1Cpu + BAR1_D3_LOW_VA + 0x48u); /* Claude 0.4.73: USERD ref via BAR1 */
-    Trace(L"B3cD3RefCountBacking", userd[0x48u >> 2]);
+    TraceDetail(L"B3cD3RefCountBacking", userd[0x48u >> 2]);
     pbIntr0After = Rd(B, 0x00040108u);
     pbIntr1 = Rd(B, 0x00040148u);
     method0 = Rd(B, 0x000400C0u);
@@ -4958,33 +4678,33 @@ static ULONG B3cRunD3(PSWGPU_DEVICE Dev, PULONG userd, PULONG gpfifo,
 
 done:
     Trace(L"B3cD3GpGetPolls", polls);
-    Trace(L"B3cD3UserdGpGet", userdGpGet);
-    Trace(L"B3cD3PbGpGet", pbGpGet);
-    Trace(L"B3cD3PbGet", pbGet);
-    Trace(L"B3cD3PbPut", pbPut);
-    Trace(L"B3cD3SemValue", semValue);
-    Trace(L"B3cD3RefCount", refCount);
-    Trace(L"B3cD3PbIntr0Before", pbIntr0Before);
-    Trace(L"B3cD3PbIntr0After", pbIntr0After);
-    Trace(L"B3cD3PbIntr1", pbIntr1);
-    Trace(L"B3cD3PbMethod0", method0);
-    Trace(L"B3cD3PbData0", data0);
-    Trace(L"B3cD3FifoIntr0", fifoIntr0);
-    Trace(L"B3cD3PbdmaStatus", pbdmaStatus);
-    Trace(L"B3cD3PushbufferGpuVa", (ULONG)pushbufferGpuVa);
-    Trace(L"B3cD3SemGpuVa", (ULONG)semGpuVa);
+    TraceDetail(L"B3cD3UserdGpGet", userdGpGet);
+    TraceDetail(L"B3cD3PbGpGet", pbGpGet);
+    TraceDetail(L"B3cD3PbGet", pbGet);
+    TraceDetail(L"B3cD3PbPut", pbPut);
+    TraceDetail(L"B3cD3SemValue", semValue);
+    TraceDetail(L"B3cD3RefCount", refCount);
+    TraceDetail(L"B3cD3PbIntr0Before", pbIntr0Before);
+    TraceDetail(L"B3cD3PbIntr0After", pbIntr0After);
+    TraceDetail(L"B3cD3PbIntr1", pbIntr1);
+    TraceDetail(L"B3cD3PbMethod0", method0);
+    TraceDetail(L"B3cD3PbData0", data0);
+    TraceDetail(L"B3cD3FifoIntr0", fifoIntr0);
+    TraceDetail(L"B3cD3PbdmaStatus", pbdmaStatus);
+    TraceDetail(L"B3cD3PushbufferGpuVa", (ULONG)pushbufferGpuVa);
+    TraceDetail(L"B3cD3SemGpuVa", (ULONG)semGpuVa);
     TraceBin(L"B3cD3PushbufferWords", pushWords, sizeof(pushWords));
     TraceBin(L"B3cD3GpfifoEntry", gpWords, sizeof(gpWords));
-    Trace(L"B3cD3UserdGpPutBefore", userdGpPutBefore);
-    Trace(L"B3cD3UserdGpPutAfter", userd != NULL ? userd[0x8Cu >> 2] : 0u);
-    Trace(L"B3cD3Bar1GpPutReadback", bar1GpPutReadback);
-    Trace(L"B3cD3BackingGpPutAfterBar1Write", backingGpPutAfterBar1);
-    Trace(L"B3cD3FifoMmuFaultStatusBefore", fifoMmuFaultBefore);
-    Trace(L"B3cD3FifoMmuFaultStatusAfterBar1Write", fifoMmuFaultAfter);
-    Trace(L"B3cD3FifoIntr0AfterBar1Write", fifoIntrAfterBar1);
-    Trace(L"B3cD3Bar1WriteFault", bar1WriteFault);
-    Trace(L"B3cD3BackingGpPutFinal", userd != NULL ? userd[0x8Cu >> 2] : 0u);
-    Trace(L"B3cD3Bar1GpGetFinal", bar1GpPut != NULL ? *(volatile ULONG *)((volatile UCHAR *)bar1GpPut - 4u) : 0u);
+    TraceDetail(L"B3cD3UserdGpPutBefore", userdGpPutBefore);
+    TraceDetail(L"B3cD3UserdGpPutAfter", userd != NULL ? userd[0x8Cu >> 2] : 0u);
+    TraceDetail(L"B3cD3Bar1GpPutReadback", bar1GpPutReadback);
+    TraceDetail(L"B3cD3BackingGpPutAfterBar1Write", backingGpPutAfterBar1);
+    TraceDetail(L"B3cD3FifoMmuFaultStatusBefore", fifoMmuFaultBefore);
+    TraceDetail(L"B3cD3FifoMmuFaultStatusAfterBar1Write", fifoMmuFaultAfter);
+    TraceDetail(L"B3cD3FifoIntr0AfterBar1Write", fifoIntrAfterBar1);
+    TraceDetail(L"B3cD3Bar1WriteFault", bar1WriteFault);
+    TraceDetail(L"B3cD3BackingGpPutFinal", userd != NULL ? userd[0x8Cu >> 2] : 0u);
+    TraceDetail(L"B3cD3Bar1GpGetFinal", bar1GpPut != NULL ? *(volatile ULONG *)((volatile UCHAR *)bar1GpPut - 4u) : 0u);
     TraceDurable(L"B3cD3Result", result);
     return result;
 }
@@ -5029,12 +4749,12 @@ static ULONG B3cRunD4(PSWGPU_DEVICE Dev, PULONG userd, PULONG gpfifo,
                         instWords[133] == expectedCtxHi &&
                         goldenMagic == 0x600DC0DEu) ? 1u : 0u;
     }
-    Trace(L"B3cD4InstCtxExpectedLo", expectedCtxLo);
-    Trace(L"B3cD4InstCtxExpectedHi", expectedCtxHi);
-    Trace(L"B3cD4InstCtxActualLo", instWords != NULL ? instWords[132] : 0u);
-    Trace(L"B3cD4InstCtxActualHi", instWords != NULL ? instWords[133] : 0u);
-    Trace(L"B3cD4GoldenMagic", goldenMagic);
-    Trace(L"B3cD4ContextValid", ctxPointerOk);
+    TraceDetail(L"B3cD4InstCtxExpectedLo", expectedCtxLo);
+    TraceDetail(L"B3cD4InstCtxExpectedHi", expectedCtxHi);
+    TraceDetail(L"B3cD4InstCtxActualLo", instWords != NULL ? instWords[132] : 0u);
+    TraceDetail(L"B3cD4InstCtxActualHi", instWords != NULL ? instWords[133] : 0u);
+    TraceDetail(L"B3cD4GoldenMagic", goldenMagic);
+    TraceDetail(L"B3cD4ContextValid", ctxPointerOk);
     if ((grEnabled & (1u << 12)) == 0u || userd == NULL || gpfifo == NULL ||
         pushbuffer == NULL || pushbufferGpuVa == 0u || Dev->Bar1Cpu == NULL ||
         Dev->Bar1MapLen < BAR1_D3_MAP_LEN || !g_GrVm.Active ||
@@ -5135,9 +4855,9 @@ static ULONG B3cRunD4(PSWGPU_DEVICE Dev, PULONG userd, PULONG gpfifo,
             Us(10u);
         }
         Trace(L"B3cD4SemPolls", semPolls);
-        Trace(L"B3cD4SemL2Fails", l2Fails);
-        Trace(L"B3cD4SemEngineStatusAfterPoll", Rd(B, 0x00002640u));
-        Trace(L"B3cD4SemGrStatusAfterPoll", Rd(B, 0x00400700u));
+        TraceDetail(L"B3cD4SemL2Fails", l2Fails);
+        TraceDetail(L"B3cD4SemEngineStatusAfterPoll", Rd(B, 0x00002640u));
+        TraceDetail(L"B3cD4SemGrStatusAfterPoll", Rd(B, 0x00400700u));
     }
     refCount = *(volatile ULONG *)(Dev->Bar1Cpu + BAR1_D3_LOW_VA + 0x48u);
     if (semValue != 0xD4D4D4D4u || userdGpGet != 2u || pbGpGet != 2u) {
@@ -5180,35 +4900,35 @@ done:
         for (i = 0u; i < RTL_NUMBER_OF(reportWords); ++i) reportWords[i] = semSlot[i];
         semValue = reportWords[0];
     }
-    Trace(L"B3cD4GpGet", userdGpGet);
-    Trace(L"B3cD4GpPut", bar1GpPutReadback);
-    Trace(L"B3cD4PbGet", pbGet);
-    Trace(L"B3cD4PbPut", pbPut);
-    Trace(L"B3cD4PbdmaGpGet", pbGpGet);
-    Trace(L"B3cD4SemWfi", pushWords[8] == 0x01000002u ? 1u : 0u);
+    TraceDetail(L"B3cD4GpGet", userdGpGet);
+    TraceDetail(L"B3cD4GpPut", bar1GpPutReadback);
+    TraceDetail(L"B3cD4PbGet", pbGet);
+    TraceDetail(L"B3cD4PbPut", pbPut);
+    TraceDetail(L"B3cD4PbdmaGpGet", pbGpGet);
+    TraceDetail(L"B3cD4SemWfi", pushWords[8] == 0x01000002u ? 1u : 0u);
     TraceBin(L"B3cD4ReportSem", reportWords, sizeof(reportWords));
-    Trace(L"B3cD4PbIntr0", pbIntr0);
-    Trace(L"B3cD4PbIntr1", pbIntr1);
-    Trace(L"B3cD4PbMethod0", pbMethod0);
-    Trace(L"B3cD4PbData0", pbData0);
-    Trace(L"B3cD4FifoIntr0", fifoIntr0);
-    Trace(L"B3cD4MmuFault", mmuFault);
-    Trace(L"B3cD4GrIntr", grIntr);
-    Trace(L"B3cD4GrException", grException);
-    Trace(L"B3cD4GrStatus", grStatus);
-    Trace(L"B3cD4FeHwwEsr", feHwwEsr);
-    Trace(L"B3cD4FecsCurrentCtx", fecsCurrentCtx);
-    Trace(L"B3cD4FecsMailbox0", fecsMailbox0);
-    Trace(L"B3cD4EngineStatus", engineStatus);
+    TraceDetail(L"B3cD4PbIntr0", pbIntr0);
+    TraceDetail(L"B3cD4PbIntr1", pbIntr1);
+    TraceDetail(L"B3cD4PbMethod0", pbMethod0);
+    TraceDetail(L"B3cD4PbData0", pbData0);
+    TraceDetail(L"B3cD4FifoIntr0", fifoIntr0);
+    TraceDetail(L"B3cD4MmuFault", mmuFault);
+    TraceDetail(L"B3cD4GrIntr", grIntr);
+    TraceDetail(L"B3cD4GrException", grException);
+    TraceDetail(L"B3cD4GrStatus", grStatus);
+    TraceDetail(L"B3cD4FeHwwEsr", feHwwEsr);
+    TraceDetail(L"B3cD4FecsCurrentCtx", fecsCurrentCtx);
+    TraceDetail(L"B3cD4FecsMailbox0", fecsMailbox0);
+    TraceDetail(L"B3cD4EngineStatus", engineStatus);
     Trace(L"B3cD4GpGetPolls", polls);
     Trace(L"B3cD4L2FlushPolls", l2FlushPolls);
     Trace(L"B3cD4L2InvalidatePolls", l2InvalidatePolls);
-    Trace(L"B3cD4L2Status", l2Status);
-    Trace(L"B3cD4PbdmaStatus", pbdmaStatus);
+    TraceDetail(L"B3cD4L2Status", l2Status);
+    TraceDetail(L"B3cD4PbdmaStatus", pbdmaStatus);
     TraceBin(L"B3cD4PushbufferWords", pushWords, sizeof(pushWords));
     TraceBin(L"B3cD4GpfifoEntry", gpWords, sizeof(gpWords));
     TraceBin(L"B3cD4Writes", writes, sizeof(writes));
-    Trace(L"B3cD4RefCount", refCount);
+    TraceDetail(L"B3cD4RefCount", refCount);
     if (grIntr != 0u) {
         ULONG grDump[B3C_GR_STATUS_DUMP_REGS * 2u] = { 0u };
         B3cCaptureGrStatusDump(B, L"B3cD4GrStatusDump", grDump);
@@ -5442,40 +5162,40 @@ done:
         for (i = 0u; i < RTL_NUMBER_OF(semWords); ++i) semWords[i] = semSlot[i];
         semValue = semWords[0];
     }
-    Trace(L"B3cD5Step", 109u); Trace(L"B3cD5RtOffset", GR_VM_D2_RT_OFF);
-    Trace(L"B3cD5RtGpuVa", (ULONG)renderGpuVa); Trace(L"B3cD5RtBytes", 64u * 64u * sizeof(ULONG));
-    Trace(L"B3cD5RtPteIndex", rtPteIndex); Trace(L"B3cD5RtPteExpectedLo", rtPteExpectedLo);
-    Trace(L"B3cD5RtPteExpectedHi", (ULONG)(rtPteExpected >> 32));
-    Trace(L"B3cD5RtPteReadLo", rtPteReadLo); Trace(L"B3cD5RtPteReadHi", (ULONG)(rtPteRead >> 32));
-    Trace(L"B3cD5Pitch", 256u); Trace(L"B3cD5ExpectedPixel", expected);
+    TraceDetail(L"B3cD5Step", 109u); TraceDetail(L"B3cD5RtOffset", GR_VM_D2_RT_OFF);
+    TraceDetail(L"B3cD5RtGpuVa", (ULONG)renderGpuVa); TraceDetail(L"B3cD5RtBytes", 64u * 64u * sizeof(ULONG));
+    TraceDetail(L"B3cD5RtPteIndex", rtPteIndex); TraceDetail(L"B3cD5RtPteExpectedLo", rtPteExpectedLo);
+    TraceDetail(L"B3cD5RtPteExpectedHi", (ULONG)(rtPteExpected >> 32));
+    TraceDetail(L"B3cD5RtPteReadLo", rtPteReadLo); TraceDetail(L"B3cD5RtPteReadHi", (ULONG)(rtPteRead >> 32));
+    TraceDetail(L"B3cD5Pitch", 256u); TraceDetail(L"B3cD5ExpectedPixel", expected);
     Trace(L"B3cD5GpGetPolls", gpGetPolls); Trace(L"B3cD5SemPolls", semPolls);
-    Trace(L"B3cD5L2Polls", l2State[0]); Trace(L"B3cD5L2InvalidatePolls", l2State[2]); Trace(L"B3cD5L2Fails", l2Fails);
-    Trace(L"B3cD5UserdGpGet", userdGpGet); Trace(L"B3cD5PbGpGet", pbGpGet);
-    Trace(L"B3cD5PbGet", pbGet); Trace(L"B3cD5PbPut", pbPut); Trace(L"B3cD5SemValue", semValue);
-    Trace(L"B3cD5SemWfi", 1u); TraceBin(L"B3cD5SemaphoreWords", semWords, sizeof(semWords));
-    Trace(L"B3cD5ExpectedPixels", expectedPixels); Trace(L"B3cD5StalePixels", stalePixels);
-    Trace(L"B3cD5OtherPixels", otherPixels); Trace(L"B3cD5Uniform", uniform);
-    Trace(L"B3cD5UniformPartial", (uniform != 0u && expectedPixels != 4096u) ? 1u : 0u);
-    Trace(L"B3cD5UniformValue", uniformValue); Trace(L"B3cD5FirstPixel", firstPixel);
-    Trace(L"B3cD5MiddlePixel", middlePixel); Trace(L"B3cD5LastPixel", lastPixel);
-    Trace(L"B3cD5FirstMismatchOffset", firstMismatchOffset); Trace(L"B3cD5FirstMismatchValue", firstMismatchValue);
-    Trace(L"B3cD5PbIntr0", pbIntr0); Trace(L"B3cD5PbIntr1", pbIntr1);
-    Trace(L"B3cD5PbMethod0", pbMethod0); Trace(L"B3cD5PbData0", pbData0);
-    Trace(L"B3cD5FifoIntr0", fifoIntr0); Trace(L"B3cD5MmuFault", mmuFault); Trace(L"B3cD5PbdmaStatus", pbdmaStatus);
-    Trace(L"B3cD5GrIntr", grIntr); Trace(L"B3cD5GrException", grException); Trace(L"B3cD5GrStatus", grStatus);
+    Trace(L"B3cD5L2Polls", l2State[0]); Trace(L"B3cD5L2InvalidatePolls", l2State[2]); TraceDetail(L"B3cD5L2Fails", l2Fails);
+    TraceDetail(L"B3cD5UserdGpGet", userdGpGet); TraceDetail(L"B3cD5PbGpGet", pbGpGet);
+    TraceDetail(L"B3cD5PbGet", pbGet); TraceDetail(L"B3cD5PbPut", pbPut); TraceDetail(L"B3cD5SemValue", semValue);
+    TraceDetail(L"B3cD5SemWfi", 1u); TraceBin(L"B3cD5SemaphoreWords", semWords, sizeof(semWords));
+    TraceDetail(L"B3cD5ExpectedPixels", expectedPixels); TraceDetail(L"B3cD5StalePixels", stalePixels);
+    TraceDetail(L"B3cD5OtherPixels", otherPixels); TraceDetail(L"B3cD5Uniform", uniform);
+    TraceDetail(L"B3cD5UniformPartial", (uniform != 0u && expectedPixels != 4096u) ? 1u : 0u);
+    TraceDetail(L"B3cD5UniformValue", uniformValue); TraceDetail(L"B3cD5FirstPixel", firstPixel);
+    TraceDetail(L"B3cD5MiddlePixel", middlePixel); TraceDetail(L"B3cD5LastPixel", lastPixel);
+    TraceDetail(L"B3cD5FirstMismatchOffset", firstMismatchOffset); TraceDetail(L"B3cD5FirstMismatchValue", firstMismatchValue);
+    TraceDetail(L"B3cD5PbIntr0", pbIntr0); TraceDetail(L"B3cD5PbIntr1", pbIntr1);
+    TraceDetail(L"B3cD5PbMethod0", pbMethod0); TraceDetail(L"B3cD5PbData0", pbData0);
+    TraceDetail(L"B3cD5FifoIntr0", fifoIntr0); TraceDetail(L"B3cD5MmuFault", mmuFault); TraceDetail(L"B3cD5PbdmaStatus", pbdmaStatus);
+    TraceDetail(L"B3cD5GrIntr", grIntr); TraceDetail(L"B3cD5GrException", grException); TraceDetail(L"B3cD5GrStatus", grStatus);
     /* Claude 0.4.78: 0.4.77 hw raised GR intr bit 20 (CLASS_ERROR). Record
      * the nvgpu gk20a_gr_isr trap set (read-only): gr_class_error (code),
      * gr_trapped_addr (method 13:2, subch 18:16, status 31), trapped data. */
-    Trace(L"B3cD5GrClassError", Rd(B, 0x00400110u));
-    Trace(L"B3cD5GrTrappedAddr", Rd(B, 0x00400704u));
-    Trace(L"B3cD5GrTrappedMethod", (Rd(B, 0x00400704u) & 0x3FFCu));
-    Trace(L"B3cD5GrTrappedDataLo", Rd(B, 0x00400708u));
-    Trace(L"B3cD5GrTrappedDataHi", Rd(B, 0x0040070Cu));
-    Trace(L"B3cD5GrFeObjectTable0", Rd(B, 0x00404200u));
-    Trace(L"B3cD5EngineStatus", engineStatus); Trace(L"B3cD5FeHwwEsr", feEsr);
-    Trace(L"B3cD5DsHwwEsr", dsEsr); Trace(L"B3cD5SccHwwEsr", sccEsr);
-    Trace(L"B3cD5PdHwwEsr", pdEsr); Trace(L"B3cD5MmeHwwEsr", mmeEsr); Trace(L"B3cD5SkedHwwEsr", skedEsr);
-    Trace(L"B3cD5WriteCount", writeCount);
+    TraceDetail(L"B3cD5GrClassError", Rd(B, 0x00400110u));
+    TraceDetail(L"B3cD5GrTrappedAddr", Rd(B, 0x00400704u));
+    TraceDetail(L"B3cD5GrTrappedMethod", (Rd(B, 0x00400704u) & 0x3FFCu));
+    TraceDetail(L"B3cD5GrTrappedDataLo", Rd(B, 0x00400708u));
+    TraceDetail(L"B3cD5GrTrappedDataHi", Rd(B, 0x0040070Cu));
+    TraceDetail(L"B3cD5GrFeObjectTable0", Rd(B, 0x00404200u));
+    TraceDetail(L"B3cD5EngineStatus", engineStatus); TraceDetail(L"B3cD5FeHwwEsr", feEsr);
+    TraceDetail(L"B3cD5DsHwwEsr", dsEsr); TraceDetail(L"B3cD5SccHwwEsr", sccEsr);
+    TraceDetail(L"B3cD5PdHwwEsr", pdEsr); TraceDetail(L"B3cD5MmeHwwEsr", mmeEsr); TraceDetail(L"B3cD5SkedHwwEsr", skedEsr);
+    TraceDetail(L"B3cD5WriteCount", writeCount);
     for (i = 0u; i < writeCount && i < RTL_NUMBER_OF(writeSamples); ++i)
         RtlCopyMemory(writeSamples[i], writes[i], sizeof(writeSamples[i]));
     TraceBin(L"B3cD5Methods", methodTrace, methodCount * sizeof(methodTrace[0]));
@@ -5500,6 +5220,277 @@ done:
     return result;
 }
 
+/* E2 runs sequentially on the already-resident D2 channel. Reusing the single
+ * mapped pushbuffer/RT pages is safe because each round waits for GP_GET and
+ * the WFI semaphore before overwriting them. Ring size is the 4 KiB GPFIFO
+ * page (512 8-byte entries), and GP_PUT is advanced modulo that size. */
+static ULONG B3eResidentSubmitTest(PSWGPU_DEVICE Dev, PSWGPU_E2_RESULT Out, BOOLEAN Quick)
+{
+    volatile UCHAR *B = Dev != NULL ? Dev->Bar0 : NULL;
+    volatile ULONG *bar1GpPut;
+    volatile ULONG *bar1GpGet;
+    volatile ULONG *semSlot;
+    PULONG ring;
+    PULONG push;
+    PULONG pixels;
+    ULONG (*writes)[4] = NULL;
+    ULONG (*history)[4] = NULL;
+    ULONG writeCount = 0u, writeCapacity = 16u;
+    ULONG ringEntries = PAGE_SIZE / 8u, rounds = Quick ? 8u : 2u * (PAGE_SIZE / 8u) + 3u;
+    ULONG put = 0u, newPut = 0u, gpGet = 0u, pbGpGet = 0u;
+    ULONG round = 0u, doneRounds = 0u, wraps = 0u, maxPolls = 0u;
+    ULONG gpPolls = 0u, semPolls = 0u, l2State[4] = { 0u };
+    ULONG cursor = 0u, colorIndex = 0u, color = 0u, semaphore = 0u, semValue = 0u;
+    ULONG expectedFirst = 0u, expectedMiddle = 0u, expectedLast = 0u;
+    ULONG gotFirst = 0u, gotMiddle = 0u, gotLast = 0u;
+    ULONG result = 0u, failure = 0u, grEnabled = 0u;
+    ULONG channel = 0u, pbdmaStatus = 0u, pbdmaIntr0 = 0u, fifoIntr0 = 0u;
+    ULONG grIntr = 0u, grException = 0u, grStatus = 0u, mmuFault = 0u;
+    ULONG classError = 0u, trappedAddr = 0u, trappedDataLo = 0u, trappedDataHi = 0u;
+    ULONG totalWriteCount = 0u, i = 0u;
+    LARGE_INTEGER qpcStart, qpcEnd, qpcFrequency;
+    ULONGLONG elapsedTicks = 0u, totalUs = 0u;
+
+    if (Out == NULL) return STATUS_INVALID_PARAMETER;
+    RtlZeroMemory(Out, sizeof(*Out));
+    Out->Version = SWGPU_VERSION;
+    Out->RingEntries = ringEntries;
+    Out->Rounds = rounds;
+    if (Dev == NULL || !Dev->ResidentActive || g_ResidentOwner != Dev) {
+        result = STATUS_DEVICE_NOT_READY;
+        goto done;
+    }
+    Step(113);
+    B3cPrivRingResetWriteLog();
+    grEnabled = Rd(B, NV_PMC_ENABLE);
+    if ((grEnabled & (1u << 12)) == 0u || !g_GrVm.Active || g_GrVm.Arena == NULL ||
+        Dev->Bar1Cpu == NULL || Dev->Bar1MapLen < BAR1_D3_MAP_LEN ||
+        !Dev->ResidentChannelEnabled || !Dev->ResidentRunlistSubmitted ||
+        !Dev->ResidentInstBound || ringEntries < 8u || rounds > 4096u ||
+        GR_VM_D2_PUSHBUF_OFF + PAGE_SIZE > GR_VM_ARENA_SIZE ||
+        GR_VM_D2_RT_OFF + 64u * 64u * sizeof(ULONG) > GR_VM_ARENA_SIZE ||
+        GR_VM_D2_GPFIFO_OFF + PAGE_SIZE > GR_VM_ARENA_SIZE ||
+        GR_VM_D2_USERD_OFF + PAGE_SIZE > GR_VM_ARENA_SIZE) {
+        result = 0xE00000A6u;
+        goto done;
+    }
+    ring = (PULONG)((PUCHAR)g_GrVm.Arena + GR_VM_D2_GPFIFO_OFF);
+    push = (PULONG)((PUCHAR)g_GrVm.Arena + GR_VM_D2_PUSHBUF_OFF);
+    pixels = (PULONG)((PUCHAR)g_GrVm.Arena + GR_VM_D2_RT_OFF);
+    semSlot = (volatile ULONG *)((PUCHAR)push + PAGE_SIZE - 64u);
+    bar1GpPut = (volatile ULONG *)(Dev->Bar1Cpu + BAR1_D3_LOW_VA + 0x8Cu);
+    bar1GpGet = (volatile ULONG *)(Dev->Bar1Cpu + BAR1_D3_LOW_VA + 0x88u);
+    writes = (ULONG (*)[4])ExAllocatePool2(POOL_FLAG_NON_PAGED,
+        writeCapacity * sizeof(writes[0]), SWGPU_TAG);
+    if (g_Verbose) history = (ULONG (*)[4])ExAllocatePool2(POOL_FLAG_NON_PAGED,
+        rounds * sizeof(history[0]), SWGPU_TAG);
+    if (writes == NULL || (g_Verbose && history == NULL)) { result = 0xE00000A6u; goto done; }
+    RtlZeroMemory(writes, writeCapacity * sizeof(writes[0]));
+    if (history != NULL) RtlZeroMemory(history, rounds * sizeof(history[0]));
+    put = *bar1GpPut;
+    if (put >= ringEntries) { result = 0xE00000A6u; goto done; }
+    qpcStart = KeQueryPerformanceCounter(&qpcFrequency);
+    Trace(L"E2StartGpPut", put);
+    Trace(L"E2RingEntries", ringEntries);
+    Trace(L"E2PlannedRounds", rounds);
+
+    for (round = 0u; round < rounds; ++round) {
+        /* The known-good D5 clear maps float 1.0 to a full 8-bit channel.
+         * Cycle all eight RGB bit patterns; alpha remains opaque. */
+        cursor = 0u;
+        colorIndex = round & 7u;
+        color = 0xFF000000u |
+            ((colorIndex & 1u) ? 0x00FF0000u : 0u) |
+            ((colorIndex & 2u) ? 0x0000FF00u : 0u) |
+            ((colorIndex & 4u) ? 0x000000FFu : 0u);
+        semaphore = 0xE2000000u | (round + 1u);
+        semValue = 0u;
+        if (round == 0u) { Out->FirstColor = color; Out->FirstSemaphore = semaphore; }
+        Out->LastColor = color; Out->LastSemaphore = semaphore;
+        expectedFirst = color; expectedMiddle = color; expectedLast = color;
+        for (i = 0u; i < 64u * 64u; ++i) pixels[i] = 0x11111111u;
+        for (i = 0u; i < 4u; ++i) semSlot[i] = 0u;
+
+#define E2_METHOD(method, value) do { \
+        if (cursor + 2u >= PAGE_SIZE / sizeof(ULONG) - 16u) { failure = 1u; goto round_fail; } \
+        push[cursor++] = 0x20010000u | ((ULONG)(method) >> 2); \
+        push[cursor++] = (ULONG)(value); \
+    } while (0)
+        E2_METHOD(0x0000u, 0x0000B197u); /* SET_OBJECT: Maxwell B 3D */
+        E2_METHOD(0x121Cu, 1u); /* SET_CT_SELECT: one color target, target 0 */
+        E2_METHOD(0x0800u, 0u); /* SET_COLOR_TARGET_A: high address bits */
+        E2_METHOD(0x0804u, (ULONGLONG)GR_VM_GPU_VA + GR_VM_D2_RT_OFF); /* target VA */
+        E2_METHOD(0x0808u, 256u); /* pitch bytes, as validated by D5 */
+        E2_METHOD(0x080Cu, 64u); E2_METHOD(0x0810u, 0xCFu);
+        E2_METHOD(0x0814u, 0x1000u); E2_METHOD(0x0818u, 1u);
+        E2_METHOD(0x081Cu, 0u); E2_METHOD(0x0820u, 0u);
+        E2_METHOD(0x0FE0u, 0u); E2_METHOD(0x0FE4u, 0u);
+        E2_METHOD(0x1538u, 0u); E2_METHOD(0x0FF4u, 0x00400000u);
+        E2_METHOD(0x0FF8u, 0x00400000u); E2_METHOD(0x0DF8u, 0u);
+        E2_METHOD(0x0DFCu, 0u); E2_METHOD(0x0E00u, 0u);
+        E2_METHOD(0x10F8u, 0x10u); E2_METHOD(0x0D6Cu, 0x00400000u);
+        E2_METHOD(0x0D70u, 0x00400000u);
+        E2_METHOD(0x0D80u, (colorIndex & 1u) ? 0x3F800000u : 0u); /* R */
+        E2_METHOD(0x0D84u, (colorIndex & 2u) ? 0x3F800000u : 0u); /* G */
+        E2_METHOD(0x0D88u, (colorIndex & 4u) ? 0x3F800000u : 0u); /* B */
+        E2_METHOD(0x0D8Cu, 0x3F800000u); /* A = 1.0 */
+        E2_METHOD(0x19D0u, 0x3Cu); /* CLEAR_SURFACE: RGBA target 0 */
+#undef E2_METHOD
+        if (cursor + 5u >= PAGE_SIZE / sizeof(ULONG) - 16u) { failure = 1u; goto round_fail; }
+        push[cursor++] = 0x20040004u; /* host SEMAPHOREA..D, release_wfi enabled */
+        push[cursor++] = 0u; /* semaphore VA high */
+        push[cursor++] = (ULONG)((ULONGLONG)GR_VM_GPU_VA + GR_VM_D2_PUSHBUF_OFF + PAGE_SIZE - 64u);
+        push[cursor++] = semaphore;
+        push[cursor++] = 0x01000002u;
+        KeMemoryBarrier();
+
+        /* Each packet is fetched from this one reusable PB segment. */
+        i = put * 2u;
+        ring[i] = (ULONG)((ULONGLONG)GR_VM_GPU_VA + GR_VM_D2_PUSHBUF_OFF) & ~3u;
+        ring[i + 1u] = cursor << 10; /* 32-bit VA, dword count in bits 19:10 */
+        KeMemoryBarrier();
+        writeCount = 0u;
+        l2State[0] = l2State[1] = l2State[2] = l2State[3] = 0u;
+        if (!B3cD5L2Flush(B, writes, &writeCount, writeCapacity, l2State)) {
+            failure = 2u; goto round_fail;
+        }
+        totalWriteCount += writeCount;
+        newPut = put + 1u;
+        if (newPut == ringEntries) { newPut = 0u; ++wraps; }
+        KeMemoryBarrier();
+        *bar1GpPut = newPut;
+        KeMemoryBarrier();
+        if (*bar1GpPut != newPut || Rd(B, 0x00002A30u) != 0u ||
+            (Rd(B, 0x00002100u) & 0x10000000u) != 0u) {
+            failure = 3u; goto round_fail;
+        }
+        for (gpPolls = 0u; gpPolls < 2000u; ++gpPolls) {
+            gpGet = *bar1GpGet;
+            pbGpGet = Rd(B, 0x00040014u);
+            if (gpGet == newPut && pbGpGet == newPut) break;
+            Us(1u);
+        }
+        if (gpPolls > maxPolls) maxPolls = gpPolls;
+        if (gpPolls == 2000u) { failure = 4u; goto round_fail; }
+        for (semPolls = 0u; semPolls < 2000u; ++semPolls) {
+            writeCount = 0u;
+            if (!B3cD5L2Flush(B, writes, &writeCount, writeCapacity, l2State)) {
+                failure = 2u; goto round_fail;
+            }
+            totalWriteCount += writeCount;
+            KeMemoryBarrier();
+            semValue = semSlot[0];
+            if (semValue == semaphore) break;
+            Us(10u);
+        }
+        if (semPolls > maxPolls) maxPolls = semPolls;
+        if (semPolls == 2000u) { failure = 5u; goto round_fail; }
+        writeCount = 0u;
+        if (!B3cD5L2Flush(B, writes, &writeCount, writeCapacity, l2State)) {
+            failure = 2u; goto round_fail;
+        }
+        totalWriteCount += writeCount;
+        KeMemoryBarrier();
+        gotFirst = pixels[0]; gotMiddle = pixels[2048]; gotLast = pixels[4095];
+        if (history != NULL) {
+            history[round][0] = round; history[round][1] = gpPolls;
+            history[round][2] = semPolls; history[round][3] = newPut;
+        }
+        if (gotFirst != expectedFirst || gotMiddle != expectedMiddle || gotLast != expectedLast) {
+            failure = 6u; goto round_fail;
+        }
+        ++doneRounds;
+        put = newPut;
+        continue;
+
+round_fail:
+        if (history != NULL) {
+            history[round][0] = round; history[round][1] = gpPolls;
+            history[round][2] = semPolls; history[round][3] = newPut;
+        }
+        result = 0xE00000A6u;
+        Out->FailRound = round + 1u;
+        break;
+    }
+    if (round == rounds) result = 0u;
+    qpcEnd = KeQueryPerformanceCounter(NULL);
+    elapsedTicks = (ULONGLONG)(qpcEnd.QuadPart - qpcStart.QuadPart);
+    if (qpcFrequency.QuadPart > 0) {
+        totalUs = (elapsedTicks / (ULONGLONG)qpcFrequency.QuadPart) * 1000000ull +
+            ((elapsedTicks % (ULONGLONG)qpcFrequency.QuadPart) * 1000000ull) /
+            (ULONGLONG)qpcFrequency.QuadPart;
+    }
+    Out->Rounds = doneRounds;
+    Out->Wraps = wraps;
+    Out->MaxPolls = maxPolls;
+    Out->TotalUs = (ULONG)(totalUs > 0xFFFFFFFFull ? 0xFFFFFFFFu : totalUs);
+    Out->GpPut = (Dev->Bar1Cpu != NULL && Dev->Bar1MapLen >= BAR1_D3_MAP_LEN) ?
+        *(volatile ULONG *)(Dev->Bar1Cpu + BAR1_D3_LOW_VA + 0x8Cu) : put;
+    Out->GpGet = (Dev->Bar1Cpu != NULL && Dev->Bar1MapLen >= BAR1_D3_MAP_LEN) ?
+        *(volatile ULONG *)(Dev->Bar1Cpu + BAR1_D3_LOW_VA + 0x88u) : gpGet;
+    Out->Semaphore = semValue;
+    Out->PixelFirst = gotFirst; Out->PixelMiddle = gotMiddle; Out->PixelLast = gotLast;
+    Out->Result = result;
+    Trace(L"E2Result", result); Trace(L"E2Rounds", doneRounds);
+    Trace(L"E2RingEntries", ringEntries); Trace(L"E2Wraps", wraps);
+    Trace(L"E2FailRound", Out->FailRound); Trace(L"E2MaxPolls", maxPolls);
+    Trace(L"E2TotalUs", Out->TotalUs); Trace(L"E2FirstColor", Out->FirstColor);
+    Trace(L"E2LastColor", Out->LastColor); Trace(L"E2FirstSemaphore", Out->FirstSemaphore);
+    Trace(L"E2LastSemaphore", Out->LastSemaphore); Trace(L"E2GpGet", Out->GpGet);
+    Trace(L"E2GpPut", Out->GpPut); Trace(L"E2Semaphore", Out->Semaphore);
+    Trace(L"E2FailureStage", failure);
+    Trace(L"E2PixelFirst", gotFirst); Trace(L"E2PixelMiddle", gotMiddle); Trace(L"E2PixelLast", gotLast);
+    Trace(L"E2WriteCount", totalWriteCount);
+    if (result != 0u && B != NULL) {
+        channel = Rd(B, 0x00800004u); pbdmaStatus = Rd(B, 0x00003080u);
+        pbdmaIntr0 = Rd(B, 0x00040108u); fifoIntr0 = Rd(B, 0x00002100u);
+        mmuFault = Rd(B, 0x00002A30u);
+        grEnabled = Rd(B, NV_PMC_ENABLE);
+        if (grEnabled & (1u << 12)) {
+            grIntr = Rd(B, 0x00400100u); grException = Rd(B, 0x00400108u);
+            grStatus = Rd(B, 0x00400700u); classError = Rd(B, 0x00400110u);
+            trappedAddr = Rd(B, 0x00400704u); trappedDataLo = Rd(B, 0x00400708u);
+            trappedDataHi = Rd(B, 0x0040070Cu);
+            {
+                ULONG grDump[B3C_GR_STATUS_DUMP_REGS * 2u] = { 0u };
+                B3cCaptureGrStatusDump(B, L"E2GrStatusDump", grDump);
+            }
+        }
+        Out->Channel = channel; Out->PbdmaStatus = pbdmaStatus; Out->PbdmaIntr0 = pbdmaIntr0;
+        Out->FifoIntr0 = fifoIntr0;
+        Out->GrIntr = grIntr; Out->GrException = grException; Out->GrStatus = grStatus;
+        Out->MmuFault = mmuFault; Out->ClassError = classError; Out->TrappedAddr = trappedAddr;
+        Out->TrappedDataLo = trappedDataLo; Out->TrappedDataHi = trappedDataHi;
+        Trace(L"E2FailGpGet", Out->GpGet); Trace(L"E2FailGpPut", Out->GpPut);
+        Trace(L"E2FailSemaphore", Out->Semaphore); Trace(L"E2FailChannel", channel);
+        Trace(L"E2FailPbdmaStatus", pbdmaStatus); Trace(L"E2FailPbdmaIntr0", pbdmaIntr0);
+        Trace(L"E2FailFifoIntr0", fifoIntr0);
+        Trace(L"E2FailGrIntr", grIntr); Trace(L"E2FailGrException", grException);
+        Trace(L"E2FailGrStatus", grStatus); Trace(L"E2FailMmuFault", mmuFault);
+        Trace(L"E2FailClassError", classError); Trace(L"E2FailTrappedAddr", trappedAddr);
+        Trace(L"E2FailTrappedDataLo", trappedDataLo); Trace(L"E2FailTrappedDataHi", trappedDataHi);
+    }
+    TraceBin(L"E2RoundHistory", history, (round < rounds ? round + 1u : rounds) * sizeof(history[0]));
+    if (writes != NULL) { TraceBin(L"E2LastWrites", writes, writeCount * sizeof(writes[0])); }
+    B3cPrivRingTraceWriteLog(L"E2PrivErrorCount", L"E2PrivErrorDropped",
+        L"E2PrivAckTimeouts", L"E2PrivErrors");
+done:
+    Out->Result = result;
+    Trace(L"E2Result", result); Trace(L"E2Rounds", Out->Rounds);
+    Trace(L"E2RingEntries", Out->RingEntries); Trace(L"E2Wraps", Out->Wraps);
+    Trace(L"E2FailRound", Out->FailRound); Trace(L"E2MaxPolls", Out->MaxPolls);
+    Trace(L"E2TotalUs", Out->TotalUs); Trace(L"E2FirstColor", Out->FirstColor);
+    Trace(L"E2LastColor", Out->LastColor); Trace(L"E2FirstSemaphore", Out->FirstSemaphore);
+    Trace(L"E2LastSemaphore", Out->LastSemaphore);
+    Trace(L"E2FailureStage", failure); Trace(L"E2GpGet", Out->GpGet);
+    Trace(L"E2GpPut", Out->GpPut); Trace(L"E2Semaphore", Out->Semaphore);
+    Trace(L"E2PixelFirst", Out->PixelFirst); Trace(L"E2PixelMiddle", Out->PixelMiddle);
+    Trace(L"E2PixelLast", Out->PixelLast);
+    if (writes != NULL) ExFreePoolWithTag(writes, SWGPU_TAG);
+    if (history != NULL) ExFreePoolWithTag(history, SWGPU_TAG);
+    return result;
+}
+
 /* Claude 0.4.61: 0.4.60 bind error code 0x2 = SNOOP_WITHOUT_BAR1 (name from
  * nouveau's bind-reason table).  Bind BAR1 to the GR instance block
  * (bus_bar1_block 0x1704, virtual mode, sys_mem_ncoh) before the channel
@@ -5515,6 +5506,104 @@ static ULONG g_D2UserdBar1Set = 0u;
 static ULONG g_D2PbdmaInten0Before = 0u;
 static ULONG g_D2PbdmaMasksSaved = 0u;
 
+/* Shared D2 channel teardown. Normal one-shot execution calls this from its
+ * exit path; E1 invokes the same routine later while the channel is resident. */
+static ULONG B3cD2CleanupPublishedState(PSWGPU_DEVICE Dev, ULONG writes[64][4],
+    PULONG writeCount, BOOLEAN channelEnabled, BOOLEAN runlistSubmitted,
+    BOOLEAN instBound, ULONG channelId, ULONG runlistEmptyValue,
+    PULONG outPreemptPolls, PULONG outPreemptLast,
+    PULONG outRunlistPolls, PULONG outRunlistLast,
+    BOOLEAN d4WasRun, ULONG diagWrites[64][4], PULONG diagWriteCount)
+{
+    volatile UCHAR *B = Dev->Bar0;
+    ULONG error = 0u, value = 0u, preemptPolls = 0u, preemptLast = 0u;
+    ULONG runlistPolls = 0u, runlistLast = 0u, restorePolls = 0u, restoreStatus = 0u;
+    ULONG channelReg = 0x00800004u, instReg = 0x00800000u;
+    ULONG preemptReg = 0x00002634u, runlistReg = 0x00002274u;
+    ULONG pendingReg = 0x00002284u, pbdmaIntrReg = 0x00040108u;
+    if (outPreemptPolls) *outPreemptPolls = 0u;
+    if (outPreemptLast) *outPreemptLast = 0u;
+    if (outRunlistPolls) *outRunlistPolls = 0u;
+    if (outRunlistLast) *outRunlistLast = 0u;
+    if (B == NULL || writes == NULL || writeCount == NULL) return 0x80000000u;
+
+    if (channelEnabled) {
+        value = Rd(B, channelReg) | 0x00000800u;
+        if (!B3cD2Write(B, writes, writeCount, channelReg, value)) error |= 1u;
+        {
+            ULONG intr0 = Rd(B, pbdmaIntrReg), intr1 = Rd(B, 0x00040148u);
+            TraceDetail(L"B3cD2CleanupPbdmaIntr0", intr0);
+            TraceDetail(L"B3cD2CleanupPbdmaIntr1", intr1);
+            if (intr0 != 0u && !B3cD2Write(B, writes, writeCount, 0x000400C0u, 0x80600008u)) error |= 512u;
+            if (intr0 != 0u && !B3cD2Write(B, writes, writeCount, pbdmaIntrReg, intr0)) error |= 512u;
+            if (intr1 != 0u && !B3cD2Write(B, writes, writeCount, 0x00040148u, intr1)) error |= 512u;
+            TraceDetail(L"B3cD2CleanupPbdmaIntr0AfterClear", Rd(B, pbdmaIntrReg));
+        }
+        if (!B3cD2Write(B, writes, writeCount, preemptReg, channelId)) error |= 2u;
+        for (preemptPolls = 0u; preemptPolls < 2000u; ++preemptPolls) {
+            preemptLast = Rd(B, preemptReg);
+            if ((preemptLast & 0x00100000u) == 0u) break;
+            Us(1000u);
+        }
+        if (preemptPolls == 2000u) {
+            error |= 4u;
+            if (d4WasRun && g_GrVm.Arena != NULL && diagWrites != NULL && diagWriteCount != NULL)
+                B3cD4CaptureCtxswDiag(B, (PUCHAR)g_GrVm.Arena + GR_VM_CTX_OFF,
+                    diagWrites, diagWriteCount, TRUE);
+        }
+        Trace(L"B3cD2PreemptPolls", preemptPolls); TraceDetail(L"B3cD2PreemptLast", preemptLast);
+        TraceDetail(L"B3cD2PreemptPbdmaIntr0", Rd(B, pbdmaIntrReg));
+        TraceDetail(L"B3cD2PreemptPbdmaStatusReg", Rd(B, 0x00040100u));
+        TraceDetail(L"B3cD2PreemptCcsrChannel", Rd(B, channelReg));
+        TraceDetail(L"B3cD2PreemptEngineStatus", Rd(B, 0x00002640u));
+        TraceDetail(L"B3cD2PreemptFifoIntr0", Rd(B, 0x00002100u));
+        TraceDetail(L"B3cD2PreemptPbdmaStatus", Rd(B, 0x00003080u));
+    }
+    if (runlistSubmitted) {
+        if (!B3cD2Write(B, writes, writeCount, runlistReg, runlistEmptyValue)) error |= 8u;
+        for (runlistPolls = 0u; runlistPolls < 2000u; ++runlistPolls) {
+            runlistLast = Rd(B, pendingReg);
+            if ((runlistLast & 0x00100000u) == 0u) break;
+            Us(1000u);
+        }
+        if (runlistPolls == 2000u) error |= 16u;
+        Trace(L"B3cD2CleanupRunlistPolls", runlistPolls);
+        TraceDetail(L"B3cD2CleanupRunlistLast", runlistLast);
+    }
+    if (instBound && !B3cD2Write(B, writes, writeCount, instReg, 0u)) error |= 32u;
+    if (g_D2PbdmaMasksSaved) {
+        if (!B3cD2Write(B, writes, writeCount, 0x0004010Cu, g_D2PbdmaInten0Before)) error |= 1024u;
+        TraceDetail(L"B3cD3PbdmaInten0Restored", Rd(B, 0x0004010Cu));
+        TraceDetail(L"B3cD3PbdmaStallUnchanged", Rd(B, 0x0004013Cu));
+        g_D2PbdmaMasksSaved = 0u;
+    }
+    if (g_D2UserdBar1Set) {
+        if (!B3cD2Write(B, writes, writeCount, 0x00002254u, g_D2UserdBar1Before)) error |= 256u;
+        TraceDetail(L"B3cD2UserdBar1Final", Rd(B, 0x00002254u));
+        g_D2UserdBar1Set = 0u;
+    }
+    if (g_D2Bar1Bound) {
+        if (!B3cD2Write(B, writes, writeCount, 0x00001704u, g_D2Bar1Before)) error |= 64u;
+        for (restorePolls = 0u; restorePolls < 2000u; ++restorePolls) {
+            restoreStatus = Rd(B, 0x00001710u);
+            if ((restoreStatus & 3u) == 0u) break;
+            Us(1000u);
+        }
+        if (restorePolls == 2000u) error |= 128u;
+        Trace(L"B3cD2Bar1RestorePolls", restorePolls);
+        TraceDetail(L"B3cD2Bar1Final", Rd(B, 0x00001704u));
+        g_D2Bar1Bound = 0u;
+    }
+    TraceDetail(L"B3eChannelCleanupError", error);
+    Trace(L"B3eChannelCleanupPreemptPolls", preemptPolls);
+    Trace(L"B3eChannelCleanupRunlistPolls", runlistPolls);
+    if (outPreemptPolls) *outPreemptPolls = preemptPolls;
+    if (outPreemptLast) *outPreemptLast = preemptLast;
+    if (outRunlistPolls) *outRunlistPolls = runlistPolls;
+    if (outRunlistLast) *outRunlistLast = runlistLast;
+    return error;
+}
+
 static ULONG B3cInitFifoD2(PSWGPU_DEVICE Dev)
 {
     volatile UCHAR *B = Dev->Bar0;
@@ -5528,7 +5617,7 @@ static ULONG B3cInitFifoD2(PSWGPU_DEVICE Dev)
     ULONG grEngineId = 0, runlistId = 0, chid = 0;
     ULONG ccsrInstReg = 0x00800000u, ccsrChannelReg = 0x00800004u;
     ULONG fifoRunlistBaseReg = 0x00002270u, fifoRunlistReg = 0x00002274u;
-    ULONG fifoRunlistPendingReg = 0x00002284u, fifoPreemptReg = 0x00002634u;
+    ULONG fifoRunlistPendingReg = 0x00002284u;
     ULONG fifoIntrReg = 0x00002100u, pbdmaStatusReg = 0x00040100u;
     ULONG pbdmaIntrReg = 0x00040108u, fifoEngineStatusReg = 0x00002640u;
     ULONG ccsrInstValue = 0, ccsrChannelBefore = 0, ccsrChannelValue = 0;
@@ -5544,7 +5633,7 @@ static ULONG B3cInitFifoD2(PSWGPU_DEVICE Dev)
     ULONG wfiTrace[2][3] = { 0 }, runlistTrace[2][3] = { 0 };
     ULONG zeroSamples[3][4] = { 0 }, writes[64][4] = { 0 };
     ULONG privBound = 0, channelEnableIssued = 0, runlistSubmitted = 0;
-    ULONG cleanupError = 0, writeCount = 0, disableValue = 0, i;
+    ULONG cleanupError = 0, writeCount = 0, i;
     ULONG pbdmaInten0Before = 0u, pbdmaStallBefore = 0u;
     ULONG pbdmaInten0Init = 0u;
     ULONG d3Result = 0u, d4Result = 0u, d4Run = 0u, d5Result = 0u;
@@ -5560,7 +5649,7 @@ static ULONG B3cInitFifoD2(PSWGPU_DEVICE Dev)
     B3cPrivRingResetWriteLog();
     g_D2PbdmaMasksSaved = 0u;
     grEnabled = Rd(B, NV_PMC_ENABLE);
-    Trace(L"B3cD2PmcEnable", grEnabled);
+    TraceDetail(L"B3cD2PmcEnable", grEnabled);
     if (!(grEnabled & (1u << 12)) || !g_GrVm.Active || g_GrVm.Arena == NULL) {
         result = 0xE00000A0u; stage = 1u; goto done;
     }
@@ -5575,9 +5664,9 @@ static ULONG B3cInitFifoD2(PSWGPU_DEVICE Dev)
     grEngineId = (topInfo[0] >> 26) & 0xFu;
     runlistId = (topInfo[0] >> 21) & 0xFu;
     TraceBin(L"B3cD2TopDeviceInfo", topInfo, sizeof(topInfo));
-    Trace(L"B3cD2TopEntryType", topInfo[0] & 3u);
-    Trace(L"B3cD2GrEngineId", grEngineId);
-    Trace(L"B3cD2RunlistId", runlistId);
+    TraceDetail(L"B3cD2TopEntryType", topInfo[0] & 3u);
+    TraceDetail(L"B3cD2GrEngineId", grEngineId);
+    TraceDetail(L"B3cD2RunlistId", runlistId);
     if ((topInfo[0] & 3u) != 2u || grEngineId >= 16u || runlistId >= 16u) {
         result = 0xE00000A0u; stage = 3u; goto done;
     }
@@ -5702,21 +5791,21 @@ static ULONG B3cInitFifoD2(PSWGPU_DEVICE Dev)
     TraceBin(L"B3cD2RamfcFields", ramfcTrace, sizeof(ramfcTrace));
     TraceBin(L"B3cD2RunlistEntry", runlistTrace, sizeof(runlistTrace));
     TraceBin(L"B3cD2ZeroSamples", zeroSamples, sizeof(zeroSamples));
-    Trace(L"B3cD2UserdZeroOk", userdZeroOk);
-    Trace(L"B3cD2GpfifoEmptyOk", ringZeroOk);
-    Trace(L"B3cD2PushbufferZeroOk", pushbufferZeroOk);
-    Trace(L"B3cD2UserdZeroWords", userdZeroWords);
-    Trace(L"B3cD2GpfifoZeroWords", ringZeroWords);
-    Trace(L"B3cD2PushbufferZeroWords", pushbufferZeroWords);
-    Trace(L"B3cD2MemoryZeroBadOffset", zeroBadOffset);
-    Trace(L"B3cD2GpfifoEntries", PAGE_SIZE / 8u);
-    Trace(L"B3cD2RunlistBaseIovaLo", (ULONG)runlistIova);
-    Trace(L"B3cD2RunlistBaseIovaHi", (ULONG)(runlistIova >> 32));
-    Trace(L"B3cD2GpfifoGpuVa", (ULONG)gpfifoGpuVa);
-    Trace(L"B3cD2UserdIovaLo", (ULONG)userdIova);
-    Trace(L"B3cD2UserdIovaHi", (ULONG)(userdIova >> 32));
-    Trace(L"B3cD2RamfcAcquireExpected", ramfcValues[3][1]);
-    Trace(L"B3cD2RamfcSubdeviceExpected", ramfcValues[7][1]);
+    TraceDetail(L"B3cD2UserdZeroOk", userdZeroOk);
+    TraceDetail(L"B3cD2GpfifoEmptyOk", ringZeroOk);
+    TraceDetail(L"B3cD2PushbufferZeroOk", pushbufferZeroOk);
+    TraceDetail(L"B3cD2UserdZeroWords", userdZeroWords);
+    TraceDetail(L"B3cD2GpfifoZeroWords", ringZeroWords);
+    TraceDetail(L"B3cD2PushbufferZeroWords", pushbufferZeroWords);
+    TraceDetail(L"B3cD2MemoryZeroBadOffset", zeroBadOffset);
+    TraceDetail(L"B3cD2GpfifoEntries", PAGE_SIZE / 8u);
+    TraceDetail(L"B3cD2RunlistBaseIovaLo", (ULONG)runlistIova);
+    TraceDetail(L"B3cD2RunlistBaseIovaHi", (ULONG)(runlistIova >> 32));
+    TraceDetail(L"B3cD2GpfifoGpuVa", (ULONG)gpfifoGpuVa);
+    TraceDetail(L"B3cD2UserdIovaLo", (ULONG)userdIova);
+    TraceDetail(L"B3cD2UserdIovaHi", (ULONG)(userdIova >> 32));
+    TraceDetail(L"B3cD2RamfcAcquireExpected", ramfcValues[3][1]);
+    TraceDetail(L"B3cD2RamfcSubdeviceExpected", ramfcValues[7][1]);
     if (!userdZeroOk || !ringZeroOk || !pushbufferZeroOk ||
         runlistTrace[0][2] != chid || runlistTrace[1][2] != 0u ||
         instWords[132] != expectedWfiLo || instWords[133] != expectedWfiHi) {
@@ -5733,10 +5822,10 @@ static ULONG B3cInitFifoD2(PSWGPU_DEVICE Dev)
     runlistEmptyValue = (runlistId << 20);
     ccsrChannelBefore = Rd(B, ccsrChannelReg);
     ccsrChannelValue = (ccsrChannelBefore & ~0x000F0000u) | (runlistId << 16);
-    Trace(L"B3cD2CcsrInstValue", ccsrInstValue);
-    Trace(L"B3cD2RunlistBaseValue", runlistBaseValue);
-    Trace(L"B3cD2RunlistSubmitValue", runlistSubmitValue);
-    Trace(L"B3cD2CcsrChannelBefore", ccsrChannelBefore);
+    TraceDetail(L"B3cD2CcsrInstValue", ccsrInstValue);
+    TraceDetail(L"B3cD2RunlistBaseValue", runlistBaseValue);
+    TraceDetail(L"B3cD2RunlistSubmitValue", runlistSubmitValue);
+    TraceDetail(L"B3cD2CcsrChannelBefore", ccsrChannelBefore);
 
     /* Publish runlist memory, assign this channel to the TOP-selected runlist,
      * bind the shared RAMIN block, and enable channel 0.  No GPFIFO entry is
@@ -5763,43 +5852,43 @@ static ULONG B3cInitFifoD2(PSWGPU_DEVICE Dev)
         pbdmaInten0Init = 0xFFFFFEFFu;
         g_D2PbdmaInten0Before = pbdmaInten0Before;
         g_D2PbdmaMasksSaved = 1u;
-        Trace(L"B3cD2PbIntrStallBefore", pbdmaStallBefore);
-        Trace(L"B3cD2PbIntrEn0Before", Rd(B, 0x0004010Cu));
-        Trace(L"B3cD2PbIntrEn1Before", Rd(B, 0x0004014Cu));
-        Trace(L"B3cD3PbdmaStallBefore", pbdmaStallBefore);
-        Trace(L"B3cD3PbdmaInten0Before", pbdmaInten0Before);
+        TraceDetail(L"B3cD2PbIntrStallBefore", pbdmaStallBefore);
+        TraceDetail(L"B3cD2PbIntrEn0Before", Rd(B, 0x0004010Cu));
+        TraceDetail(L"B3cD2PbIntrEn1Before", Rd(B, 0x0004014Cu));
+        TraceDetail(L"B3cD3PbdmaStallBefore", pbdmaStallBefore);
+        TraceDetail(L"B3cD3PbdmaInten0Before", pbdmaInten0Before);
         if (!B3cD2Write(B, writes, &writeCount, 0x00040108u, 0xFFFFFFFFu) ||
             !B3cD2Write(B, writes, &writeCount, 0x00040148u, 0xFFFFFFFFu) ||
             !B3cD2Write(B, writes, &writeCount, 0x0004010Cu, pbdmaInten0Init) ||
             !B3cD2Write(B, writes, &writeCount, 0x0004014Cu, 0xFFFFFFFFu)) {
             result = 0xE00000A0u; stage = 30u; goto done;
         }
-        Trace(L"B3cD2PbIntrStallAfter", Rd(B, 0x0004013Cu));
-        Trace(L"B3cD2PbIntrEn0After", Rd(B, 0x0004010Cu));
-        Trace(L"B3cD2PbIntr0AfterInit", Rd(B, 0x00040108u));
-        Trace(L"B3cD3PbdmaStallAfter", Rd(B, 0x0004013Cu));
-        Trace(L"B3cD3PbdmaInten0After", Rd(B, 0x0004010Cu));
-        Trace(L"B3cD3Bit24Enabled", ((Rd(B, 0x0004010Cu) & 0x01000000u) != 0u) ? 1u : 0u);
+        TraceDetail(L"B3cD2PbIntrStallAfter", Rd(B, 0x0004013Cu));
+        TraceDetail(L"B3cD2PbIntrEn0After", Rd(B, 0x0004010Cu));
+        TraceDetail(L"B3cD2PbIntr0AfterInit", Rd(B, 0x00040108u));
+        TraceDetail(L"B3cD3PbdmaStallAfter", Rd(B, 0x0004013Cu));
+        TraceDetail(L"B3cD3PbdmaInten0After", Rd(B, 0x0004010Cu));
+        TraceDetail(L"B3cD3Bit24Enabled", ((Rd(B, 0x0004010Cu) & 0x01000000u) != 0u) ? 1u : 0u);
     }
     /* Claude 0.4.60: find which write raises PFIFO BIND_ERROR.  Record
      * fifo_intr_0 and fifo_intr_bind_error (0x252C, read only) before the
      * instance bind, clear a stale bit0, then read both again after. */
     fifoIntrAfter = Rd(B, fifoIntrReg);
-    Trace(L"B3cD2FifoIntr0BeforeInstWrite", fifoIntrAfter);
-    Trace(L"B3cD2BindErrorInfoBeforeInstWrite", Rd(B, 0x0000252Cu));
+    TraceDetail(L"B3cD2FifoIntr0BeforeInstWrite", fifoIntrAfter);
+    TraceDetail(L"B3cD2BindErrorInfoBeforeInstWrite", Rd(B, 0x0000252Cu));
     if ((fifoIntrAfter & 1u) != 0u) {
         if (!B3cD2Write(B, writes, &writeCount, fifoIntrReg, 1u)) {
             result = 0xE00000A0u; stage = 18u; goto done;
         }
-        Trace(L"B3cD2FifoIntr0AfterStaleClear", Rd(B, fifoIntrReg));
+        TraceDetail(L"B3cD2FifoIntr0AfterStaleClear", Rd(B, fifoIntrReg));
     }
     {
         ULONG bar1Reg = 0x00001704u, bindStatusReg = 0x00001710u;
         ULONG bar1Value = instPage | 0x30000000u | 0x80000000u;
         ULONG bindStatus = 0u, bindPolls = 0u;
         g_D2Bar1Before = Rd(B, bar1Reg);
-        Trace(L"B3cD2Bar1Before", g_D2Bar1Before);
-        Trace(L"B3cD2Bar1Value", bar1Value);
+        TraceDetail(L"B3cD2Bar1Before", g_D2Bar1Before);
+        TraceDetail(L"B3cD2Bar1Value", bar1Value);
         g_D2Bar1Bound = 1u;
         if (!B3cD2Write(B, writes, &writeCount, bar1Reg, bar1Value)) {
             result = 0xE00000A0u; stage = 19u; goto done;
@@ -5809,23 +5898,23 @@ static ULONG B3cInitFifoD2(PSWGPU_DEVICE Dev)
             if ((bindStatus & 0x3u) == 0u) break;
             Us(1000u);
         }
-        Trace(L"B3cD2Bar1Readback", writes[writeCount - 1u][3]);
+        TraceDetail(L"B3cD2Bar1Readback", writes[writeCount - 1u][3]);
         Trace(L"B3cD2Bar1BindPolls", bindPolls);
-        Trace(L"B3cD2Bar1BindStatus", bindStatus);
-        Trace(L"B3cD2FifoIntr0AfterBar1", Rd(B, fifoIntrReg));
+        TraceDetail(L"B3cD2Bar1BindStatus", bindStatus);
+        TraceDetail(L"B3cD2FifoIntr0AfterBar1", Rd(B, fifoIntrReg));
         if (bindPolls == 2000u) { result = 0xE00000A0u; stage = 20u; goto done; }
     }
     {
         ULONG userdBar1Value = (BAR1_D3_LOW_VA >> 12) | 0x10000000u;
         g_D2UserdBar1Before = Rd(B, 0x00002254u);
-        Trace(L"B3cD2UserdBar1Before", g_D2UserdBar1Before);
-        Trace(L"B3cD2UserdBar1Value", userdBar1Value);
+        TraceDetail(L"B3cD2UserdBar1Before", g_D2UserdBar1Before);
+        TraceDetail(L"B3cD2UserdBar1Value", userdBar1Value);
         g_D2UserdBar1Set = 1u;
         if (!B3cD2Write(B, writes, &writeCount, 0x00002254u, userdBar1Value)) {
             result = 0xE00000A0u; stage = 29u; goto done;
         }
-        Trace(L"B3cD2UserdBar1Readback", writes[writeCount - 1u][3]);
-        Trace(L"B3cD2FifoIntr0AfterUserdBar1", Rd(B, fifoIntrReg));
+        TraceDetail(L"B3cD2UserdBar1Readback", writes[writeCount - 1u][3]);
+        TraceDetail(L"B3cD2FifoIntr0AfterUserdBar1", Rd(B, fifoIntrReg));
     }
     /* Claude 0.4.62: 0.4.61 still got bind error 0x2 with BAR1 bound.  Probe
      * BAR1 target {ncoh 3, vid 0} x channel-inst/USERD target {vid 0, coh 2,
@@ -5874,7 +5963,7 @@ static ULONG B3cInitFifoD2(PSWGPU_DEVICE Dev)
                 ++n;
             }
         }
-        Trace(L"B3cD2ProbeCount", n);
+        TraceDetail(L"B3cD2ProbeCount", n);
         {
             static const PCWSTR probeNames[6][4] = {
                 { L"B3cD2Probe0Combo", L"B3cD2Probe0Intr0AfterBind", L"B3cD2Probe0BindErrorInfo", L"B3cD2Probe0Intr0AfterUnbind" },
@@ -5888,7 +5977,7 @@ static ULONG B3cInitFifoD2(PSWGPU_DEVICE Dev)
                 for (ti = 0; ti < 4u; ++ti) Trace(probeNames[bi][ti], probe[bi][ti]);
             }
         }
-        Trace(L"B3cD2ProbeChosen", chosen);
+        TraceDetail(L"B3cD2ProbeChosen", chosen);
         if (chosen == 0xFFFFFFFFu) {
             ramfc[0x008u >> 2] = ((ULONG)userdIova & ~0x1FFu) | 0x3u;
             result = 0xE00000A0u; stage = 21u; goto done;
@@ -5912,8 +6001,8 @@ static ULONG B3cInitFifoD2(PSWGPU_DEVICE Dev)
             if (!B3cD2Write(B, writes, &writeCount, fifoRunlistBaseReg, runlistBaseValue)) {
                 result = 0xE00000A0u; stage = 28u; goto done;
             }
-            Trace(L"B3cD2ChosenCcsrInstValue", ccsrInstValue);
-            Trace(L"B3cD2ChosenRunlistBaseValue", runlistBaseValue);
+            TraceDetail(L"B3cD2ChosenCcsrInstValue", ccsrInstValue);
+            TraceDetail(L"B3cD2ChosenRunlistBaseValue", runlistBaseValue);
         }
     }
     privBound = 1u;
@@ -5922,10 +6011,10 @@ static ULONG B3cInitFifoD2(PSWGPU_DEVICE Dev)
     }
     instRead = writes[writeCount - 1u][3];
     fifoIntrAfter = Rd(B, fifoIntrReg);
-    Trace(L"B3cD2CcsrInstReadAfterWrite", instRead);
-    Trace(L"B3cD2FifoIntr0AfterInstWrite", fifoIntrAfter);
-    Trace(L"B3cD2BindErrorInfoAfterInstWrite", Rd(B, 0x0000252Cu));
-    Trace(L"B3cD2RamfcUserdLo", ramfc[0x008u >> 2]);
+    TraceDetail(L"B3cD2CcsrInstReadAfterWrite", instRead);
+    TraceDetail(L"B3cD2FifoIntr0AfterInstWrite", fifoIntrAfter);
+    TraceDetail(L"B3cD2BindErrorInfoAfterInstWrite", Rd(B, 0x0000252Cu));
+    TraceDetail(L"B3cD2RamfcUserdLo", ramfc[0x008u >> 2]);
     /* Claude 0.4.59: compare pointer + target only (bind may read back 0);
      * a PFIFO BIND_ERROR (bit0) is the real failure signal. */
     if ((instRead & 0x3FFFFFFFu) != (ccsrInstValue & 0x3FFFFFFFu) ||
@@ -5939,23 +6028,23 @@ static ULONG B3cInitFifoD2(PSWGPU_DEVICE Dev)
         result = 0xE00000A0u; stage = 13u; goto done;
     }
     channelRead = writes[writeCount - 1u][3];
-    Trace(L"B3cD2PbIntr0AfterEnable", Rd(B, 0x00040108u));
+    TraceDetail(L"B3cD2PbIntr0AfterEnable", Rd(B, 0x00040108u));
     if ((channelRead & 1u) == 0u) {
         result = 0xE00000A0u; stage = 14u; goto done;
     }
     runlistSubmitted = 1u;
     /* Read-only candidate checks immediately before and after scheduling:
      * PBDMA routing/target, interrupt policy, and the FECS context left by C2. */
-    Trace(L"B3cD2PbdmaMapBeforeRunlist", Rd(B, 0x00002390u));
-    Trace(L"B3cD2PbdmaTargetBeforeRunlist", Rd(B, 0x000400ACu));
-    Trace(L"B3cD2PbdmaStatusBeforeRunlist", Rd(B, pbdmaStatusReg));
-    Trace(L"B3cD2PbdmaIntr0BeforeRunlist", Rd(B, pbdmaIntrReg));
-    Trace(L"B3cD2PbdmaIntrEn0BeforeRunlist", Rd(B, 0x0004010Cu));
-    Trace(L"B3cD2PbdmaIntrStallBeforeRunlist", Rd(B, 0x0004013Cu));
-    Trace(L"B3cD2FecsCurrentCtxBeforeRunlist", Rd(B, 0x00409B00u));
-    Trace(L"B3cD2FecsNewCtxBeforeRunlist", Rd(B, 0x00409B04u));
-    Trace(L"B3cD2FifoEngineStatusBeforeRunlist", Rd(B, fifoEngineStatusReg));
-    Trace(L"B3cD2RunlistPendingBeforeSubmit", Rd(B, fifoRunlistPendingReg));
+    TraceDetail(L"B3cD2PbdmaMapBeforeRunlist", Rd(B, 0x00002390u));
+    TraceDetail(L"B3cD2PbdmaTargetBeforeRunlist", Rd(B, 0x000400ACu));
+    TraceDetail(L"B3cD2PbdmaStatusBeforeRunlist", Rd(B, pbdmaStatusReg));
+    TraceDetail(L"B3cD2PbdmaIntr0BeforeRunlist", Rd(B, pbdmaIntrReg));
+    TraceDetail(L"B3cD2PbdmaIntrEn0BeforeRunlist", Rd(B, 0x0004010Cu));
+    TraceDetail(L"B3cD2PbdmaIntrStallBeforeRunlist", Rd(B, 0x0004013Cu));
+    TraceDetail(L"B3cD2FecsCurrentCtxBeforeRunlist", Rd(B, 0x00409B00u));
+    TraceDetail(L"B3cD2FecsNewCtxBeforeRunlist", Rd(B, 0x00409B04u));
+    TraceDetail(L"B3cD2FifoEngineStatusBeforeRunlist", Rd(B, fifoEngineStatusReg));
+    TraceDetail(L"B3cD2RunlistPendingBeforeSubmit", Rd(B, fifoRunlistPendingReg));
     if (!B3cD2Write(B, writes, &writeCount, fifoRunlistReg, runlistSubmitValue)) {
         result = 0xE00000A0u; stage = 15u; goto done;
     }
@@ -5966,12 +6055,12 @@ static ULONG B3cInitFifoD2(PSWGPU_DEVICE Dev)
         Us(1000u);
     }
     Trace(L"B3cD2RunlistPolls", runlistPolls);
-    Trace(L"B3cD2RunlistPendingAfter", runlistLast);
-    Trace(L"B3cD2PbIntr0AfterRunlist", Rd(B, 0x00040108u));
-    Trace(L"B3cD2PbdmaMapAfterRunlist", Rd(B, 0x00002390u));
-    Trace(L"B3cD2PbdmaTargetAfterRunlist", Rd(B, 0x000400ACu));
-    Trace(L"B3cD2FecsCurrentCtxAfterRunlist", Rd(B, 0x00409B00u));
-    Trace(L"B3cD2FecsNewCtxAfterRunlist", Rd(B, 0x00409B04u));
+    TraceDetail(L"B3cD2RunlistPendingAfter", runlistLast);
+    TraceDetail(L"B3cD2PbIntr0AfterRunlist", Rd(B, 0x00040108u));
+    TraceDetail(L"B3cD2PbdmaMapAfterRunlist", Rd(B, 0x00002390u));
+    TraceDetail(L"B3cD2PbdmaTargetAfterRunlist", Rd(B, 0x000400ACu));
+    TraceDetail(L"B3cD2FecsCurrentCtxAfterRunlist", Rd(B, 0x00409B00u));
+    TraceDetail(L"B3cD2FecsNewCtxAfterRunlist", Rd(B, 0x00409B04u));
     if (runlistPolls == 2000u) { result = 0xE00000A0u; stage = 16u; goto done; }
     stage = 17u;
     engineStatus = Rd(B, fifoEngineStatusReg);
@@ -5980,18 +6069,18 @@ static ULONG B3cInitFifoD2(PSWGPU_DEVICE Dev)
     fifoIntrAfter = Rd(B, fifoIntrReg);
     pbdmaStatusAfter = Rd(B, pbdmaStatusReg);
     pbdmaIntrAfter = Rd(B, pbdmaIntrReg);
-    Trace(L"B3cD2FifoEngineStatusAfterBind", engineStatus);
-    Trace(L"B3cD2CcsrChannelAfterBind", channelRead);
-    Trace(L"B3cD2CcsrChannelEnableAfterBind", channelRead & 1u);
-    Trace(L"B3cD2CcsrChannelStatusAfterBind", (channelRead >> 24) & 0xFu);
-    Trace(L"B3cD2CcsrInstAfterBind", instRead);
-    Trace(L"B3cD2FifoIntr0AfterBind", fifoIntrAfter);
-    Trace(L"B3cD2Pbdma0StatusAfterBind", pbdmaStatusAfter);
-    Trace(L"B3cD2Pbdma0IntrAfterBind", pbdmaIntrAfter);
+    TraceDetail(L"B3cD2FifoEngineStatusAfterBind", engineStatus);
+    TraceDetail(L"B3cD2CcsrChannelAfterBind", channelRead);
+    TraceDetail(L"B3cD2CcsrChannelEnableAfterBind", channelRead & 1u);
+    TraceDetail(L"B3cD2CcsrChannelStatusAfterBind", (channelRead >> 24) & 0xFu);
+    TraceDetail(L"B3cD2CcsrInstAfterBind", instRead);
+    TraceDetail(L"B3cD2FifoIntr0AfterBind", fifoIntrAfter);
+    TraceDetail(L"B3cD2Pbdma0StatusAfterBind", pbdmaStatusAfter);
+    TraceDetail(L"B3cD2Pbdma0IntrAfterBind", pbdmaIntrAfter);
     /* Claude 0.4.69: with PBDMA bit 24 masked (0.4.68) the empty channel is
      * saved off the PBDMA and reads back enabled + status 0 (idle); 0.4.67
      * and earlier held it ON_PBDMA (5). Both are valid for posting GP_PUT. */
-    Trace(L"B3cD2ChannelStatusAccepted", (channelRead >> 24) & 0xFu);
+    TraceDetail(L"B3cD2ChannelStatusAccepted", (channelRead >> 24) & 0xFu);
     if ((channelRead & 1u) == 0u ||
         (((channelRead >> 24) & 0xFu) != 5u && ((channelRead >> 24) & 0xFu) != 0u)) {
         result = 0xE00000A0u; stage = 31u; goto done;
@@ -6011,7 +6100,7 @@ static ULONG B3cInitFifoD2(PSWGPU_DEVICE Dev)
             L"B3cD2FifoPbdmaStatus0", L"B3cD2BindErrorInfoAfterRunlist" };
         ULONG k;
         for (k = 0; k < 14u; ++k) Trace(pbNames[k], Rd(B, pbRegs[k]));
-        Trace(L"B3cD2UserdGpGet", userd[0x88u >> 2]);
+        TraceDetail(L"B3cD2UserdGpGet", userd[0x88u >> 2]);
         /* Claude 0.4.66: PBDMA intr_0 bit 24 is "[ENGINE]" in nvgpu's
          * pbdma_intr_fault_type_desc[].  Dump GR / FECS / FIFO state (read
          * only) right after the runlist to see which engine side is unhappy. */
@@ -6029,7 +6118,7 @@ static ULONG B3cInitFifoD2(PSWGPU_DEVICE Dev)
             ULONG g;
             for (g = 0; g < 14u; ++g) Trace(grNames[g], Rd(B, grRegs[g]));
         }
-        Trace(L"B3cD2UserdGpPut", userd[0x8Cu >> 2]);
+        TraceDetail(L"B3cD2UserdGpPut", userd[0x8Cu >> 2]);
     }
 
     /* D3 runs while the channel is ON_PBDMA. Its failure is recorded, then
@@ -6058,93 +6147,27 @@ static ULONG B3cInitFifoD2(PSWGPU_DEVICE Dev)
     }
 
 done:
-    /* Always tear down any channel state published by this one-shot probe.
-     * Each cleanup write is still priv-ring checked; both asynchronous waits
-     * have the same fixed 2000 x 1 ms bound as the forward runlist wait. */
-    if (channelEnableIssued) {
-        disableValue = Rd(B, ccsrChannelReg) | 0x00000800u;
-        if (!B3cD2Write(B, writes, &writeCount, ccsrChannelReg, disableValue))
-            cleanupError |= 1u;
-        /* Claude 0.4.64: a pending PBDMA interrupt stalls the channel save,
-         * so the preempt never completes.  Clear PBDMA0 intr_0 / intr_1
-         * (write-1-to-clear, the value just read) before preempting. */
-        {
-            ULONG pi0 = Rd(B, pbdmaIntrReg), pi1 = Rd(B, 0x00040148u);
-            Trace(L"B3cD2CleanupPbdmaIntr0", pi0);
-            Trace(L"B3cD2CleanupPbdmaIntr1", pi1);
-            /* Claude 0.4.66: nouveau gk104_runq_intr() writes method0
-             * (0x400C0) = 0x80600008 before clearing the PBDMA interrupt,
-             * so the PBDMA drops the faulting method instead of re-raising. */
-            if (pi0 != 0u && !B3cD2Write(B, writes, &writeCount, 0x000400C0u, 0x80600008u))
-                cleanupError |= 512u;
-            if (pi0 != 0u && !B3cD2Write(B, writes, &writeCount, pbdmaIntrReg, pi0))
-                cleanupError |= 512u;
-            if (pi1 != 0u && !B3cD2Write(B, writes, &writeCount, 0x00040148u, pi1))
-                cleanupError |= 512u;
-            Trace(L"B3cD2CleanupPbdmaIntr0AfterClear", Rd(B, pbdmaIntrReg));
-        }
-        if (!B3cD2Write(B, writes, &writeCount, fifoPreemptReg,
-                        chid | 0u /* channel type, channel id 0 */))
-            cleanupError |= 2u;
-        preemptLast = Rd(B, fifoPreemptReg);
-        for (preemptPolls = 0; preemptPolls < 2000u; ++preemptPolls) {
-            preemptLast = Rd(B, fifoPreemptReg);
-            if ((preemptLast & 0x00100000u) == 0u) break;
-            Us(1000u);
-        }
-        if (preemptPolls == 2000u) {
-            cleanupError |= 4u;
-            if (d4Run && g_GrVm.Arena != NULL)
-                B3cD4CaptureCtxswDiag(B,
-                    (PUCHAR)g_GrVm.Arena + GR_VM_CTX_OFF,
-                    diagWrites, &diagWriteCount, TRUE);
-        }
-        Trace(L"B3cD2PreemptPbdmaIntr0", Rd(B, pbdmaIntrReg));
-    Trace(L"B3cD2PreemptPbdmaStatusReg", Rd(B, pbdmaStatusReg));
-    Trace(L"B3cD2PreemptCcsrChannel", Rd(B, ccsrChannelReg));
-    Trace(L"B3cD2PreemptEngineStatus", Rd(B, fifoEngineStatusReg));
-        Trace(L"B3cD2PreemptFifoIntr0", Rd(B, fifoIntrReg));
-        Trace(L"B3cD2PreemptPbdmaStatus", Rd(B, 0x00003080u));
-    }
-    if (runlistSubmitted) {
-        if (!B3cD2Write(B, writes, &writeCount, fifoRunlistReg, runlistEmptyValue))
-            cleanupError |= 8u;
-        cleanupRunlistLast = Rd(B, fifoRunlistPendingReg);
-        for (cleanupRunlistPolls = 0; cleanupRunlistPolls < 2000u; ++cleanupRunlistPolls) {
-            cleanupRunlistLast = Rd(B, fifoRunlistPendingReg);
-            if ((cleanupRunlistLast & 0x00100000u) == 0u) break;
-            Us(1000u);
-        }
-        if (cleanupRunlistPolls == 2000u) cleanupError |= 16u;
-    }
-    if (privBound && !B3cD2Write(B, writes, &writeCount, ccsrInstReg, 0u))
-        cleanupError |= 32u;
-    if (g_D2PbdmaMasksSaved) {
-        if (!B3cD2Write(B, writes, &writeCount, 0x0004010Cu, g_D2PbdmaInten0Before))
-            cleanupError |= 1024u;
-        Trace(L"B3cD3PbdmaInten0Restored", Rd(B, 0x0004010Cu));
-        Trace(L"B3cD3PbdmaStallUnchanged", Rd(B, 0x0004013Cu));
-        g_D2PbdmaMasksSaved = 0u;
-    }
-    if (g_D2UserdBar1Set) {
-        if (!B3cD2Write(B, writes, &writeCount, 0x00002254u, g_D2UserdBar1Before))
-            cleanupError |= 256u;
-        Trace(L"B3cD2UserdBar1Final", Rd(B, 0x00002254u));
-        g_D2UserdBar1Set = 0u;
-    }
-    if (g_D2Bar1Bound) {
-        ULONG restorePolls, restoreStatus = 0u;
-        if (!B3cD2Write(B, writes, &writeCount, 0x00001704u, g_D2Bar1Before))
-            cleanupError |= 64u;
-        for (restorePolls = 0; restorePolls < 2000u; ++restorePolls) {
-            restoreStatus = Rd(B, 0x00001710u);
-            if ((restoreStatus & 0x3u) == 0u) break;
-            Us(1000u);
-        }
-        if (restorePolls == 2000u) cleanupError |= 128u;
-        Trace(L"B3cD2Bar1RestorePolls", restorePolls);
-        Trace(L"B3cD2Bar1Final", Rd(B, 0x00001704u));
-        g_D2Bar1Bound = 0u;
+    Dev->ResidentChannelEnabled = channelEnableIssued ? TRUE : FALSE;
+    Dev->ResidentRunlistSubmitted = runlistSubmitted ? TRUE : FALSE;
+    Dev->ResidentInstBound = privBound ? TRUE : FALSE;
+    Dev->ResidentRunlistEmptyValue = runlistEmptyValue;
+    Dev->ResidentChannelId = chid;
+    if (result == 0u) {
+        Dev->ResidentActive = TRUE;
+        g_ResidentOwner = Dev;
+        TraceDurable(L"B3eResidentActive", 1u);
+        TraceDetail(L"B3eResidentChannelEnabled", channelEnableIssued);
+        TraceDetail(L"B3eResidentRunlistSubmitted", runlistSubmitted);
+    } else {
+        cleanupError = B3cD2CleanupPublishedState(Dev, writes, &writeCount,
+            channelEnableIssued ? TRUE : FALSE, runlistSubmitted ? TRUE : FALSE,
+            privBound ? TRUE : FALSE, chid, runlistEmptyValue,
+            &preemptPolls, &preemptLast, &cleanupRunlistPolls, &cleanupRunlistLast,
+            d4Run ? TRUE : FALSE,
+            diagWrites, &diagWriteCount);
+        Dev->ResidentChannelEnabled = FALSE;
+        Dev->ResidentRunlistSubmitted = FALSE;
+        Dev->ResidentInstBound = FALSE;
     }
     if (cleanupError != 0u && result == 0u) result = 0xE00000A0u;
     channelRead = Rd(B, ccsrChannelReg);
@@ -6154,11 +6177,11 @@ done:
     fifoIntrAfter = Rd(B, fifoIntrReg);
     pbdmaStatusAfter = Rd(B, pbdmaStatusReg);
     pbdmaIntrAfter = Rd(B, pbdmaIntrReg);
-    Trace(L"B3cD2BindErrorInfoFinal", Rd(B, 0x0000252Cu));
-    Trace(L"B3cD2Stage", stage);
+    TraceDetail(L"B3cD2BindErrorInfoFinal", Rd(B, 0x0000252Cu));
+    TraceDetail(L"B3cD2Stage", stage);
     Trace(L"B3cD2Result", result);
-    Trace(L"B3cD2CleanupError", cleanupError);
-    Trace(L"B3cD2WriteCount", writeCount);
+    TraceDetail(L"B3cD2CleanupError", cleanupError);
+    TraceDetail(L"B3cD2WriteCount", writeCount);
     TraceBin(L"B3cD2Writes", writes, sizeof(writes));
     TraceBin(L"B3cD2RamfcFields", ramfcTrace, sizeof(ramfcTrace));
     TraceBin(L"B3cD2MemoryLayout", memoryLayout, sizeof(memoryLayout));
@@ -6166,20 +6189,20 @@ done:
     TraceBin(L"B3cD2RunlistEntry", runlistTrace, sizeof(runlistTrace));
     TraceBin(L"B3cD2ZeroSamples", zeroSamples, sizeof(zeroSamples));
     Trace(L"B3cD2RunlistPolls", runlistPolls);
-    Trace(L"B3cD2RunlistLast", runlistLast);
+    TraceDetail(L"B3cD2RunlistLast", runlistLast);
     Trace(L"B3cD2PreemptPolls", preemptPolls);
-    Trace(L"B3cD2PreemptLast", preemptLast);
+    TraceDetail(L"B3cD2PreemptLast", preemptLast);
     Trace(L"B3cD2CleanupRunlistPolls", cleanupRunlistPolls);
-    Trace(L"B3cD2CleanupRunlistLast", cleanupRunlistLast);
-    Trace(L"B3cD2CcsrInstFinal", instRead);
-    Trace(L"B3cD2CcsrChannelFinal", channelRead);
-    Trace(L"B3cD2CcsrChannelEnableFinal", channelRead & 1u);
-    Trace(L"B3cD2CcsrChannelStatusFinal", (channelRead >> 24) & 0xFu);
-    Trace(L"B3cD2RunlistPendingFinal", pendingRead);
-    Trace(L"B3cD2FifoEngineStatusFinal", engineStatus);
-    Trace(L"B3cD2FifoIntr0Final", fifoIntrAfter);
-    Trace(L"B3cD2Pbdma0StatusFinal", pbdmaStatusAfter);
-    Trace(L"B3cD2Pbdma0IntrFinal", pbdmaIntrAfter);
+    TraceDetail(L"B3cD2CleanupRunlistLast", cleanupRunlistLast);
+    TraceDetail(L"B3cD2CcsrInstFinal", instRead);
+    TraceDetail(L"B3cD2CcsrChannelFinal", channelRead);
+    TraceDetail(L"B3cD2CcsrChannelEnableFinal", channelRead & 1u);
+    TraceDetail(L"B3cD2CcsrChannelStatusFinal", (channelRead >> 24) & 0xFu);
+    TraceDetail(L"B3cD2RunlistPendingFinal", pendingRead);
+    TraceDetail(L"B3cD2FifoEngineStatusFinal", engineStatus);
+    TraceDetail(L"B3cD2FifoIntr0Final", fifoIntrAfter);
+    TraceDetail(L"B3cD2Pbdma0StatusFinal", pbdmaStatusAfter);
+    TraceDetail(L"B3cD2Pbdma0IntrFinal", pbdmaIntrAfter);
     B3cPrivRingTraceWriteLog(L"B3cD2PrivWriteErrorCount",
         L"B3cD2PrivWriteErrorDropped", L"B3cD2PrivAckTimeouts",
         L"B3cD2PrivWriteErrors");
@@ -6212,8 +6235,7 @@ static VOID GrVmCleanupAfterGpuReset(PSWGPU_DEVICE Dev)
     } else {
         TraceDurable(L"B3cC2dOuterMapRestored", 1u);
     }
-    if (g_GrVm.Arena != NULL)
-        MmFreeContiguousMemorySpecifyCache(g_GrVm.Arena, GR_VM_ARENA_SIZE, MmNonCached);
+    E4Return(Dev, SwGpuPoolGr, g_GrVm.Arena, GR_VM_ARENA_SIZE);
     RtlZeroMemory(&g_GrVm, sizeof(g_GrVm));
 }
 
@@ -6257,11 +6279,11 @@ static ULONG B3cRunC2b(PSWGPU_DEVICE Dev)
     B3cCaptureGpcPriDiag(B, L"B3cC2bPreResetGpcPri", L"B3cC2bPreResetGpcPriBadfCount",
                          &gpcPriBadfCount);
     pmcEnable = Rd(B, NV_PMC_ENABLE);
-    Trace(L"B3cC2bPmcEnable", pmcEnable);
+    TraceDetail(L"B3cC2bPmcEnable", pmcEnable);
     if (!(pmcEnable & (1u << 12))) { result = 0xE0000087u; goto done; }
 
     data = ReadBinParam(L"FwGrSwNonctx", 0x20000u, &length);
-    Trace(L"B3cC2bSwNonctxBytes", length);
+    TraceDetail(L"B3cC2bSwNonctxBytes", length);
     if (data == NULL || length == 0 || (length % 8u) != 0) {
         result = 0xE0000087u; goto done;
     }
@@ -6274,24 +6296,24 @@ static ULONG B3cRunC2b(PSWGPU_DEVICE Dev)
             result = 0xE0000087u; goto done;
         }
     }
-    Trace(L"B3cC2bSwNonctxCount", count);
-    Trace(L"B3cC2bSwNonctxFirstAddr", Le32(data));
+    TraceDetail(L"B3cC2bSwNonctxCount", count);
+    TraceDetail(L"B3cC2bSwNonctxFirstAddr", Le32(data));
 
     /* nvgpu gk20a_init_gr_prepare() -> gk20a_reset(): reset PGRAPH, BLG,
      * and PERFMON, keeping all unrelated PMC_ENABLE bits (including PMU).
      * hw_mc_gm20b.h confirms MC_ENABLE=0x200 and masks 0x1000/0x08000000/
      * 0x10000000. This reset is bounded by fixed delays and readback checks. */
     mcValue = Rd(B, c2bMcEnableOff);
-    Trace(L"B3cC2bMcEnableBeforeReset", mcValue);
+    TraceDetail(L"B3cC2bMcEnableBeforeReset", mcValue);
     Wr(B, c2bMcEnableOff, mcValue & ~c2bEngineResetMask);
     mcDisabled = Rd(B, c2bMcEnableOff);
-    Trace(L"B3cC2bMcEnableDuringReset", mcDisabled);
+    TraceDetail(L"B3cC2bMcEnableDuringReset", mcDisabled);
     if (mcDisabled & c2bEngineResetMask) { result = 0xE0000087u; goto done; }
     Us(20);
     mcValue = Rd(B, c2bMcEnableOff);
     Wr(B, c2bMcEnableOff, mcValue | c2bEngineResetMask);
     mcEnabled = Rd(B, c2bMcEnableOff);
-    Trace(L"B3cC2bMcEnableAfterReset", mcEnabled);
+    TraceDetail(L"B3cC2bMcEnableAfterReset", mcEnabled);
     Us(20);
     if ((mcEnabled & c2bEngineResetMask) != c2bEngineResetMask || !(mcEnabled & (1u << 12))) {
         result = 0xE0000087u; goto done;
@@ -6308,7 +6330,7 @@ static ULONG B3cRunC2b(PSWGPU_DEVICE Dev)
         Us(10);
     }
     Trace(L"B3cC2bForceClockPolls", waitPoll);
-    Trace(L"B3cC2bForceClockReadback", grPowerRead);
+    TraceDetail(L"B3cC2bForceClockReadback", grPowerRead);
     if (waitPoll == 2000u) { result = 0xE0000087u; goto done; }
 
     Wr(B, c2bSwNonctxResetCtlOff, 0x70u);
@@ -6317,8 +6339,8 @@ static ULONG B3cRunC2b(PSWGPU_DEVICE Dev)
     Wr(B, c2bSwNonctxResetCtlOff, 0x770u);
     grResetReleaseRead = Rd(B, c2bSwNonctxResetCtlOff);
     Us(20);
-    Trace(L"B3cC2bFecsCtxswResetAssert", grResetAssertRead);
-    Trace(L"B3cC2bFecsCtxswResetRelease", grResetReleaseRead);
+    TraceDetail(L"B3cC2bFecsCtxswResetAssert", grResetAssertRead);
+    TraceDetail(L"B3cC2bFecsCtxswResetRelease", grResetReleaseRead);
 
     /* Return FE clocks to automatic mode and wait for the request to finish. */
     Wr(B, c2bGrPowerModeOff, 0x10u);
@@ -6328,14 +6350,14 @@ static ULONG B3cRunC2b(PSWGPU_DEVICE Dev)
         Us(10);
     }
     Trace(L"B3cC2bAutoClockPolls", waitPoll);
-    Trace(L"B3cC2bAutoClockReadback", grPowerRead);
+    TraceDetail(L"B3cC2bAutoClockReadback", grPowerRead);
     if (waitPoll == 2000u) { result = 0xE0000087u; goto done; }
 
     /* nvgpu gk20a_init_gr_reset_enable_hw() clears SCC RAM after ctxsw reset,
      * then writes each validated non-context AV record. */
     Wr(B, c2bSccInitOff, 1u);
     sccInitRead = Rd(B, c2bSccInitOff);
-    Trace(L"B3cC2bSccInitReadback", sccInitRead);
+    TraceDetail(L"B3cC2bSccInitReadback", sccInitRead);
     if (!B3cPrivRingDrainBeforeWrites(B)) { result = 0xE0000095u; goto done; }
     for (entryIndex = 0; entryIndex < count; ++entryIndex) {
         grAddr = Le32(data + entryIndex * 8u);
@@ -6356,8 +6378,8 @@ static ULONG B3cRunC2b(PSWGPU_DEVICE Dev)
     KeMemoryBarrier();
     for (entryIndex = 0; entryIndex < sampleCount; ++entryIndex)
         sample[entryIndex][2] = Rd(B, sample[entryIndex][0]);
-    Trace(L"B3cC2bSwNonctxWrites", writes);
-    Trace(L"B3cC2bReadbackCount", sampleCount);
+    TraceDetail(L"B3cC2bSwNonctxWrites", writes);
+    TraceDetail(L"B3cC2bReadbackCount", sampleCount);
     if (sampleCount) TraceBin(L"B3cC2bReadback", sample, sampleCount * sizeof(sample[0]));
 
     /* Match nvgpu gr_gk20a_wait_mem_scrubbing() with a finite 2 s ceiling. */
@@ -6368,8 +6390,8 @@ static ULONG B3cRunC2b(PSWGPU_DEVICE Dev)
         Ms(1);
     }
     Trace(L"B3cC2bScrubPolls", waitPoll);
-    Trace(L"B3cC2bFecsScrubBits", scrubFecs);
-    Trace(L"B3cC2bGpccsScrubBits", scrubGpccs);
+    TraceDetail(L"B3cC2bFecsScrubBits", scrubFecs);
+    TraceDetail(L"B3cC2bGpccsScrubBits", scrubGpccs);
     if (waitPoll == 2000u) { result = 0xE0000087u; goto done; }
 
     /* This probe has no GPFIFO channel yet; use the GR engine-busy and FE
@@ -6381,16 +6403,16 @@ static ULONG B3cRunC2b(PSWGPU_DEVICE Dev)
         Ms(1);
     }
     Trace(L"B3cC2bIdlePolls", waitPoll);
-    Trace(L"B3cC2bEngineStatus", engineStatus);
-    Trace(L"B3cC2bGrStatus", grStatus);
+    TraceDetail(L"B3cC2bEngineStatus", engineStatus);
+    TraceDetail(L"B3cC2bGrStatus", grStatus);
     if (waitPoll == 2000u) { result = 0xE0000087u; goto done; }
 
 done:
     B3cPrivRingTraceWriteLog(L"B3cC2bPrivWriteErrorCount",
         L"B3cC2bPrivWriteErrorDropped", L"B3cC2bPrivAckTimeouts",
         L"B3cC2bPrivWriteErrors");
-    Trace(L"B3cC2bBadIndex", badIndex);
-    Trace(L"B3cC2bBadAddress", badAddr);
+    TraceDetail(L"B3cC2bBadIndex", badIndex);
+    TraceDetail(L"B3cC2bBadAddress", badAddr);
     if (data != NULL) ExFreePoolWithTag(data, SWGPU_TAG);
     TraceDurable(L"B3cC2bResult", result);
     return result;
@@ -6427,8 +6449,8 @@ static ULONG B3cStartFecsLs(PSWGPU_DEVICE Dev)
     dmemSize = ((Rd(B, PMU_FALCON + FALCON_HWCFG) >> 9) & 0x1FFu) << 8;
     msgHead = Rd(B, PMU_FALCON + 0x4C8);
     msgTail = Rd(B, PMU_FALCON + 0x4CC);
-    Trace(L"B3cFecsInitHead", msgHead);
-    Trace(L"B3cFecsInitTail", msgTail);
+    TraceDetail(L"B3cFecsInitHead", msgHead);
+    TraceDetail(L"B3cFecsInitTail", msgTail);
     if (dmemSize < 256u || msgHead == 0xFFFFFFFFu || msgTail == 0xFFFFFFFFu ||
         (msgHead & 3u) || (msgTail & 3u) || msgHead < msgTail || msgHead - msgTail < 44u ||
         msgTail > dmemSize - 44u) { result = 0xE0000078u; goto done; }
@@ -6441,9 +6463,9 @@ static ULONG B3cStartFecsLs(PSWGPU_DEVICE Dev)
     hpqSize = words[2] & 0xFFFFu; hpqBase = words[2] >> 16; hpqIndex = words[3] & 0xFFu;
     msgSize = words[8] & 0xFFFFu; msgBase = words[8] >> 16;
     hpqEnd = hpqBase + hpqSize; msgEnd = msgBase + msgSize;
-    Trace(L"B3cFecsHpqBase", hpqBase); Trace(L"B3cFecsHpqSize", hpqSize);
-    Trace(L"B3cFecsHpqIndex", hpqIndex); Trace(L"B3cFecsMsgqBase", msgBase);
-    Trace(L"B3cFecsMsgqSize", msgSize); Trace(L"B3cFecsInitCursor", cursor);
+    TraceDetail(L"B3cFecsHpqBase", hpqBase); TraceDetail(L"B3cFecsHpqSize", hpqSize);
+    TraceDetail(L"B3cFecsHpqIndex", hpqIndex); TraceDetail(L"B3cFecsMsgqBase", msgBase);
+    TraceDetail(L"B3cFecsMsgqSize", msgSize); TraceDetail(L"B3cFecsInitCursor", cursor);
     if (hpqIndex >= 4u || hpqBase < 4u || msgBase < 4u || hpqSize < 32u || msgSize < 64u ||
         hpqEnd > dmemSize || msgEnd > dmemSize ||
         (hpqBase < msgEnd && msgBase < hpqEnd) || msgTail < msgBase || msgTail + 44u > msgEnd ||
@@ -6454,7 +6476,7 @@ static ULONG B3cStartFecsLs(PSWGPU_DEVICE Dev)
     qhead = Rd(B, PMU_FALCON + reg);
     qtail = Rd(B, PMU_FALCON + 0x4B0u + hpqIndex * 4u);
     hpqEnd = hpqBase + hpqSize;
-    Trace(L"B3cFecsHpqHeadBefore", qhead); Trace(L"B3cFecsHpqTail", qtail);
+    TraceDetail(L"B3cFecsHpqHeadBefore", qhead); TraceDetail(L"B3cFecsHpqTail", qtail);
     if ((qhead & 3u) || (qtail & 3u) || qhead < hpqBase || qhead >= hpqEnd || qtail < hpqBase || qtail >= hpqEnd) {
         result = 0xE0000078u; goto done;
     }
@@ -6474,7 +6496,7 @@ static ULONG B3cStartFecsLs(PSWGPU_DEVICE Dev)
     KeMemoryBarrier();
     qhead += sizeof(wprCmd);
     Wr(B, PMU_FALCON + reg, qhead);
-    Trace(L"B3cFecsWprCommandHeadAfter", qhead);
+    TraceDetail(L"B3cFecsWprCommandHeadAfter", qhead);
     TraceBin(L"B3cFecsWprInitCommand", wprCmd, sizeof(wprCmd));
     for (polls = 0; polls < 2000u; ++polls) {
         replyHead = Rd(B, PMU_FALCON + 0x4C8); replyTail = Rd(B, PMU_FALCON + 0x4CC);
@@ -6492,26 +6514,26 @@ static ULONG B3cStartFecsLs(PSWGPU_DEVICE Dev)
     wprReplyHdr = Rd(B, PMU_FALCON + FALCON_DMEMD0);
     wprReplyCtrl = Rd(B, PMU_FALCON + FALCON_DMEMD0);
     wprReplyCode = Rd(B, PMU_FALCON + FALCON_DMEMD0);
-    Trace(L"B3cFecsWprReplyHeader", wprReplyHdr); Trace(L"B3cFecsWprReplyCtrl", wprReplyCtrl);
-    Trace(L"B3cFecsWprReplyCode", wprReplyCode);
+    TraceDetail(L"B3cFecsWprReplyHeader", wprReplyHdr); TraceDetail(L"B3cFecsWprReplyCtrl", wprReplyCtrl);
+    TraceDetail(L"B3cFecsWprReplyCode", wprReplyCode);
     if ((wprReplyHdr & 0xFFu) != 0x0Au || ((wprReplyHdr >> 8) & 0xFFu) != 12u ||
         ((wprReplyHdr >> 24) & 0xFFu) != 1u || ((wprReplyHdr >> 18) & 1u) ||
         (wprReplyCtrl & 0xFFu) != 0u || wprReplyCode != 0u) {
         result = 0xE0000079u; goto done;
     }
     Wr(B, PMU_FALCON + 0x4CC, replyTail + 12u);
-    Trace(L"B3cFecsHpqHeadAfterWprInit", Rd(B, PMU_FALCON + reg));
-    Trace(L"B3cFecsHpqTailAfterWprInit", Rd(B, PMU_FALCON + 0x4B0u + hpqIndex * 4u));
+    TraceDetail(L"B3cFecsHpqHeadAfterWprInit", Rd(B, PMU_FALCON + reg));
+    TraceDetail(L"B3cFecsHpqTailAfterWprInit", Rd(B, PMU_FALCON + 0x4B0u + hpqIndex * 4u));
     TraceB3cPmuCheckpoint(B, L"B3cPmuCheckpointAfterWprAck");
 
     Step(67);
     /* Claude: keep 'reg' as the HPQ head register offset; 0.4.28 reused it for
      * PMC_ENABLE, so Step 68 accessed PMU_FALCON + 0xC0013120 (bugcheck). */
     pmcEnable = Rd(B, NV_PMC_ENABLE);
-    Trace(L"B3cFecsPmcEnableBefore", pmcEnable);
+    TraceDetail(L"B3cFecsPmcEnableBefore", pmcEnable);
     Wr(B, NV_PMC_ENABLE, pmcEnable | (1u << 12));
     (VOID)Rd(B, NV_PMC_ENABLE);
-    Trace(L"B3cFecsPmcEnableAfter", Rd(B, NV_PMC_ENABLE));
+    TraceDetail(L"B3cFecsPmcEnableAfter", Rd(B, NV_PMC_ENABLE));
     if (!(Rd(B, NV_PMC_ENABLE) & (1u << 12))) { result = 0xE0000078u; goto done; }
     TraceB3cPmuCheckpoint(B, L"B3cPmuCheckpointAfterGrEnable");
     result = B3cRunC2b(Dev);
@@ -6520,13 +6542,13 @@ static ULONG B3cStartFecsLs(PSWGPU_DEVICE Dev)
     if (result != 0u) goto done;
     /* Retain 0x419A00 only as a legacy comparison. The GM20B FECS ctxsw
      * mailbox sequence is written immediately before the FECS start below. */
-    Trace(L"B3cFecsLegacyMailbox419A00BeforeStartSeq", Rd(B, 0x419A00u));
-    Trace(L"B3cFecsCtxswMailbox0BeforeStartSeq", Rd(B, 0x409800u));
+    TraceDetail(L"B3cFecsLegacyMailbox419A00BeforeStartSeq", Rd(B, 0x419A00u));
+    TraceDetail(L"B3cFecsCtxswMailbox0BeforeStartSeq", Rd(B, 0x409800u));
     TraceB3cPmuCheckpoint(B, L"B3cPmuCheckpointBeforeFecsStartMailboxSeq");
     Step(68);
     qhead = Rd(B, PMU_FALCON + reg);
     qtail = Rd(B, PMU_FALCON + 0x4B0u + hpqIndex * 4u);
-    Trace(L"B3cFecsHpqHeadBeforeBootstrap", qhead); Trace(L"B3cFecsHpqTailBeforeBootstrap", qtail);
+    TraceDetail(L"B3cFecsHpqHeadBeforeBootstrap", qhead); TraceDetail(L"B3cFecsHpqTailBeforeBootstrap", qtail);
     if ((qhead & 3u) || (qtail & 3u) || qhead < hpqBase || qhead >= hpqEnd || qtail < hpqBase || qtail >= hpqEnd) {
         result = 0xE0000078u; goto done;
     }
@@ -6541,7 +6563,7 @@ static ULONG B3cStartFecsLs(PSWGPU_DEVICE Dev)
     bootstrapSeq = ((wprReplyHdr >> 24) & 0xFFu) + 1u;
     if (bootstrapSeq == 0 || bootstrapSeq > 0xFFu) bootstrapSeq = 1u;
     cmd[0] = (cmd[0] & 0x00FFFFFFu) | (bootstrapSeq << 24);
-    Trace(L"B3cFecsBootstrapSeq", bootstrapSeq);
+    TraceDetail(L"B3cFecsBootstrapSeq", bootstrapSeq);
     Step(71);
     TraceB3cPmuCheckpoint(B, L"B3cPmuCheckpointBeforeBootstrap");
     if (Rd(B, PMU_FALCON + FALCON_CPUCTL) & 0x10u) { result = 0xE000007Bu; goto done; }
@@ -6550,18 +6572,18 @@ static ULONG B3cStartFecsLs(PSWGPU_DEVICE Dev)
     KeMemoryBarrier();
     qhead += sizeof(cmd);
     Wr(B, PMU_FALCON + reg, qhead);
-    Trace(L"B3cFecsCommandHeadAfter", qhead);
+    TraceDetail(L"B3cFecsCommandHeadAfter", qhead);
     TraceBin(L"B3cFecsBootstrapCommand", cmd, sizeof(cmd));
 
     Step(69);
-    Trace(L"B3cFecsPmuIrqStatAfterPost", Rd(B, PMU_FALCON + 0x008));
-    Trace(L"B3cFecsPmuCpuctlAfterPost", Rd(B, PMU_FALCON + FALCON_CPUCTL));
+    TraceDetail(L"B3cFecsPmuIrqStatAfterPost", Rd(B, PMU_FALCON + 0x008));
+    TraceDetail(L"B3cFecsPmuCpuctlAfterPost", Rd(B, PMU_FALCON + FALCON_CPUCTL));
     if (Rd(B, PMU_FALCON + FALCON_CPUCTL) & 0x10u) { result = 0xE000007Cu; goto done; }
     pmuTraceIdx = Rd(B, PMU_FALCON + 0x148);
     pmuTraceNr = (pmuTraceIdx >> 16) & 0xFFu;
     if (pmuTraceNr > RTL_NUMBER_OF(pmuPcNow)) pmuTraceNr = RTL_NUMBER_OF(pmuPcNow);
-    Trace(L"B3cFecsPmuTraceIdxAfterPost", pmuTraceIdx);
-    Trace(L"B3cFecsPmuTraceCountAfterPost", pmuTraceNr);
+    TraceDetail(L"B3cFecsPmuTraceIdxAfterPost", pmuTraceIdx);
+    TraceDetail(L"B3cFecsPmuTraceCountAfterPost", pmuTraceNr);
     for (i = 0; i < pmuTraceNr; ++i) { Wr(B, PMU_FALCON + 0x148, i); pmuPcNow[i] = Rd(B, PMU_FALCON + 0x14C); }
     if (pmuTraceNr) TraceBin(L"B3cFecsPmuTraceAfterPost", pmuPcNow, pmuTraceNr * sizeof(ULONG));
     for (polls = 0; polls < 2000u; ++polls) {
@@ -6579,7 +6601,7 @@ static ULONG B3cStartFecsLs(PSWGPU_DEVICE Dev)
         if (replyHead != replyTail) break;
         Ms(1);
     }
-    Trace(L"B3cFecsHpqSampleCount", hpqSampleNr);
+    TraceDetail(L"B3cFecsHpqSampleCount", hpqSampleNr);
     if (hpqSampleNr) {
         TraceBin(L"B3cFecsHpqSamplePolls", hpqSamplePolls, hpqSampleNr * sizeof(ULONG));
         TraceBin(L"B3cFecsHpqTailSamples", hpqTailSamples, hpqSampleNr * sizeof(ULONG));
@@ -6596,8 +6618,8 @@ static ULONG B3cStartFecsLs(PSWGPU_DEVICE Dev)
     replyHdr = Rd(B, PMU_FALCON + FALCON_DMEMD0);
     replyCtrl = Rd(B, PMU_FALCON + FALCON_DMEMD0);
     replyPayload = Rd(B, PMU_FALCON + FALCON_DMEMD0);
-    Trace(L"B3cFecsReplyHeader", replyHdr); Trace(L"B3cFecsReplyCtrl", replyCtrl);
-    Trace(L"B3cFecsReplyPayload", replyPayload);
+    TraceDetail(L"B3cFecsReplyHeader", replyHdr); TraceDetail(L"B3cFecsReplyCtrl", replyCtrl);
+    TraceDetail(L"B3cFecsReplyPayload", replyPayload);
     if ((replyHdr & 0xFFu) != 0x0Au || ((replyHdr >> 8) & 0xFFu) != 12u ||
         ((replyHdr >> 24) & 0xFFu) != bootstrapSeq || ((replyHdr >> 18) & 1u) ||
         replyPayload != 2u) {
@@ -6608,11 +6630,11 @@ static ULONG B3cStartFecsLs(PSWGPU_DEVICE Dev)
      * gf100_gr_init_fw() for GPCCS, then starts GPCCS before FECS; nvgpu
      * gr_gm20b_load_ctxsw_ucode() uses the direct Falcon IMEM/DMEM path too. */
     Step(73);
-    Trace(L"B3cFecsDmaCtlBeforeStartPrep", Rd(B, 0x40910Cu));
+    TraceDetail(L"B3cFecsDmaCtlBeforeStartPrep", Rd(B, 0x40910Cu));
     gpccsInst = ReadBinParam(L"FwGpccsInst", 0x20000u, &gpccsInstLen);
     gpccsData = ReadBinParam(L"FwGpccsData", 0x20000u, &gpccsDataLen);
-    Trace(L"B3cGpccsInstLen", gpccsInstLen);
-    Trace(L"B3cGpccsDataLen", gpccsDataLen);
+    TraceDetail(L"B3cGpccsInstLen", gpccsInstLen);
+    TraceDetail(L"B3cGpccsDataLen", gpccsDataLen);
     if (gpccsInst == NULL || gpccsData == NULL) { result = 0xE000007Eu; goto done; }
     gpccsHwcfg = Rd(B, 0x41A108u);
     gpccsImemSize = (gpccsHwcfg & 0x1FFu) << 8;
@@ -6621,11 +6643,11 @@ static ULONG B3cStartFecsLs(PSWGPU_DEVICE Dev)
     /* Nouveau nvkm_falcon_v1_load_imem() pads code to a 0x40-word block. */
     gpccsImemPaddedWords = (gpccsImemWords + 0x3Fu) & ~0x3Fu;
     gpccsDmemWords = (gpccsDataLen + 3u) / 4u;
-    Trace(L"B3cGpccsHwcfg", gpccsHwcfg);
-    Trace(L"B3cGpccsImemSize", gpccsImemSize);
-    Trace(L"B3cGpccsDmemSize", gpccsDmemSize);
-    Trace(L"B3cGpccsImemSourceWords", gpccsImemWords);
-    Trace(L"B3cGpccsImemPaddedWords", gpccsImemPaddedWords);
+    TraceDetail(L"B3cGpccsHwcfg", gpccsHwcfg);
+    TraceDetail(L"B3cGpccsImemSize", gpccsImemSize);
+    TraceDetail(L"B3cGpccsDmemSize", gpccsDmemSize);
+    TraceDetail(L"B3cGpccsImemSourceWords", gpccsImemWords);
+    TraceDetail(L"B3cGpccsImemPaddedWords", gpccsImemPaddedWords);
     if (!gpccsInstLen || !gpccsDataLen || gpccsInstLen > 0x20000u || gpccsDataLen > 0x20000u ||
         gpccsImemSize < 4u || gpccsDmemSize < 4u || gpccsImemPaddedWords > gpccsImemSize / 4u ||
         gpccsDmemWords > gpccsDmemSize / 4u) { result = 0xE000007Fu; goto done; }
@@ -6647,43 +6669,43 @@ static ULONG B3cStartFecsLs(PSWGPU_DEVICE Dev)
         if ((i & 0x3Fu) == 0u) Wr(B, 0x41A188u, i >> 6);
         Wr(B, 0x41A184u, fwWord);
     }
-    Trace(L"B3cGpccsImemWordsWritten", gpccsImemPaddedWords);
-    Trace(L"B3cGpccsDmemWordsWritten", gpccsDmemWords);
+    TraceDetail(L"B3cGpccsImemWordsWritten", gpccsImemPaddedWords);
+    TraceDetail(L"B3cGpccsDmemWordsWritten", gpccsDmemWords);
 
     Step(75);
     /* Match nvgpu gr_gm20b_load_ctxsw_ucode() secure-start order: clear
      * mailbox 0, write mailbox 1 = 1, then clear mailbox 6. Nouveau
      * gf100_gr_init_ctxctl_ext() separately clears MB0 and DMACTL before
      * starting GPCCS followed by FECS. */
-    Trace(L"B3cFecsCtxswMailbox0BeforeSecureSeq", Rd(B, 0x409800u));
+    TraceDetail(L"B3cFecsCtxswMailbox0BeforeSecureSeq", Rd(B, 0x409800u));
     Wr(B, 0x409840u, 0xFFFFFFFFu);
-    Trace(L"B3cFecsCtxswMailbox0AfterClear", Rd(B, 0x409800u));
+    TraceDetail(L"B3cFecsCtxswMailbox0AfterClear", Rd(B, 0x409800u));
     Wr(B, 0x409804u, 1u);
-    Trace(L"B3cFecsCtxswMailbox1Set", Rd(B, 0x409804u));
+    TraceDetail(L"B3cFecsCtxswMailbox1Set", Rd(B, 0x409804u));
     Wr(B, 0x409858u, 0xFFFFFFFFu);
-    Trace(L"B3cFecsCtxswMailboxClear6Snapshot", Rd(B, 0x409858u));
-    Trace(L"B3cFecsCtxswMailbox6", Rd(B, 0x409818u));
-    Trace(L"B3cFecsCtxswClearRegSnapshot", Rd(B, 0x409840u));
-    Trace(L"B3cFecsCtxswMailbox0AfterSecureSeq", Rd(B, 0x409800u));
-    Trace(L"B3cGpccsDmaCtlBeforeStart", Rd(B, 0x41A10Cu));
+    TraceDetail(L"B3cFecsCtxswMailboxClear6Snapshot", Rd(B, 0x409858u));
+    TraceDetail(L"B3cFecsCtxswMailbox6", Rd(B, 0x409818u));
+    TraceDetail(L"B3cFecsCtxswClearRegSnapshot", Rd(B, 0x409840u));
+    TraceDetail(L"B3cFecsCtxswMailbox0AfterSecureSeq", Rd(B, 0x409800u));
+    TraceDetail(L"B3cGpccsDmaCtlBeforeStart", Rd(B, 0x41A10Cu));
     Wr(B, 0x41A10Cu, 0u);
-    Trace(L"B3cGpccsDmaCtlAfterStartPrep", Rd(B, 0x41A10Cu));
-    Trace(L"B3cFecsDmaCtlBeforeStart", Rd(B, 0x40910Cu));
+    TraceDetail(L"B3cGpccsDmaCtlAfterStartPrep", Rd(B, 0x41A10Cu));
+    TraceDetail(L"B3cFecsDmaCtlBeforeStart", Rd(B, 0x40910Cu));
     Wr(B, 0x40910Cu, 0u);
-    Trace(L"B3cFecsDmaCtlAfterStartPrep", Rd(B, 0x40910Cu));
+    TraceDetail(L"B3cFecsDmaCtlAfterStartPrep", Rd(B, 0x40910Cu));
     /* Nouveau's direct PIO path starts GPCCS without programming BOOTVEC. */
     gpccsBootvecBeforeStart = Rd(B, 0x41A104u);
-    Trace(L"B3cGpccsBootvecBeforeStart", gpccsBootvecBeforeStart);
+    TraceDetail(L"B3cGpccsBootvecBeforeStart", gpccsBootvecBeforeStart);
     gpccsCpuctlBeforeStart = Rd(B, 0x41A100u);
     gpccsStartReg = (gpccsCpuctlBeforeStart & 0x40u) ? 0x41A130u : 0x41A100u;
-    Trace(L"B3cGpccsCpuctlBeforeStart", gpccsCpuctlBeforeStart);
-    Trace(L"B3cGpccsStartUsesAlias", gpccsStartReg == 0x41A130u ? 1u : 0u);
+    TraceDetail(L"B3cGpccsCpuctlBeforeStart", gpccsCpuctlBeforeStart);
+    TraceDetail(L"B3cGpccsStartUsesAlias", gpccsStartReg == 0x41A130u ? 1u : 0u);
     Wr(B, gpccsStartReg, 2u);
     gpccsCpuctlAfterStart = Rd(B, 0x41A100u);
     gpccsMailboxAfterStart = Rd(B, 0x41A040u);
-    Trace(L"B3cGpccsCpuctlAfterStart", gpccsCpuctlAfterStart);
-    Trace(L"B3cGpccsMailbox0AfterStart", gpccsMailboxAfterStart);
-    Trace(L"B3cGpccsBootvecAfterStart", Rd(B, 0x41A104u));
+    TraceDetail(L"B3cGpccsCpuctlAfterStart", gpccsCpuctlAfterStart);
+    TraceDetail(L"B3cGpccsMailbox0AfterStart", gpccsMailboxAfterStart);
+    TraceDetail(L"B3cGpccsBootvecAfterStart", Rd(B, 0x41A104u));
     for (gpccsStartPolls = 0; gpccsStartPolls < 2000u; ++gpccsStartPolls) {
         gpccsCpuctlAfterStart = Rd(B, 0x41A100u);
         if (!(gpccsCpuctlAfterStart & 0x10u)) break;
@@ -6694,13 +6716,13 @@ static ULONG B3cStartFecsLs(PSWGPU_DEVICE Dev)
 
     fecsCpuctlBeforeStart = Rd(B, 0x409100u);
     fecsStartReg = (fecsCpuctlBeforeStart & 0x40u) ? 0x409130u : 0x409100u;
-    Trace(L"B3cFecsCpuctlBeforeStart", fecsCpuctlBeforeStart);
-    Trace(L"B3cFecsStartUsesAlias", (fecsStartReg == 0x409130u) ? 1u : 0u);
+    TraceDetail(L"B3cFecsCpuctlBeforeStart", fecsCpuctlBeforeStart);
+    TraceDetail(L"B3cFecsStartUsesAlias", (fecsStartReg == 0x409130u) ? 1u : 0u);
     Wr(B, fecsStartReg, 2u); /* nvkm_falcon_v1_start(): CPUCTL_ALIAS when bit 6 is enabled */
     fecsCpuctlAfterStart = Rd(B, 0x409100u);
     fecsMailboxAfterStart = Rd(B, 0x409040u);
-    Trace(L"B3cFecsCpuctlAfterStart", fecsCpuctlAfterStart);
-    Trace(L"B3cFecsMailbox0AfterStart", fecsMailboxAfterStart);
+    TraceDetail(L"B3cFecsCpuctlAfterStart", fecsCpuctlAfterStart);
+    TraceDetail(L"B3cFecsMailbox0AfterStart", fecsMailboxAfterStart);
     for (fecsStartPolls = 0; fecsStartPolls < 2000u; ++fecsStartPolls) {
         fecsCpuctlAfterStart = Rd(B, 0x409100u);
         if (!(fecsCpuctlAfterStart & 0x10u)) break;
@@ -6715,10 +6737,10 @@ static ULONG B3cStartFecsLs(PSWGPU_DEVICE Dev)
         if (fecsReady == 0x10u || (fecsReady & 1u)) break;
         Ms(1);
     }
-    Trace(L"B3cFecsReadyMailbox", fecsReady); Trace(L"B3cFecsReadyFirstNonzero", fecsReadyFirstNonzero);
-    Trace(L"B3cFecsReadyMailboxChanges", fecsReadyChangeCount); Trace(L"B3cFecsReadyPolls", polls);
+    TraceDetail(L"B3cFecsReadyMailbox", fecsReady); TraceDetail(L"B3cFecsReadyFirstNonzero", fecsReadyFirstNonzero);
+    TraceDetail(L"B3cFecsReadyMailboxChanges", fecsReadyChangeCount); Trace(L"B3cFecsReadyPolls", polls);
     if (polls == 2000u) result = 0xE0000078u;
-    Trace(L"B3cFecsLegacyMailbox419A00AfterWait", Rd(B, 0x419A00u));
+    TraceDetail(L"B3cFecsLegacyMailbox419A00AfterWait", Rd(B, 0x419A00u));
     for (i = 0; i < RTL_NUMBER_OF(fecsMailboxWords); ++i) fecsMailboxWords[i] = Rd(B, 0x409800u + i * 4u);
     TraceBin(L"B3cFecsCtxswMailboxWords", fecsMailboxWords, sizeof(fecsMailboxWords));
 done:
@@ -6726,62 +6748,62 @@ done:
     TraceDurable(L"B3cFecsStepResult", result);
     if (hpqIndex < 4u) {
         hpqTailAfterWait = Rd(B, PMU_FALCON + 0x4B0u + hpqIndex * 4u);
-        Trace(L"B3cFecsHpqHeadAfterWait", Rd(B, PMU_FALCON + 0x4A0u + hpqIndex * 4u));
-        Trace(L"B3cFecsHpqTailAfterWait", hpqTailAfterWait);
+        TraceDetail(L"B3cFecsHpqHeadAfterWait", Rd(B, PMU_FALCON + 0x4A0u + hpqIndex * 4u));
+        TraceDetail(L"B3cFecsHpqTailAfterWait", hpqTailAfterWait);
     } else {
-        Trace(L"B3cFecsHpqHeadAfterWait", 0xFFFFFFFFu);
-        Trace(L"B3cFecsHpqTailAfterWait", 0xFFFFFFFFu);
+        TraceDetail(L"B3cFecsHpqHeadAfterWait", 0xFFFFFFFFu);
+        TraceDetail(L"B3cFecsHpqTailAfterWait", 0xFFFFFFFFu);
     }
-    Trace(L"B3cFecsMsgHeadAfterWait", Rd(B, PMU_FALCON + 0x4C8));
-    Trace(L"B3cFecsMsgTailAfterWait", Rd(B, PMU_FALCON + 0x4CC));
-    Trace(L"B3cFecsPmuIrqStatAfterWait", Rd(B, PMU_FALCON + 0x008));
+    TraceDetail(L"B3cFecsMsgHeadAfterWait", Rd(B, PMU_FALCON + 0x4C8));
+    TraceDetail(L"B3cFecsMsgTailAfterWait", Rd(B, PMU_FALCON + 0x4CC));
+    TraceDetail(L"B3cFecsPmuIrqStatAfterWait", Rd(B, PMU_FALCON + 0x008));
     pmuTraceIdx = Rd(B, PMU_FALCON + 0x148);
     pmuPcNrAfterWait = (pmuTraceIdx >> 16) & 0xFFu;
     if (pmuPcNrAfterWait > RTL_NUMBER_OF(pmuPcAfterWait)) pmuPcNrAfterWait = RTL_NUMBER_OF(pmuPcAfterWait);
-    Trace(L"B3cFecsPmuTraceIdxAfterWait", pmuTraceIdx);
-    Trace(L"B3cFecsPmuTraceCountAfterWait", pmuPcNrAfterWait);
+    TraceDetail(L"B3cFecsPmuTraceIdxAfterWait", pmuTraceIdx);
+    TraceDetail(L"B3cFecsPmuTraceCountAfterWait", pmuPcNrAfterWait);
     for (i = 0; i < pmuPcNrAfterWait; ++i) { Wr(B, PMU_FALCON + 0x148, i); pmuPcAfterWait[i] = Rd(B, PMU_FALCON + 0x14C); }
     if (pmuPcNrAfterWait) TraceBin(L"B3cFecsPmuTraceAfterWait", pmuPcAfterWait, pmuPcNrAfterWait * sizeof(ULONG));
     /* Touch GR/FECS registers only when GR is enabled (an early exit before
      * Step 67 leaves PMC_ENABLE bit 12 clear). */
-    Trace(L"B3cFecsGrEnabledAtRead", (Rd(B, NV_PMC_ENABLE) >> 12) & 1u);
+    TraceDetail(L"B3cFecsGrEnabledAtRead", (Rd(B, NV_PMC_ENABLE) >> 12) & 1u);
     if (Rd(B, NV_PMC_ENABLE) & (1u << 12)) {
-    Trace(L"B3cFecsCpuctl", Rd(B, 0x409100u)); Trace(L"B3cFecsSctl", Rd(B, 0x409240u));
-    Trace(L"B3cFecsMailbox0", Rd(B, 0x409040u)); Trace(L"B3cFecsMailbox1", Rd(B, 0x409044u));
-    Trace(L"B3cFecsLegacyMailbox419A00Final", Rd(B, 0x419A00u));
+    TraceDetail(L"B3cFecsCpuctl", Rd(B, 0x409100u)); TraceDetail(L"B3cFecsSctl", Rd(B, 0x409240u));
+    TraceDetail(L"B3cFecsMailbox0", Rd(B, 0x409040u)); TraceDetail(L"B3cFecsMailbox1", Rd(B, 0x409044u));
+    TraceDetail(L"B3cFecsLegacyMailbox419A00Final", Rd(B, 0x419A00u));
     fecsTraceIdx = Rd(B, 0x409148u); fecsTraceNr = (fecsTraceIdx >> 16) & 0xFFu;
     if (fecsTraceNr > RTL_NUMBER_OF(fecsPc)) fecsTraceNr = RTL_NUMBER_OF(fecsPc);
-    Trace(L"B3cFecsTraceIdx", fecsTraceIdx); Trace(L"B3cFecsTraceCount", fecsTraceNr);
+    TraceDetail(L"B3cFecsTraceIdx", fecsTraceIdx); TraceDetail(L"B3cFecsTraceCount", fecsTraceNr);
     for (pcSlot = 0; pcSlot < fecsTraceNr; ++pcSlot) { Wr(B, 0x409148u, pcSlot); fecsPc[pcSlot] = Rd(B, 0x40914Cu); }
     if (fecsTraceNr) TraceBin(L"B3cFecsTracePc", fecsPc, fecsTraceNr * sizeof(ULONG));
-    Trace(L"B3cFecsIrqStat", Rd(B, 0x409008u)); Trace(L"B3cFecsIrqMask", Rd(B, 0x409018u));
-    Trace(L"B3cGpccsCpuctl", Rd(B, 0x41A100u)); Trace(L"B3cGpccsSctl", Rd(B, 0x41A240u));
-    Trace(L"B3cGpccsFalconMailbox0", Rd(B, 0x41A040u)); Trace(L"B3cGpccsFalconMailbox1", Rd(B, 0x41A044u));
-    Trace(L"B3cGpccsBootvecFinal", Rd(B, 0x41A104u));
+    TraceDetail(L"B3cFecsIrqStat", Rd(B, 0x409008u)); TraceDetail(L"B3cFecsIrqMask", Rd(B, 0x409018u));
+    TraceDetail(L"B3cGpccsCpuctl", Rd(B, 0x41A100u)); TraceDetail(L"B3cGpccsSctl", Rd(B, 0x41A240u));
+    TraceDetail(L"B3cGpccsFalconMailbox0", Rd(B, 0x41A040u)); TraceDetail(L"B3cGpccsFalconMailbox1", Rd(B, 0x41A044u));
+    TraceDetail(L"B3cGpccsBootvecFinal", Rd(B, 0x41A104u));
     gpccsTraceIdx = Rd(B, 0x41A148u); gpccsTraceNr = (gpccsTraceIdx >> 16) & 0xFFu;
     if (gpccsTraceNr > RTL_NUMBER_OF(gpccsPc)) gpccsTraceNr = RTL_NUMBER_OF(gpccsPc);
-    Trace(L"B3cGpccsTraceIdx", gpccsTraceIdx); Trace(L"B3cGpccsTraceCount", gpccsTraceNr);
+    TraceDetail(L"B3cGpccsTraceIdx", gpccsTraceIdx); TraceDetail(L"B3cGpccsTraceCount", gpccsTraceNr);
     for (pcSlot = 0; pcSlot < gpccsTraceNr; ++pcSlot) { Wr(B, 0x41A148u, pcSlot); gpccsPc[pcSlot] = Rd(B, 0x41A14Cu); }
     if (gpccsTraceNr) TraceBin(L"B3cGpccsTracePc", gpccsPc, gpccsTraceNr * sizeof(ULONG));
-    Trace(L"B3cGpccsIrqStat", Rd(B, 0x41A008u)); Trace(L"B3cGpccsIrqMask", Rd(B, 0x41A018u));
+    TraceDetail(L"B3cGpccsIrqStat", Rd(B, 0x41A008u)); TraceDetail(L"B3cGpccsIrqMask", Rd(B, 0x41A018u));
     for (i = 0; i < RTL_NUMBER_OF(gpccsCtxswMailboxWords); ++i) gpccsCtxswMailboxWords[i] = Rd(B, 0x41A800u + i * 4u);
     TraceBin(L"B3cGpccsCtxswMailboxWords", gpccsCtxswMailboxWords, sizeof(gpccsCtxswMailboxWords));
     }
-    Trace(L"B3cFecsPfifoIntr0", Rd(B, 0x2100)); faultId = Rd(B, 0x259C); Trace(L"B3cFecsFaultId", faultId);
+    TraceDetail(L"B3cFecsPfifoIntr0", Rd(B, 0x2100)); faultId = Rd(B, 0x259C); TraceDetail(L"B3cFecsFaultId", faultId);
     for (unit = 0; unit < 32u && faultCount < RTL_NUMBER_OF(faultRecs); ++unit) if (faultId & (1u << unit)) {
         faultRecs[faultCount][0] = unit; faultRecs[faultCount][1] = Rd(B, 0x2800u + unit * 0x10u);
         faultRecs[faultCount][2] = Rd(B, 0x2804u + unit * 0x10u); faultRecs[faultCount][3] = Rd(B, 0x2808u + unit * 0x10u);
         faultRecs[faultCount][4] = Rd(B, 0x280Cu + unit * 0x10u); ++faultCount;
     }
-    Trace(L"B3cFecsFaultRecCount", faultCount);
-    if (faultCount) TraceBin(L"B3cFecsFaultRecs", faultRecs, faultCount * sizeof(faultRecs[0]));
+    TraceDetail(L"B3cFecsFaultRecCount", faultCount);
+    if (faultCount) TraceErrorBin(L"B3cFecsFaultRecs", faultRecs, faultCount * sizeof(faultRecs[0]));
     TraceDurable(L"B3cFecsResult", result);
     if (gpccsData != NULL) ExFreePoolWithTag(gpccsData, SWGPU_TAG);
     if (gpccsInst != NULL) ExFreePoolWithTag(gpccsInst, SWGPU_TAG);
     return result;
 }
 
-static VOID ProbeB3a(PSWGPU_DEVICE Dev, BOOLEAN RunAcr)
+static ULONG StartGpuFirmware(PSWGPU_DEVICE Dev)
 {
     volatile UCHAR *B = Dev->Bar0;
     PUCHAR bl = NULL, uc = NULL, img = NULL, boot = NULL, wprImage = NULL;
@@ -6802,8 +6824,8 @@ static VOID ProbeB3a(PSWGPU_DEVICE Dev, BOOLEAN RunAcr)
     Step(40);   /* firmware blobs from the registry */
     bl = ReadBinParam(L"FwAcrBl", ACR_BL_MAX, &blLen);
     uc = ReadBinParam(L"FwAcrUcodeLoad", ACR_UC_MAX, &ucLen);
-    Trace(L"B3aBlLen", blLen);
-    Trace(L"B3aUcLen", ucLen);
+    TraceDetail(L"B3aBlLen", blLen);
+    TraceDetail(L"B3aUcLen", ucLen);
     if (bl == NULL || uc == NULL) { err = 0xE0000041u; goto out; }
 
     Step(41);   /* acr/bl.bin: nvfw_bin_hdr (24 bytes) + nvfw_bl_desc (24 bytes) */
@@ -6812,20 +6834,20 @@ static VOID ProbeB3a(PSWGPU_DEVICE Dev, BOOLEAN RunAcr)
     blHdrOff = Le32(bl + 12);
     blDataOff = Le32(bl + 16);
     blDataSize = Le32(bl + 20);
-    Trace(L"B3aBlMagic", blMagic);
-    Trace(L"B3aBlHdrOff", blHdrOff);
-    Trace(L"B3aBlDataOff", blDataOff);
-    Trace(L"B3aBlDataSize", blDataSize);
+    TraceDetail(L"B3aBlMagic", blMagic);
+    TraceDetail(L"B3aBlHdrOff", blHdrOff);
+    TraceDetail(L"B3aBlDataOff", blDataOff);
+    TraceDetail(L"B3aBlDataSize", blDataSize);
     if ((blMagic != 0x000010DEu && blMagic != 0x3B1D14F0u) ||
         !InBlob(blLen, blHdrOff, 24) || !InBlob(blLen, blDataOff, blDataSize)) { err = 0xE0000043u; goto out; }
     startTag = Le32(bl + blHdrOff);
     dmemLoadOff = Le32(bl + blHdrOff + 4);
     codeOff = Le32(bl + blHdrOff + 8);
     codeSize = Le32(bl + blHdrOff + 12);
-    Trace(L"B3aBlStartTag", startTag);
-    Trace(L"B3aBlDmemLoadOff", dmemLoadOff);
-    Trace(L"B3aBlCodeOff", codeOff);
-    Trace(L"B3aBlCodeSize", codeSize);
+    TraceDetail(L"B3aBlStartTag", startTag);
+    TraceDetail(L"B3aBlDmemLoadOff", dmemLoadOff);
+    TraceDetail(L"B3aBlCodeOff", codeOff);
+    TraceDetail(L"B3aBlCodeSize", codeSize);
     if (codeSize == 0 || codeSize > 0x1000 || startTag > 0xFFFF || !InBlob(blDataSize, codeOff, codeSize)) {
         err = 0xE0000044u; goto out;
     }
@@ -6837,10 +6859,10 @@ static VOID ProbeB3a(PSWGPU_DEVICE Dev, BOOLEAN RunAcr)
     ucHdrOff = Le32(uc + 12);
     ucDataOff = Le32(uc + 16);
     ucDataSize = Le32(uc + 20);
-    Trace(L"B3aUcMagic", ucMagic);
-    Trace(L"B3aUcHdrOff", ucHdrOff);
-    Trace(L"B3aUcDataOff", ucDataOff);
-    Trace(L"B3aUcDataSize", ucDataSize);
+    TraceDetail(L"B3aUcMagic", ucMagic);
+    TraceDetail(L"B3aUcHdrOff", ucHdrOff);
+    TraceDetail(L"B3aUcDataOff", ucDataOff);
+    TraceDetail(L"B3aUcDataSize", ucDataSize);
     if ((ucMagic != 0x000010DEu && ucMagic != 0x3B1D14F0u) ||
         !InBlob(ucLen, ucHdrOff, 32) || !InBlob(ucLen, ucDataOff, ucDataSize) || ucDataSize == 0) {
         err = 0xE0000046u; goto out;
@@ -6852,13 +6874,13 @@ static VOID ProbeB3a(PSWGPU_DEVICE Dev, BOOLEAN RunAcr)
     patchLoc = Le32(uc + ucHdrOff + 16);
     patchSig = Le32(uc + ucHdrOff + 20);
     ldOff = Le32(uc + ucHdrOff + 24);
-    Trace(L"B3aSigDbgOff", sigDbgOff);
-    Trace(L"B3aSigDbgSize", sigDbgSize);
-    Trace(L"B3aSigPrdOff", sigPrdOff);
-    Trace(L"B3aSigPrdSize", sigPrdSize);
-    Trace(L"B3aPatchLoc", patchLoc);
-    Trace(L"B3aPatchSig", patchSig);
-    Trace(L"B3aLoadHdrOff", ldOff);
+    TraceDetail(L"B3aSigDbgOff", sigDbgOff);
+    TraceDetail(L"B3aSigDbgSize", sigDbgSize);
+    TraceDetail(L"B3aSigPrdOff", sigPrdOff);
+    TraceDetail(L"B3aSigPrdSize", sigPrdSize);
+    TraceDetail(L"B3aPatchLoc", patchLoc);
+    TraceDetail(L"B3aPatchSig", patchSig);
+    TraceDetail(L"B3aLoadHdrOff", ldOff);
     /* NVIDIA's standard format (0x10de) stores the patch location and the
      * signature index indirectly; the early nouveau format stores them. */
     if (ucMagic == 0x000010DEu) {
@@ -6869,24 +6891,24 @@ static VOID ProbeB3a(PSWGPU_DEVICE Dev, BOOLEAN RunAcr)
         loc = patchLoc;
         sig = patchSig;
     }
-    Trace(L"B3aLoc", loc);
-    Trace(L"B3aSig", sig);
+    TraceDetail(L"B3aLoc", loc);
+    TraceDetail(L"B3aSig", sig);
     if (!InBlob(ucLen, ldOff, 20)) { err = 0xE0000048u; goto out; }
     nsOff = Le32(uc + ldOff);
     nsSize = Le32(uc + ldOff + 4);
     dataBase = Le32(uc + ldOff + 8);
     dataSize = Le32(uc + ldOff + 12);
     numApps = Le32(uc + ldOff + 16);
-    Trace(L"B3aNsOff", nsOff);
-    Trace(L"B3aNsSize", nsSize);
-    Trace(L"B3aDataBase", dataBase);
-    Trace(L"B3aDataSize", dataSize);
-    Trace(L"B3aNumApps", numApps);
+    TraceDetail(L"B3aNsOff", nsOff);
+    TraceDetail(L"B3aNsSize", nsSize);
+    TraceDetail(L"B3aDataBase", dataBase);
+    TraceDetail(L"B3aDataSize", dataSize);
+    TraceDetail(L"B3aNumApps", numApps);
     if (numApps == 0 || numApps > 8 || !InBlob(ucLen, ldOff + 20, numApps * 8)) { err = 0xE0000049u; goto out; }
     app0Off = Le32(uc + ldOff + 20);
     app0Size = Le32(uc + ldOff + 20 + numApps * 4);
-    Trace(L"B3aApp0Off", app0Off);
-    Trace(L"B3aApp0Size", app0Size);
+    TraceDetail(L"B3aApp0Off", app0Off);
+    TraceDetail(L"B3aApp0Size", app0Size);
     if (sigPrdSize == 0 || sigPrdSize > 0x100 || (sigPrdSize & 3u) || sigDbgSize != sigPrdSize ||
         sig > ucLen || !InBlob(ucLen, sigPrdOff, sig) ||
         !InBlob(ucLen, sigPrdOff + sig, sigPrdSize) ||
@@ -6899,27 +6921,27 @@ static VOID ProbeB3a(PSWGPU_DEVICE Dev, BOOLEAN RunAcr)
 
     Step(43);   /* signed image in memory: data section + the signature for this fuse */
     dbgFused = (Rd(B, PMU_FALCON + PMU_DEBUG) & 0x00100000u) ? 1 : 0;
-    Trace(L"B3aDebugFused", dbgFused);
+    TraceDetail(L"B3aDebugFused", dbgFused);
     sigSrc = (dbgFused ? sigDbgOff : sigPrdOff) + sig;
     img = (PUCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, ucDataSize, SWGPU_TAG);
     if (img == NULL) { err = 0xE000004Bu; goto out; }
     RtlCopyMemory(img, uc + ucDataOff, ucDataSize);
     RtlCopyMemory(img + loc, uc + sigSrc, sigPrdSize);
-    Trace(L"B3aSigWord0", Le32(img + loc));
-    Trace(L"B3aDmemSign", loc - dataBase);
+    TraceDetail(L"B3aSigWord0", Le32(img + loc));
+    TraceDetail(L"B3aDmemSign", loc - dataBase);
     for (sum = 0, i = 0; i + 4 <= ucDataSize; i += 4) sum += Le32(img + i);
-    Trace(L"B3aImgSum", sum);
+    TraceDetail(L"B3aImgSum", sum);
 
     Step(44);   /* PMU reset, scrub, bootloader -> top of IMEM by PIO */
     PmuReset(B, L"B3aScrubPolls");
     hwcfg = Rd(B, PMU_FALCON + FALCON_HWCFG);
     imemSize = (hwcfg & 0x1FFu) << 8;
     dmemSize = ((hwcfg >> 9) & 0x1FFu) << 8;
-    Trace(L"B3aImemSize", imemSize);
-    Trace(L"B3aDmemSize", dmemSize);
+    TraceDetail(L"B3aImemSize", imemSize);
+    TraceDetail(L"B3aDmemSize", dmemSize);
     if (bootSize > imemSize || sizeof(desc) > dmemSize) { err = 0xE000004Cu; goto out; }
     imemBase = imemSize - bootSize;
-    Trace(L"B3aImemBase", imemBase);
+    TraceDetail(L"B3aImemBase", imemBase);
     boot = (PUCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, bootSize, SWGPU_TAG);  /* zeroed */
     if (boot == NULL) { err = 0xE000004Du; goto out; }
     RtlCopyMemory(boot, bl + blDataOff + codeOff, codeSize);
@@ -6931,10 +6953,10 @@ static VOID ProbeB3a(PSWGPU_DEVICE Dev, BOOLEAN RunAcr)
     Wr(B, PMU_FALCON + FALCON_IMEMC0, (1u << 25) | imemBase);
     for (ok = 0, i = 0; i < bootSize; i += 4) {
         ULONG v = Rd(B, PMU_FALCON + FALCON_IMEMD0);
-        if (i == 0) Trace(L"B3aImemWord0", v);
+        if (i == 0) TraceDetail(L"B3aImemWord0", v);
         if (v == Le32(boot + i)) ++ok;
     }
-    Trace(L"B3aImemWords", bootSize / 4);
+    TraceDetail(L"B3aImemWords", bootSize / 4);
     TraceDurable(L"B3aImemOk", ok);
 
     Step(45);   /* flcn_bl_dmem_desc v0 at DMEM 0 (DMA bases left 0: no PMU VM yet) */
@@ -6954,21 +6976,21 @@ static VOID ProbeB3a(PSWGPU_DEVICE Dev, BOOLEAN RunAcr)
     Wr(B, PMU_FALCON + FALCON_DMEMC0, (1u << 25) | 0);
     for (ok = 0, i = 0; i < 19; ++i) if (Rd(B, PMU_FALCON + FALCON_DMEMD0) == desc[i]) ++ok;
     TraceDurable(L"B3aDescOk", ok);
-    Trace(L"B3aCpuctl", Rd(B, PMU_FALCON + FALCON_CPUCTL));
-    Trace(L"B3aBootAddr", startTag << 8);
+    TraceDetail(L"B3aCpuctl", Rd(B, PMU_FALCON + FALCON_CPUCTL));
+    TraceDetail(L"B3aBootAddr", startTag << 8);
 
-    if (RunAcr) {
+    {
         ULONGLONG *acrDesc;
-        /* 0.4.6: the memory-path setup that B2a proved necessary (priv ring,
-         * PFIFO reset/enable in nvgpu order, FB flush). Without the priv ring
+        /* Initialize the memory path (priv ring, PFIFO reset/enable in
+         * nvgpu order, FB flush). Without the priv ring
          * the L2 answered with PRI errors and falcon DMA never completed. The
          * whole GPU is reset after this test, so nothing is put back here. */
         PrivRingInit(B, 53);
-        Trace(L"B3cLtcNr", Rd(B, 0x12006C));
-        Trace(L"B3cTagBase", Rd(B, 0x17E278));
+        TraceDetail(L"B3cLtcNr", Rd(B, 0x12006C));
+        TraceDetail(L"B3cTagBase", Rd(B, 0x17E278));
         {
             ULONG en = Rd(B, NV_PMC_ENABLE), w;
-            Trace(L"B3cFifoPmcWas", en);
+            TraceDetail(L"B3cFifoPmcWas", en);
             /* Claude 0.4.72: nvgpu gk20a_init_fifo_reset_enable_hw() resets
              * PFIFO together with CE2 (mc_enable_ce2, bit 21). CE2 shares
              * runlist 0 with GR on GM20B; leaving it in reset made PBDMA0
@@ -6980,9 +7002,9 @@ static VOID ProbeB3a(PSWGPU_DEVICE Dev, BOOLEAN RunAcr)
             Wr(B, NV_PMC_ENABLE, en | 0x100u | 0x200000u);
             (VOID)Rd(B, NV_PMC_ENABLE);
             Us(20);
-            Trace(L"B3cFifoPmcNow", Rd(B, NV_PMC_ENABLE));
+            TraceDetail(L"B3cFifoPmcNow", Rd(B, NV_PMC_ENABLE));
             Wr(B, 0x2100, 0xFFFFFFFFu);
-            Trace(L"B3cFifoIntr0Clr", Rd(B, 0x2100));
+            TraceDetail(L"B3cFifoIntr0Clr", Rd(B, 0x2100));
             Wr(B, 0x070000, 1u);
             for (w = 0; w < 100 && (Rd(B, 0x070000) & 3u); ++w) Us(5);
             Trace(L"B3cFbFlushPolls", w);
@@ -6995,12 +7017,12 @@ static VOID ProbeB3a(PSWGPU_DEVICE Dev, BOOLEAN RunAcr)
         wprRawLimit = Rd(B, NV_PFB_MMU_WPR_INFO);
         wprStart = ((ULONGLONG)(wprRawStart & 0xFFFFFF00u)) << 8;
         wprEnd = (((ULONGLONG)(wprRawLimit & 0xFFFFFF00u)) << 8) + 0x20000ull;
-        Trace(L"AcrWprRawStart", wprRawStart);
-        Trace(L"AcrWprRawLimit", wprRawLimit);
-        Trace(L"AcrWprStartLo", (ULONG)wprStart);
-        Trace(L"AcrWprStartHi", (ULONG)(wprStart >> 32));
-        Trace(L"AcrWprEndLo", (ULONG)wprEnd);
-        Trace(L"AcrWprEndHi", (ULONG)(wprEnd >> 32));
+        TraceDetail(L"AcrWprRawStart", wprRawStart);
+        TraceDetail(L"AcrWprRawLimit", wprRawLimit);
+        TraceDetail(L"AcrWprStartLo", (ULONG)wprStart);
+        TraceDetail(L"AcrWprStartHi", (ULONG)(wprStart >> 32));
+        TraceDetail(L"AcrWprEndLo", (ULONG)wprEnd);
+        TraceDetail(L"AcrWprEndHi", (ULONG)(wprEnd >> 32));
         if (wprStart == 0 || wprEnd <= wprStart || wprEnd - wprStart != ACR_WPR_BYTES) {
             err = 0xE0000061u; goto out;
         }
@@ -7008,8 +7030,8 @@ static VOID ProbeB3a(PSWGPU_DEVICE Dev, BOOLEAN RunAcr)
         Step(48);   /* build WPR in CPU memory and verify it fits the protected region */
         Step(64);   /* PMU LS loader DMA bases include the physical WPR base */
         err = BuildWprB3b(dmemSize, wprStart, &wprImage, &wprAllocLen, &wprUsed, &pmuArgv);
-        Trace(L"AcrWprBuildAlloc", wprAllocLen);
-        Trace(L"AcrWprBuildUsed", wprUsed);
+        TraceDetail(L"AcrWprBuildAlloc", wprAllocLen);
+        TraceDetail(L"AcrWprBuildUsed", wprUsed);
         if (err != 0) goto out;
         if (wprUsed > ACR_WPR_BYTES || wprAllocLen < wprUsed) {
             err = 0xE0000062u; goto out;
@@ -7028,21 +7050,21 @@ static VOID ProbeB3a(PSWGPU_DEVICE Dev, BOOLEAN RunAcr)
         ok = (ULONG)(RtlCompareMemory(g_AcrVm.WprBuffer, wprImage, wprUsed) == wprUsed);
         TraceDurable(L"AcrWprCpuReadback", ok);
         if (!ok) { err = 0xE0000069u; goto out; }
-        Trace(L"AcrWprCpuCopyBytes", wprUsed);
+        TraceDetail(L"AcrWprCpuCopyBytes", wprUsed);
 
         /* GM20B's setup differs from GM200: point the descriptor at the
          * allocated INST-target WPR blob instead of programming region_props. */
         acrDesc = (ULONGLONG *)(img + dataBase);
         WprPutLe32((PUCHAR)acrDesc + 0x240, wprUsed); /* ucode_blob_size */
         WprPutLe64((PUCHAR)acrDesc + 0x248, (ULONGLONG)g_AcrVm.WprPa.QuadPart);
-        Trace(L"AcrDescWprBytes", wprUsed);
-        Trace(L"AcrDescWprBaseLo", g_AcrVm.WprPa.LowPart);
-        Trace(L"AcrDescWprBaseHi", (ULONG)g_AcrVm.WprPa.HighPart);
+        TraceDetail(L"AcrDescWprBytes", wprUsed);
+        TraceDetail(L"AcrDescWprBaseLo", g_AcrVm.WprPa.LowPart);
+        TraceDetail(L"AcrDescWprBaseHi", (ULONG)g_AcrVm.WprPa.HighPart);
         RtlCopyMemory((PUCHAR)g_AcrVm.Arena + ACR_VM_IMAGE_OFF, img, ucDataSize);
         KeMemoryBarrier();
-        Trace(L"AcrImageIova", (ULONG)(arenaIova + ACR_VM_IMAGE_OFF));
-        Trace(L"AcrImageIovaHi", (ULONG)((arenaIova + ACR_VM_IMAGE_OFF) >> 32));
-        Trace(L"AcrImageBytes", ucDataSize);
+        TraceDetail(L"AcrImageIova", (ULONG)(arenaIova + ACR_VM_IMAGE_OFF));
+        TraceDetail(L"AcrImageIovaHi", (ULONG)((arenaIova + ACR_VM_IMAGE_OFF) >> 32));
+        TraceDetail(L"AcrImageBytes", ucDataSize);
 
         /* GM20B fb_gm20b.c: gm20b_fb_set_mmu_page_size() selects the
          * per-instance PDB big-page bit. Until this bit is set, our RAMIN
@@ -7051,13 +7073,13 @@ static VOID ProbeB3a(PSWGPU_DEVICE Dev, BOOLEAN RunAcr)
         Step(57);
         {
             ULONG mmuBefore = Rd(B, 0x100C80), mmuAfter;
-            Trace(L"AcrMmuPageCtrlBefore", mmuBefore);
+            TraceDetail(L"AcrMmuPageCtrlBefore", mmuBefore);
             Wr(B, 0x100C80, mmuBefore | 0x00000800u);
             mmuAfter = Rd(B, 0x100C80);
-            Trace(L"AcrMmuPageCtrlAfter", mmuAfter);
-            Trace(L"AcrPreBootDmactl", Rd(B, PMU_FALCON + FALCON_DMACTL));
-            Trace(L"AcrPreBootItfen", Rd(B, PMU_FALCON + FALCON_ITFEN));
-            Trace(L"AcrPreBootTranscfg1", Rd(B, PMU_FALCON + 0xE04));
+            TraceDetail(L"AcrMmuPageCtrlAfter", mmuAfter);
+            TraceDetail(L"AcrPreBootDmactl", Rd(B, PMU_FALCON + FALCON_DMACTL));
+            TraceDetail(L"AcrPreBootItfen", Rd(B, PMU_FALCON + FALCON_ITFEN));
+            TraceDetail(L"AcrPreBootTranscfg1", Rd(B, PMU_FALCON + 0xE04));
             TraceDurable(L"AcrPdbPageModeOk", (mmuAfter & 0x800u) ? 1u : 0u);
             if (!(mmuAfter & 0x800u)) { err = 0xE000006Cu; goto out; }
         }
@@ -7068,8 +7090,8 @@ static VOID ProbeB3a(PSWGPU_DEVICE Dev, BOOLEAN RunAcr)
         Step(51);   /* write the virtual DMA addresses into flcn_bl_dmem_desc */
         desc[9] = (ACR_GPU_VA_BASE + ACR_VM_IMAGE_OFF) >> 8;
         desc[15] = (ACR_GPU_VA_BASE + ACR_VM_IMAGE_OFF + dataBase) >> 8;
-        Trace(L"AcrDescCodeDmaBase", desc[9]);
-        Trace(L"AcrDescDataDmaBase", desc[15]);
+        TraceDetail(L"AcrDescCodeDmaBase", desc[9]);
+        TraceDetail(L"AcrDescDataDmaBase", desc[15]);
         Wr(B, PMU_FALCON + FALCON_DMEMC0, (1u << 24) | 0);
         for (i = 0; i < 19; ++i) Wr(B, PMU_FALCON + FALCON_DMEMD0, desc[i]);
         Wr(B, PMU_FALCON + FALCON_DMEMC0, (1u << 25) | 0);
@@ -7097,8 +7119,8 @@ static VOID ProbeB3a(PSWGPU_DEVICE Dev, BOOLEAN RunAcr)
             ULONG faultUnits[32], recBefore[32][5], recAfter[32][5];
             ULONG u, j, clearPolls;
             BOOLEAN cleared = FALSE;
-            Trace(L"B3cPreAcrFifoIntr0", intrBefore);
-            Trace(L"B3cPreAcrFaultId", idBefore);
+            TraceDetail(L"B3cPreAcrFifoIntr0", intrBefore);
+            TraceDetail(L"B3cPreAcrFaultId", idBefore);
             for (u = 0; u < 32; ++u) {
                 if (!(idBefore & (1u << u))) continue;
                 faultUnits[faultCount] = u;
@@ -7107,9 +7129,9 @@ static VOID ProbeB3a(PSWGPU_DEVICE Dev, BOOLEAN RunAcr)
                     recBefore[faultCount][j] = Rd(B, 0x2800 + u * 0x10 + (j - 1) * 4);
                 ++faultCount;
             }
-            Trace(L"B3cPreAcrFaultRecCount", faultCount);
+            TraceDetail(L"B3cPreAcrFaultRecCount", faultCount);
             if (faultCount)
-                TraceBin(L"B3cPreAcrFaultRecs", recBefore, faultCount * sizeof(recBefore[0]));
+                TraceErrorBin(L"B3cPreAcrFaultRecs", recBefore, faultCount * sizeof(recBefore[0]));
             for (u = 0; u < 32; ++u)
                 if (idBefore & (1u << u)) Wr(B, 0x259C, 1u << u);
             if (intrBefore & 0x18000000u) Wr(B, 0x2100, intrBefore & 0x18000000u);
@@ -7122,8 +7144,8 @@ static VOID ProbeB3a(PSWGPU_DEVICE Dev, BOOLEAN RunAcr)
                 }
                 Us(10);
             }
-            Trace(L"B3cPreAcrFaultIdAfterClear", idAfter);
-            Trace(L"B3cPreAcrFifoIntr0AfterClear", intrAfter);
+            TraceDetail(L"B3cPreAcrFaultIdAfterClear", idAfter);
+            TraceDetail(L"B3cPreAcrFifoIntr0AfterClear", intrAfter);
             Trace(L"B3cPreAcrFaultClearPolls", clearPolls);
             if (faultCount) {
                 for (u = 0; u < faultCount; ++u) {
@@ -7131,8 +7153,8 @@ static VOID ProbeB3a(PSWGPU_DEVICE Dev, BOOLEAN RunAcr)
                     for (j = 1; j < 5; ++j)
                         recAfter[u][j] = Rd(B, 0x2800 + faultUnits[u] * 0x10 + (j - 1) * 4);
                 }
-                TraceBin(L"B3cPreAcrFaultRecsAfterAck", recAfter, faultCount * sizeof(recAfter[0]));
-                Trace(L"B3cPreAcrFaultDataPersist", RtlCompareMemory(recBefore, recAfter,
+                TraceErrorBin(L"B3cPreAcrFaultRecsAfterAck", recAfter, faultCount * sizeof(recAfter[0]));
+                TraceDetail(L"B3cPreAcrFaultDataPersist", RtlCompareMemory(recBefore, recAfter,
                     faultCount * sizeof(recBefore[0])) == faultCount * sizeof(recBefore[0]) ? 1u : 0u);
             }
             TraceDurable(L"B3cPreAcrFaultClearResult", cleared ? 0u : 0xE0000075u);
@@ -7150,37 +7172,37 @@ static VOID ProbeB3a(PSWGPU_DEVICE Dev, BOOLEAN RunAcr)
             Ms(1);
         }
         Trace(L"AcrBootPolls", bootPolls);
-        Trace(L"AcrBootCpuctl", Rd(B, PMU_FALCON + FALCON_CPUCTL));
-        Trace(L"AcrBootMailbox0", Rd(B, PMU_FALCON + FALCON_MAILBOX0));
-        Trace(L"AcrBootMailbox1", Rd(B, PMU_FALCON + FALCON_MAILBOX1));
-        Trace(L"AcrBootIrq", Rd(B, PMU_FALCON + 0x004));
-        Trace(L"AcrBootSctl", Rd(B, PMU_FALCON + FALCON_SCTL));
-        Trace(L"AcrBootPc", Rd(B, PMU_FALCON + 0x148));
+        TraceDetail(L"AcrBootCpuctl", Rd(B, PMU_FALCON + FALCON_CPUCTL));
+        TraceDetail(L"AcrBootMailbox0", Rd(B, PMU_FALCON + FALCON_MAILBOX0));
+        TraceDetail(L"AcrBootMailbox1", Rd(B, PMU_FALCON + FALCON_MAILBOX1));
+        TraceDetail(L"AcrBootIrq", Rd(B, PMU_FALCON + 0x004));
+        TraceDetail(L"AcrBootSctl", Rd(B, PMU_FALCON + FALCON_SCTL));
+        TraceDetail(L"AcrBootPc", Rd(B, PMU_FALCON + 0x148));
         /* 0.4.6 (read only, apart from selecting the trace slot like nouveau's
          * gm200_flcn_tracepc): where the falcon is, its DMA state, and any
          * MC/SMMU or GPU MMU fault raised during the boot. */
         {
             ULONG tidx = Rd(B, PMU_FALCON + 0x148), nr, sp, pcs[8], rec[6][5], n = 0, id, u;
             nr = (tidx >> 16) & 0xFFu;
-            Trace(L"B3cTraceIdx", tidx);
-            Trace(L"B3cTraceNr", nr);
+            TraceDetail(L"B3cTraceIdx", tidx);
+            TraceDetail(L"B3cTraceNr", nr);
             if (nr > 8) nr = 8;
             for (sp = 0; sp < nr; ++sp) {
                 Wr(B, PMU_FALCON + 0x148, sp);
                 pcs[sp] = Rd(B, PMU_FALCON + 0x14C);
             }
             if (nr) TraceBin(L"B3cTracePc", pcs, nr * sizeof(ULONG));
-            Trace(L"B3cDmaCmd", Rd(B, PMU_FALCON + FALCON_DMATRFCMD));
-            Trace(L"B3cDmaBase", Rd(B, PMU_FALCON + FALCON_DMATRFBASE));
-            Trace(L"B3cDmaMoffs", Rd(B, PMU_FALCON + FALCON_DMATRFMOFFS));
-            Trace(L"B3cDmaFboffs", Rd(B, PMU_FALCON + FALCON_DMATRFFBOFFS));
-            Trace(L"B3cDmactl", Rd(B, PMU_FALCON + FALCON_DMACTL));
-            Trace(L"B3cMcInt", Rd(Dev->Mc, MC_INTSTATUS));
-            Trace(L"B3cMcErr", Rd(Dev->Mc, MC_ERR_STATUS));
-            Trace(L"B3cMcErrAdr", Rd(Dev->Mc, MC_ERR_ADR));
-            Trace(L"B3cFifoIntr0", Rd(B, 0x2100));
+            TraceDetail(L"B3cDmaCmd", Rd(B, PMU_FALCON + FALCON_DMATRFCMD));
+            TraceDetail(L"B3cDmaBase", Rd(B, PMU_FALCON + FALCON_DMATRFBASE));
+            TraceDetail(L"B3cDmaMoffs", Rd(B, PMU_FALCON + FALCON_DMATRFMOFFS));
+            TraceDetail(L"B3cDmaFboffs", Rd(B, PMU_FALCON + FALCON_DMATRFFBOFFS));
+            TraceDetail(L"B3cDmactl", Rd(B, PMU_FALCON + FALCON_DMACTL));
+            TraceDetail(L"B3cMcInt", Rd(Dev->Mc, MC_INTSTATUS));
+            TraceDetail(L"B3cMcErr", Rd(Dev->Mc, MC_ERR_STATUS));
+            TraceDetail(L"B3cMcErrAdr", Rd(Dev->Mc, MC_ERR_ADR));
+            TraceDetail(L"B3cFifoIntr0", Rd(B, 0x2100));
             id = Rd(B, 0x259C);
-            Trace(L"B3cFifoFaultId", id);
+            TraceDetail(L"B3cFifoFaultId", id);
             for (u = 0; u < 32 && n < 6; ++u) {
                 if (!(id & (1u << u))) continue;
                 rec[n][0] = u;
@@ -7190,28 +7212,28 @@ static VOID ProbeB3a(PSWGPU_DEVICE Dev, BOOLEAN RunAcr)
                 rec[n][4] = Rd(B, 0x280C + u * 0x10);
                 ++n;
             }
-            if (n) TraceBin(L"B3cFaultRecs", rec, n * 5 * sizeof(ULONG));
+            if (n) TraceErrorBin(L"B3cFaultRecs", rec, n * 5 * sizeof(ULONG));
             /* 0.4.17 (read only): what state ACR left the LS falcons in.
              * SCTL bits [13:12] report the falcon security mode. The GR
              * falcons (FECS 0x409000, GPCCS 0x41A000) are read only when
              * PMC_ENABLE already has GR (bit 12) on; nothing is enabled here. */
             {
                 ULONG pmcEn = Rd(B, NV_PMC_ENABLE);
-                Trace(L"B3cLsPmcEnable", pmcEn);
-                Trace(L"B3cPostAcrPmuCpuctl", Rd(B, PMU_FALCON + FALCON_CPUCTL));
-                Trace(L"B3cPostAcrPmuSctl", Rd(B, PMU_FALCON + FALCON_SCTL));
-                Trace(L"B3cLsPmuMb0", Rd(B, PMU_FALCON + FALCON_MAILBOX0));
-                Trace(L"B3cLsPmuMb1", Rd(B, PMU_FALCON + FALCON_MAILBOX1));
+                TraceDetail(L"B3cLsPmcEnable", pmcEn);
+                TraceDetail(L"B3cPostAcrPmuCpuctl", Rd(B, PMU_FALCON + FALCON_CPUCTL));
+                TraceDetail(L"B3cPostAcrPmuSctl", Rd(B, PMU_FALCON + FALCON_SCTL));
+                TraceDetail(L"B3cLsPmuMb0", Rd(B, PMU_FALCON + FALCON_MAILBOX0));
+                TraceDetail(L"B3cLsPmuMb1", Rd(B, PMU_FALCON + FALCON_MAILBOX1));
                 if (pmcEn & 0x1000u) {
-                    Trace(L"B3cLsFecsCpuctl", Rd(B, 0x409000 + FALCON_CPUCTL));
-                    Trace(L"B3cLsFecsSctl", Rd(B, 0x409000 + FALCON_SCTL));
-                    Trace(L"B3cLsFecsMb0", Rd(B, 0x409000 + FALCON_MAILBOX0));
-                    Trace(L"B3cLsGpccsCpuctl", Rd(B, 0x41A000 + FALCON_CPUCTL));
-                    Trace(L"B3cLsGpccsSctl", Rd(B, 0x41A000 + FALCON_SCTL));
-                    Trace(L"B3cLsGpccsMb0", Rd(B, 0x41A000 + FALCON_MAILBOX0));
-                    Trace(L"B3cLsGrRead", 1);
+                    TraceDetail(L"B3cLsFecsCpuctl", Rd(B, 0x409000 + FALCON_CPUCTL));
+                    TraceDetail(L"B3cLsFecsSctl", Rd(B, 0x409000 + FALCON_SCTL));
+                    TraceDetail(L"B3cLsFecsMb0", Rd(B, 0x409000 + FALCON_MAILBOX0));
+                    TraceDetail(L"B3cLsGpccsCpuctl", Rd(B, 0x41A000 + FALCON_CPUCTL));
+                    TraceDetail(L"B3cLsGpccsSctl", Rd(B, 0x41A000 + FALCON_SCTL));
+                    TraceDetail(L"B3cLsGpccsMb0", Rd(B, 0x41A000 + FALCON_MAILBOX0));
+                    TraceDetail(L"B3cLsGrRead", 1);
                 } else {
-                    Trace(L"B3cLsGrRead", 0);
+                    TraceDetail(L"B3cLsGrRead", 0);
                 }
             }
             TraceDurable(L"B3cDiagDone", 1);
@@ -7261,60 +7283,749 @@ static VOID ProbeB3a(PSWGPU_DEVICE Dev, BOOLEAN RunAcr)
                 }
             }
         }
-    } else {
-        /* CPU-only WPR layout and readback; no GPU DMA or ACR/PMU start. */
-        (VOID)BuildWprB3b(dmemSize, 0, NULL, NULL, NULL, NULL);
     }
 
-    /* In launch mode the surrounding PowerTest path asserts GPU reset before
-     * releasing the WPR/VM backing pages; otherwise reset the idle PMU here. */
-    if (!RunAcr) PmuReset(B, L"B3aScrubPolls2");
-
 out:
-    if (RunAcr && !acrAttempted) TraceDurable(L"AcrBootResult", err);
+    if (!acrAttempted) TraceDurable(L"AcrBootResult", err);
     TraceDurable(L"B3aResult", err);
     if (boot != NULL) ExFreePoolWithTag(boot, SWGPU_TAG);
     if (wprImage != NULL) ExFreePoolWithTag(wprImage, SWGPU_TAG);
     if (img != NULL) ExFreePoolWithTag(img, SWGPU_TAG);
     if (bl != NULL) ExFreePoolWithTag(bl, SWGPU_TAG);
     if (uc != NULL) ExFreePoolWithTag(uc, SWGPU_TAG);
+    return err;
 }
 
-static NTSTATUS PowerTest(PSWGPU_DEVICE Dev, BOOLEAN KeepOn, ULONG Mode)
+static ULONG B3eResidentIrqTest(PSWGPU_DEVICE Dev, PSWGPU_E3_RESULT Out)
+{
+    volatile UCHAR *B = Dev != NULL ? Dev->Bar0 : NULL;
+    volatile ULONG *bar1GpPut, *bar1GpGet, *semSlot;
+    PULONG ring, push, pixels;
+    ULONG (*writes)[4] = NULL;
+    ULONG writeCapacity = 512u, writeCount = 0u;
+    ULONG rounds = 64u, ringEntries = PAGE_SIZE / 8u;
+    ULONG round = 0u, cursor, colorIndex, color, semaphore, put, newPut, get;
+    ULONG l2State[4] = { 0u }, gotSemaphore = 0u, pixelFirst = 0u, pixelMiddle = 0u, pixelLast = 0u;
+    ULONG result = 0u, failureStage = 0u, completed = 0u, timeoutCount = 0u, waitCount = 0u;
+    ULONG timeoutWorkDone = 0u;
+    ULONG i, e3Result;
+    LARGE_INTEGER totalStart, totalEnd, waitStart, waitEnd, frequency, waitLimit;
+    ULONGLONG totalTicks, waitTicks, totalUs, waitUs, maxWaitUs = 0u;
+
+    if (Out == NULL) return STATUS_INVALID_PARAMETER;
+    RtlZeroMemory(Out, sizeof(*Out));
+    Out->Version = SWGPU_VERSION;
+    Out->HaveInterrupts = (Dev != NULL && Dev->HaveInterruptResources &&
+                           Dev->InterruptSourcesEnabled) ? 1u : 0u;
+    if (Dev == NULL || !Dev->ResidentActive || g_ResidentOwner != Dev ||
+        !Dev->ResidentChannelEnabled || !Dev->ResidentRunlistSubmitted ||
+        !Dev->ResidentInstBound || B == NULL || Dev->Bar1Cpu == NULL ||
+        Dev->Bar1MapLen < BAR1_D3_MAP_LEN || !g_GrVm.Active || g_GrVm.Arena == NULL) {
+        result = STATUS_DEVICE_NOT_READY;
+        goto done;
+    }
+    Step(114);
+    if (!Dev->HaveInterruptResources || !Dev->InterruptSourcesEnabled) {
+        /* No descriptors is the supported pre-R447H case. If descriptors
+         * exist but WDF could not create both interrupt objects, report setup
+         * failure separately so a broken R447H resource map is visible. */
+        result = (Dev->InterruptResourceCount == 0u) ? 0xE00000A7u : 0xE00000A9u;
+        goto done;
+    }
+    B3cPrivRingResetWriteLog();
+    if ((Rd(B, NV_PMC_ENABLE) & (1u << 12)) == 0u || ringEntries == 0u ||
+        GR_VM_D2_PUSHBUF_OFF + PAGE_SIZE > GR_VM_ARENA_SIZE ||
+        GR_VM_D2_GPFIFO_OFF + PAGE_SIZE > GR_VM_ARENA_SIZE ||
+        GR_VM_D2_RT_OFF + 64u * 64u * sizeof(ULONG) > GR_VM_ARENA_SIZE) {
+        result = 0xE00000A8u; failureStage = 1u; goto done;
+    }
+    ring = (PULONG)((PUCHAR)g_GrVm.Arena + GR_VM_D2_GPFIFO_OFF);
+    push = (PULONG)((PUCHAR)g_GrVm.Arena + GR_VM_D2_PUSHBUF_OFF);
+    pixels = (PULONG)((PUCHAR)g_GrVm.Arena + GR_VM_D2_RT_OFF);
+    semSlot = (volatile ULONG *)((PUCHAR)push + PAGE_SIZE - 64u);
+    bar1GpPut = (volatile ULONG *)(Dev->Bar1Cpu + BAR1_D3_LOW_VA + 0x8Cu);
+    bar1GpGet = (volatile ULONG *)(Dev->Bar1Cpu + BAR1_D3_LOW_VA + 0x88u);
+    writes = (ULONG (*)[4])ExAllocatePool2(POOL_FLAG_NON_PAGED,
+        writeCapacity * sizeof(writes[0]), SWGPU_TAG);
+    if (writes == NULL) { result = 0xE00000A8u; failureStage = 2u; goto done; }
+    RtlZeroMemory(writes, writeCapacity * sizeof(writes[0]));
+    put = *bar1GpPut;
+    if (put >= ringEntries) { result = 0xE00000A8u; failureStage = 3u; goto done; }
+    InterlockedExchange(&Dev->E3NonstallCount, 0);
+    InterlockedExchange(&Dev->E3StallCount, 0);
+    InterlockedExchange(&Dev->E3StallUnits, 0);
+    InterlockedExchange(&Dev->E3FirstMcIntr0, 0);
+    InterlockedExchange(&Dev->E3FirstMcIntr1, 0);
+    InterlockedExchange(&Dev->E3LastMcIntr0, 0);
+    InterlockedExchange(&Dev->E3LastMcIntr1, 0);
+    InterlockedExchange(&Dev->E3FirstSet, 0);
+    totalStart = KeQueryPerformanceCounter(&frequency);
+    waitLimit.QuadPart = -1000000LL; /* 100 ms, relative, one bounded wait per round. */
+
+    for (round = 0u; round < rounds; ++round) {
+        cursor = 0u;
+        colorIndex = round & 7u;
+        color = 0xFF000000u |
+            ((colorIndex & 1u) ? 0x00FF0000u : 0u) |
+            ((colorIndex & 2u) ? 0x0000FF00u : 0u) |
+            ((colorIndex & 4u) ? 0x000000FFu : 0u);
+        semaphore = 0xE3000000u | (round + 1u);
+        for (i = 0u; i < 4096u; ++i) pixels[i] = 0x11111111u;
+        for (i = 0u; i < 4u; ++i) semSlot[i] = 0u;
+#define E3_METHOD(method, value) do { \
+        if (cursor + 2u >= PAGE_SIZE / sizeof(ULONG) - 16u) { failureStage = 4u; goto e3_round_fail; } \
+        push[cursor++] = 0x20010000u | ((ULONG)(method) >> 2); \
+        push[cursor++] = (ULONG)(value); \
+    } while (0)
+        /* D5 known-good MAXWELL_B 3D clear methods (clb197.h). */
+        E3_METHOD(0x0000u, 0x0000B197u);
+        E3_METHOD(0x121Cu, 1u); E3_METHOD(0x0800u, 0u);
+        E3_METHOD(0x0804u, (ULONG)((ULONGLONG)GR_VM_GPU_VA + GR_VM_D2_RT_OFF));
+        E3_METHOD(0x0808u, 256u); E3_METHOD(0x080Cu, 64u);
+        E3_METHOD(0x0810u, 0xCFu); E3_METHOD(0x0814u, 0x1000u);
+        E3_METHOD(0x0818u, 1u); E3_METHOD(0x081Cu, 0u); E3_METHOD(0x0820u, 0u);
+        E3_METHOD(0x0FE0u, 0u); E3_METHOD(0x0FE4u, 0u);
+        E3_METHOD(0x1538u, 0u); E3_METHOD(0x0FF4u, 0x00400000u);
+        E3_METHOD(0x0FF8u, 0x00400000u); E3_METHOD(0x0DF8u, 0u);
+        E3_METHOD(0x0DFCu, 0u); E3_METHOD(0x0E00u, 0u);
+        E3_METHOD(0x10F8u, 0x10u); E3_METHOD(0x0D6Cu, 0x00400000u);
+        E3_METHOD(0x0D70u, 0x00400000u);
+        E3_METHOD(0x0D80u, (colorIndex & 1u) ? 0x3F800000u : 0u);
+        E3_METHOD(0x0D84u, (colorIndex & 2u) ? 0x3F800000u : 0u);
+        E3_METHOD(0x0D88u, (colorIndex & 4u) ? 0x3F800000u : 0u);
+        E3_METHOD(0x0D8Cu, 0x3F800000u);
+        E3_METHOD(0x19D0u, 0x3Cu);
+#undef E3_METHOD
+        if (cursor + 8u >= PAGE_SIZE / sizeof(ULONG) - 16u) {
+            failureStage = 4u; goto e3_round_fail;
+        }
+        /* Host SEMAPHORE RELEASE with WFI; then NVB06F NON_STALL_INT
+         * (host method 0x20, open-gpu-doc dev_pbdma.ref). */
+        push[cursor++] = 0x20040004u;
+        push[cursor++] = 0u;
+        push[cursor++] = (ULONG)((ULONGLONG)GR_VM_GPU_VA + GR_VM_D2_PUSHBUF_OFF + PAGE_SIZE - 64u);
+        push[cursor++] = semaphore;
+        push[cursor++] = 0x01000002u;
+        /* Claude 0.7.3: no SET_OBJECT B06F on subchannel 1 (0.7.2 hardware: GR_INTR exception
+         * 0x200000 as a stall interrupt). NON_STALL_INT is a host method; subchannel 0. */
+        push[cursor++] = 0x20010008u; push[cursor++] = 0u; /* NON_STALL_INT, method 0x20 */
+        KeMemoryBarrier();
+        ring[put * 2u] = (ULONG)((ULONGLONG)GR_VM_GPU_VA + GR_VM_D2_PUSHBUF_OFF) & ~3u;
+        ring[put * 2u + 1u] = cursor << 10;
+        KeMemoryBarrier();
+        writeCount = 0u; l2State[0] = l2State[1] = l2State[2] = l2State[3] = 0u;
+        if (!B3cD5L2Flush(B, writes, &writeCount, writeCapacity, l2State)) {
+            failureStage = 5u; goto e3_round_fail;
+        }
+        newPut = (put + 1u) % ringEntries;
+        KeClearEvent(&Dev->E3Event);
+        KeMemoryBarrier();
+        *bar1GpPut = newPut;
+        KeMemoryBarrier();
+        if (*bar1GpPut != newPut || Rd(B, 0x00002A30u) != 0u ||
+            (Rd(B, 0x00002100u) & 0x10000000u) != 0u) {
+            failureStage = 6u; goto e3_round_fail;
+        }
+        ++waitCount;
+        waitStart = KeQueryPerformanceCounter(NULL);
+        e3Result = (ULONG)KeWaitForSingleObject(&Dev->E3Event, Executive,
+                                                 KernelMode, FALSE, &waitLimit);
+        waitEnd = KeQueryPerformanceCounter(NULL);
+        waitTicks = (ULONGLONG)(waitEnd.QuadPart - waitStart.QuadPart);
+        waitUs = frequency.QuadPart > 0 ? (waitTicks * 1000000ull) / (ULONGLONG)frequency.QuadPart : 0u;
+        if (waitUs > maxWaitUs) maxWaitUs = waitUs;
+        if (e3Result != STATUS_SUCCESS) {
+            ++timeoutCount;
+            /* Timeout diagnosis intentionally reads the semaphore only once. */
+            writeCount = 0u;
+            if (B3cD5L2Flush(B, writes, &writeCount, writeCapacity, l2State)) {
+                KeMemoryBarrier(); gotSemaphore = semSlot[0];
+            } else gotSemaphore = semSlot[0];
+            timeoutWorkDone = (gotSemaphore == semaphore) ? 1u : 0u;
+            failureStage = 7u;
+            goto e3_round_fail;
+        }
+        writeCount = 0u;
+        if (!B3cD5L2Flush(B, writes, &writeCount, writeCapacity, l2State)) {
+            failureStage = 8u; goto e3_round_fail;
+        }
+        KeMemoryBarrier();
+        gotSemaphore = semSlot[0];
+        pixelFirst = pixels[0]; pixelMiddle = pixels[2048]; pixelLast = pixels[4095];
+        get = *bar1GpGet;
+        if (get != newPut || gotSemaphore != semaphore || pixelFirst != color ||
+            pixelMiddle != color || pixelLast != color) {
+            failureStage = 9u; goto e3_round_fail;
+        }
+        ++completed;
+        put = newPut;
+        continue;
+
+e3_round_fail:
+        result = 0xE00000A8u;
+        Out->Timeouts = timeoutCount;
+        Trace(L"E3FailRound", round + 1u);
+        break;
+    }
+    totalEnd = KeQueryPerformanceCounter(NULL);
+    totalTicks = (ULONGLONG)(totalEnd.QuadPart - totalStart.QuadPart);
+    totalUs = frequency.QuadPart > 0 ? (totalTicks * 1000000ull) / (ULONGLONG)frequency.QuadPart : 0u;
+    Out->TotalUs = (ULONG)(totalUs > 0xFFFFFFFFull ? 0xFFFFFFFFu : totalUs);
+    Out->MaxWaitUs = (ULONG)(maxWaitUs > 0xFFFFFFFFull ? 0xFFFFFFFFu : maxWaitUs);
+    Out->Rounds = completed; Out->Waits = waitCount; Out->Timeouts = timeoutCount;
+    Out->GpPut = *bar1GpPut; Out->GpGet = *bar1GpGet;
+    Out->Semaphore = gotSemaphore;
+    Out->PixelFirst = pixelFirst; Out->PixelMiddle = pixelMiddle; Out->PixelLast = pixelLast;
+    if (round == rounds) result = 0u;
+
+done:
+    Out->Result = result;
+    Out->HaveInterrupts = (Dev != NULL && Dev->HaveInterruptResources && Dev->InterruptSourcesEnabled) ? 1u : 0u;
+    if (Dev != NULL) {
+        Out->NonstallCount = (ULONG)InterlockedCompareExchange(&Dev->E3NonstallCount, 0, 0);
+        Out->StallCount = (ULONG)InterlockedCompareExchange(&Dev->E3StallCount, 0, 0);
+        Out->StallUnits = (ULONG)InterlockedCompareExchange(&Dev->E3StallUnits, 0, 0);
+        Out->FirstMcIntr0 = (ULONG)InterlockedCompareExchange(&Dev->E3FirstMcIntr0, 0, 0);
+        Out->FirstMcIntr1 = (ULONG)InterlockedCompareExchange(&Dev->E3FirstMcIntr1, 0, 0);
+        Out->LastMcIntr0 = (ULONG)InterlockedCompareExchange(&Dev->E3LastMcIntr0, 0, 0);
+        Out->LastMcIntr1 = (ULONG)InterlockedCompareExchange(&Dev->E3LastMcIntr1, 0, 0);
+        if (B != NULL && Dev->ResidentActive) {
+            Out->Channel = Rd(B, 0x00800004u); Out->PbdmaStatus = Rd(B, 0x00003080u);
+            Out->PbdmaIntr0 = Rd(B, 0x00040108u); Out->FifoIntr0 = Rd(B, FIFO_INTR_0);
+            Out->MmuFault = Rd(B, 0x00002A30u);
+            if (Rd(B, NV_PMC_ENABLE) & (1u << 12)) {
+                Out->GrIntr = Rd(B, 0x00400100u); Out->GrStatus = Rd(B, 0x00400700u);
+                /* Claude 0.7.3: read-only GR error detail (exception, class error, trapped addr/data). */
+                Trace(L"E3GrException", Rd(B, 0x00400108u));
+                Trace(L"E3GrClassError", Rd(B, 0x00400110u));
+                Trace(L"E3GrTrappedAddr", Rd(B, 0x00400704u));
+                Trace(L"E3GrTrappedDataLo", Rd(B, 0x00400708u));
+            }
+            Trace(L"E3PmcIntr0AtEnd", Rd(B, PMC_INTR_STATUS_STALL));
+            Trace(L"E3PmcIntr1AtEnd", Rd(B, PMC_INTR_STATUS_NONSTALL));
+            Trace(L"E3FifoIntrEn1AtEnd", Rd(B, FIFO_INTR_EN_1));
+        }
+    }
+    TraceDurable(L"E3Result", result); Trace(L"E3Rounds", Out->Rounds);
+    Trace(L"E3Waits", Out->Waits);
+    Trace(L"E3NonstallCount", Out->NonstallCount); Trace(L"E3StallCount", Out->StallCount);
+    Trace(L"E3StallUnits", Out->StallUnits); Trace(L"E3MaxWaitUs", Out->MaxWaitUs);
+    Trace(L"E3TotalUs", Out->TotalUs); Trace(L"E3Timeouts", Out->Timeouts);
+    Trace(L"E3HaveInterrupts", Out->HaveInterrupts);
+    Trace(L"E3FirstMcIntr0", Out->FirstMcIntr0); Trace(L"E3FirstMcIntr1", Out->FirstMcIntr1);
+    Trace(L"E3LastMcIntr0", Out->LastMcIntr0); Trace(L"E3LastMcIntr1", Out->LastMcIntr1);
+    Trace(L"E3GpGet", Out->GpGet); Trace(L"E3GpPut", Out->GpPut);
+    Trace(L"E3Semaphore", Out->Semaphore); Trace(L"E3PixelFirst", Out->PixelFirst);
+    Trace(L"E3PixelMiddle", Out->PixelMiddle); Trace(L"E3PixelLast", Out->PixelLast);
+    Trace(L"E3FailureStage", failureStage); Trace(L"E3Channel", Out->Channel);
+    Trace(L"E3TimeoutWorkDone", timeoutWorkDone);
+    Trace(L"E3PbdmaStatus", Out->PbdmaStatus); Trace(L"E3PbdmaIntr0", Out->PbdmaIntr0);
+    Trace(L"E3FifoIntr0", Out->FifoIntr0); Trace(L"E3GrIntr", Out->GrIntr);
+    Trace(L"E3GrStatus", Out->GrStatus); Trace(L"E3MmuFault", Out->MmuFault);
+    if (result != 0u && B != NULL && Dev != NULL && Dev->ResidentActive &&
+        (Rd(B, NV_PMC_ENABLE) & (1u << 12)) != 0u) {
+        ULONG dump[B3C_GR_STATUS_DUMP_REGS * 2u] = { 0u };
+        B3cCaptureGrStatusDump(B, L"E3GrStatusDump", dump);
+    }
+    if (writes != NULL) TraceBin(L"E3PrivWrites", writes, writeCount * sizeof(writes[0]));
+    B3cPrivRingTraceWriteLog(L"E3PrivErrorCount", L"E3PrivErrorDropped",
+        L"E3PrivAckTimeouts", L"E3PrivErrors");
+    if (writes != NULL) ExFreePoolWithTag(writes, SWGPU_TAG);
+    return result;
+}
+
+/* F1: Maxwell CE2/GR copy on the existing GR runlist. Nouveau's GM20B
+ * device table selects gm200_ce for CE2. On the Switch, deko3d binds Copy
+ * and 3D on one GPU channel. Use a spare subchannel, with no RAMFC changes. */
+#define F1_CE_ENABLE         (1u << 21)
+#define F1_CE_INTR_ENABLE    0x00106904u
+#define F1_CE_INTR_STATUS    0x00106908u
+#define F1_CE_LAUNCH_ERROR   0x00106F14u
+#define F1_COPY_SUBCHANNEL   4u
+#define F1_COPY_ERROR        0xE00000AAu
+
+static ULONG F1Method(ULONG Subchannel, ULONG MethodBytes, ULONG Count)
+{
+    return 0x20000000u | (Count << 16) | (Subchannel << 13) | (MethodBytes >> 2);
+}
+
+static UCHAR F1Pattern(ULONG Round, ULONG Offset)
+{
+    return (UCHAR)((Offset * 73u) ^ (Offset >> 8) ^ (Round * 29u + 1u));
+}
+
+/* BAR1 GP_PUT is a USERD doorbell. Log the BAR1-relative offset separately
+ * from the BAR0 L2 writes, and check the priv ring just as for BAR0. */
+static BOOLEAN F1Publish(PSWGPU_DEVICE Dev, ULONG NewPut, ULONG (*write)[4])
+{
+    const ULONG putOffset = BAR1_D3_LOW_VA + 0x8Cu;
+    BOOLEAN ok;
+    (*write)[0] = putOffset;
+    (*write)[1] = Rd(Dev->Bar1Cpu, putOffset);
+    (*write)[2] = NewPut;
+    Dev->CopyInFlight = TRUE;
+    KeMemoryBarrier();
+    Wr(Dev->Bar1Cpu, putOffset, NewPut);
+    KeMemoryBarrier();
+    (*write)[3] = Rd(Dev->Bar1Cpu, putOffset);
+    ok = B3cPrivRingAfterGrWrite(Dev->Bar0, putOffset, NewPut);
+    return ok && (*write)[3] == NewPut;
+}
+
+static VOID F1CaptureFailure(volatile UCHAR *B, PSWGPU_F1_RESULT Out)
+{
+    ULONG records[8][5], count = 0u, unit, word;
+    ULONG enable = Rd(B, NV_PMC_ENABLE);
+    if ((enable & F1_CE_ENABLE) != 0u) {
+        Out->CeIntr = Rd(B, F1_CE_INTR_STATUS);
+        Out->CeLaunchError = Rd(B, F1_CE_LAUNCH_ERROR);
+        Trace(L"F1CeIntrEnable", Rd(B, F1_CE_INTR_ENABLE));
+    }
+    Out->FifoIntr = Rd(B, FIFO_INTR_0);
+    Out->FaultId = Rd(B, 0x0000259Cu);
+    Out->PbdmaIntr = Rd(B, 0x00040108u);
+    if ((enable & PMC_INTR_PGRAPH_PENDING) != 0u) {
+        Out->GrIntr = Rd(B, 0x00400100u);
+        Trace(L"F1GrException", Rd(B, 0x00400108u));
+        Trace(L"F1GrClassError", Rd(B, 0x00400110u));
+        Trace(L"F1GrTrappedAddr", Rd(B, 0x00400704u));
+        Trace(L"F1GrTrappedData", Rd(B, 0x00400708u));
+    }
+    for (unit = 0u; unit < 32u && count < RTL_NUMBER_OF(records); ++unit) {
+        if ((Out->FaultId & (1u << unit)) == 0u) continue;
+        records[count][0] = unit;
+        for (word = 0u; word < 4u; ++word)
+            records[count][1u + word] = Rd(B, 0x00002800u + unit * 16u + word * 4u);
+        ++count;
+    }
+    if (count != 0u) TraceErrorBin(L"F1FaultRecords", records, count * sizeof(records[0]));
+    Trace(L"F1PmcEnable", enable);
+    Trace(L"F1PmcIntr0", Rd(B, PMC_INTR_STATUS_STALL));
+    Trace(L"F1PmcIntr1", Rd(B, PMC_INTR_STATUS_NONSTALL));
+    Trace(L"F1MmuFaultStatus", Rd(B, 0x00002A30u));
+    Trace(L"F1PbdmaIntr1", Rd(B, 0x00040148u));
+    Trace(L"F1FifoEngine0", Rd(B, 0x00002640u));
+    Trace(L"F1FifoEngine1", Rd(B, 0x00002644u));
+}
+
+static VOID F1CopyTest(PSWGPU_DEVICE Dev, PSWGPU_F1_RESULT Out)
+{
+    static const ULONG sizes[16] = {
+        0x1000u, 0x1040u, 0x2000u, 0x3000u, 0x4000u, 0x5040u, 0x6000u, 0x7000u,
+        0x8000u, 0x9000u, 0xA000u, 0xB000u, 0xC000u, 0xD040u, 0xE000u, 0x10000u
+    };
+    const ULONG pushVa = GR_VM_GPU_VA + GR_VM_F1_PUSH_OFF;
+    const ULONG ceSemVa = pushVa + PAGE_SIZE - 32u, hostSemVa = ceSemVa + 16u;
+    const ULONG ringEntries = PAGE_SIZE / 8u;
+    const ULONG putOffset = BAR1_D3_LOW_VA + 0x8Cu, getOffset = BAR1_D3_LOW_VA + 0x88u;
+    volatile UCHAR *B = Dev->Bar0;
+    volatile ULONG *semaphores;
+    PULONG ring, push;
+    PUCHAR src, dst;
+    ULONG writes[2][4] = { { 0u } }, doorbellWrite[4] = { 0u };
+    ULONG l2State[4] = { 0u }, writeCount = 0u, stage = 1u, get = 0u, put = 0u;
+    ULONG round, i, polls, ceSeen = 0u, hostSeen = 0u;
+    ULONG flushMax = 0u, invalidateMax = 0u;
+    LARGE_INTEGER frequency, waitLimit;
+
+    RtlZeroMemory(Out, sizeof(*Out));
+    Out->Version = SWGPU_VERSION;
+    Out->Result = F1_COPY_ERROR;
+    Out->MismatchOffset = MAXULONG;
+    B3cPrivRingResetWriteLog();
+    Step(115);
+    if (B == NULL || Dev->CopyInFlight || Dev->Bar1Cpu == NULL ||
+        Dev->Bar1MapLen < BAR1_D3_MAP_LEN || !Dev->ResidentChannelEnabled ||
+        !Dev->ResidentRunlistSubmitted || !Dev->ResidentInstBound ||
+        !g_AcrVm.PtbChanged || !g_GrVm.PtbChanged || !g_GrVm.Active || g_GrVm.Arena == NULL ||
+        (Rd(B, NV_PMC_ENABLE) & F1_CE_ENABLE) == 0u)
+        goto done;
+    ring = (PULONG)((PUCHAR)g_GrVm.Arena + GR_VM_D2_GPFIFO_OFF);
+    push = (PULONG)((PUCHAR)g_GrVm.Arena + GR_VM_F1_PUSH_OFF);
+    semaphores = (volatile ULONG *)((PUCHAR)push + PAGE_SIZE - 32u);
+    src = (PUCHAR)g_GrVm.Arena + GR_VM_F1_SRC_OFF;
+    dst = (PUCHAR)g_GrVm.Arena + GR_VM_F1_DST_OFF;
+    put = Rd(Dev->Bar1Cpu, putOffset);
+    get = Rd(Dev->Bar1Cpu, getOffset);
+    stage = 2u;
+    if (put >= ringEntries || get != put || Rd(B, 0x00002A30u) != 0u ||
+        (Rd(B, FIFO_INTR_0) & 0x10000000u) != 0u)
+        goto done;
+    (VOID)KeQueryPerformanceCounter(&frequency);
+    waitLimit.QuadPart = -1000000LL; /* 100 ms for nonstall event. */
+
+    for (round = 0u; round < RTL_NUMBER_OF(sizes); ++round) {
+        ULONG size = sizes[round];
+        ULONG cePayload = 0xF1000000u | (round + 1u);
+        ULONG hostPayload = 0xF1FF0000u | (round + 1u);
+        ULONG cursor = 0u, newPut = (put + 1u) % ringEntries;
+        LARGE_INTEGER started, now;
+        ULONGLONG elapsedUs;
+        BOOLEAN complete = FALSE, flushOk = TRUE, useIrq;
+
+        Out->FailRound = round + 1u;
+        Out->LastSize = size;
+        useIrq = Dev->InterruptSourcesEnabled &&
+            (Rd(B, PMC_INTR_EN_NONSTALL) & 1u) != 0u &&
+            (Rd(B, FIFO_INTR_EN_1) & FIFO_INTR_0_CHANNEL_INTR) != 0u;
+        for (i = 0u; i < GR_VM_F1_BYTES; ++i) src[i] = F1Pattern(round, i);
+        RtlZeroMemory(dst, GR_VM_F1_BYTES);
+        semaphores[0] = 0u;
+        semaphores[4] = 0u;
+
+        if (round == 0u) {
+            /* Non-incrementing single-word SET_OBJECT, as on Switch in
+             * deko3d's BindEngine(Copy). The payload is the class alone. */
+            push[cursor++] = 0x60010000u | (F1_COPY_SUBCHANNEL << 13);
+            push[cursor++] = 0xB0B5u; /* MAXWELL_DMA_COPY_A */
+        }
+        /* NVIDIA clb0b5: virtual input/output, 1D pitch copy. LINE_COUNT
+         * is 1, and pitch fields are ignored with MULTI_LINE_ENABLE clear. */
+        push[cursor++] = F1Method(F1_COPY_SUBCHANNEL, 0x0400u, 8u);
+        push[cursor++] = 0u; /* OFFSET_IN_UPPER */
+        push[cursor++] = GR_VM_GPU_VA + GR_VM_F1_SRC_OFF;
+        push[cursor++] = 0u; /* OFFSET_OUT_UPPER */
+        push[cursor++] = GR_VM_GPU_VA + GR_VM_F1_DST_OFF;
+        push[cursor++] = size; /* PITCH_IN */
+        push[cursor++] = size; /* PITCH_OUT */
+        push[cursor++] = size; /* LINE_LENGTH_IN, bytes */
+        push[cursor++] = 1u; /* LINE_COUNT */
+        push[cursor++] = F1Method(F1_COPY_SUBCHANNEL, 0x0240u, 3u); /* CE SET_SEMAPHORE_A/B/PAYLOAD */
+        push[cursor++] = 0u;
+        push[cursor++] = ceSemVa;
+        push[cursor++] = cePayload;
+        push[cursor++] = F1Method(F1_COPY_SUBCHANNEL, 0x0300u, 1u); /* LAUNCH_DMA */
+        push[cursor++] = 0x18Eu; /* nonpipelined, flush, 1-word CE release, pitch/pitch */
+
+        /* Host semaphore acquire must observe CE completion before the
+         * trailing host release and interrupt. NVB06F host methods are on
+         * subchannel 0 and do not require a SET_OBJECT for B06F. */
+        push[cursor++] = F1Method(0u, 0x0010u, 4u);
+        push[cursor++] = 0u;
+        push[cursor++] = ceSemVa;
+        push[cursor++] = cePayload;
+        push[cursor++] = 1u; /* ACQUIRE equality */
+        push[cursor++] = F1Method(0u, 0x0010u, 4u);
+        push[cursor++] = 0u;
+        push[cursor++] = hostSemVa;
+        push[cursor++] = hostPayload;
+        push[cursor++] = 0x01100002u; /* 4-byte RELEASE, CE acquire already ordered it */
+        if (useIrq) {
+            push[cursor++] = 0x20010008u; /* NON_STALL_INTERRUPT */
+            push[cursor++] = 0u;
+            KeClearEvent(&Dev->E3Event);
+        }
+        ring[put * 2u] = pushVa;
+        ring[put * 2u + 1u] = cursor << 10;
+        KeMemoryBarrier();
+        stage = 3u;
+        writeCount = 0u;
+        if (!B3cD5L2Flush(B, writes, &writeCount, RTL_NUMBER_OF(writes), l2State))
+            goto done;
+        if (l2State[0] > flushMax) flushMax = l2State[0];
+        if (l2State[2] > invalidateMax) invalidateMax = l2State[2];
+        stage = 4u;
+        started = KeQueryPerformanceCounter(NULL);
+        if (!F1Publish(Dev, newPut, &doorbellWrite)) goto done;
+        if (useIrq) {
+            if (KeWaitForSingleObject(&Dev->E3Event, Executive, KernelMode, FALSE,
+                    &waitLimit) == STATUS_SUCCESS)
+                ++Out->IrqWakes;
+            else
+                ++Out->IrqTimeouts;
+        }
+        /* Verification also serves as fallback if the wake was lost or
+         * nonstall is disabled. Bound it by rounds and elapsed time. */
+        for (polls = 0u; polls < 2000u; ++polls) {
+            writeCount = 0u;
+            flushOk = B3cD5L2Flush(B, writes, &writeCount, RTL_NUMBER_OF(writes), l2State);
+            if (l2State[0] > flushMax) flushMax = l2State[0];
+            if (l2State[2] > invalidateMax) invalidateMax = l2State[2];
+            if (!flushOk) break;
+            KeMemoryBarrier();
+            ceSeen = semaphores[0];
+            hostSeen = semaphores[4];
+            get = Rd(Dev->Bar1Cpu, getOffset);
+            complete = ceSeen == cePayload && hostSeen == hostPayload && get == newPut;
+            now = KeQueryPerformanceCounter(NULL);
+            if (complete || (Rd(B, FIFO_INTR_0) & 0x10000000u) != 0u ||
+                now.QuadPart - started.QuadPart >= frequency.QuadPart / 10)
+                break;
+            Us(10u);
+        }
+        if (polls > Out->MaxPolls) Out->MaxPolls = polls;
+        now = KeQueryPerformanceCounter(NULL);
+        elapsedUs = (ULONGLONG)(now.QuadPart - started.QuadPart) * 1000000ull /
+            (ULONGLONG)frequency.QuadPart;
+        if (elapsedUs > Out->MaxWaitUs)
+            Out->MaxWaitUs = elapsedUs > MAXULONG ? MAXULONG : (ULONG)elapsedUs;
+        stage = flushOk ? 6u : 5u;
+        if (!complete) goto done;
+        Dev->CopyInFlight = FALSE;
+        stage = 7u;
+        if (Rd(B, 0x00002A30u) != 0u || (Rd(B, FIFO_INTR_0) & 0x10000000u) != 0u)
+            goto done;
+        for (i = 0u; i < GR_VM_F1_BYTES; ++i) {
+            UCHAR expected = i < size ? F1Pattern(round, i) : 0u;
+            UCHAR actual = dst[i];
+            if (actual != expected) {
+                Out->MismatchOffset = i;
+                Out->Expected = expected;
+                Out->Actual = actual;
+                stage = 8u;
+                goto done;
+            }
+        }
+        ++Out->Rounds;
+        Out->BytesCopied += size;
+        put = newPut;
+    }
+    Out->Result = 0u;
+    Out->FailRound = 0u;
+    stage = 0u;
+
+done:
+    Out->Pending = Dev->CopyInFlight ? 1u : 0u;
+    if (Out->Result != 0u && B != NULL) F1CaptureFailure(B, Out);
+#define F1_TRACE(Field) Trace(L"F1" #Field, Out->Field)
+    F1_TRACE(Rounds); F1_TRACE(BytesCopied); F1_TRACE(FailRound); F1_TRACE(LastSize);
+    F1_TRACE(MismatchOffset); F1_TRACE(Expected); F1_TRACE(Actual); F1_TRACE(MaxWaitUs);
+    F1_TRACE(MaxPolls); F1_TRACE(IrqWakes); F1_TRACE(IrqTimeouts); F1_TRACE(Pending);
+    F1_TRACE(CeIntr); F1_TRACE(CeLaunchError); F1_TRACE(FifoIntr); F1_TRACE(FaultId);
+    F1_TRACE(PbdmaIntr); F1_TRACE(GrIntr);
+#undef F1_TRACE
+    Trace(L"F1Stage", stage);
+    Trace(L"F1LastGpGet", get);
+    Trace(L"F1LastCeSemaphore", ceSeen);
+    Trace(L"F1LastHostSemaphore", hostSeen);
+    Trace(L"F1L2FlushMaxPolls", flushMax);
+    Trace(L"F1L2InvalidateMaxPolls", invalidateMax);
+    TraceBin(L"F1Bar1Doorbell", doorbellWrite, sizeof(doorbellWrite));
+    TraceBin(L"F1L2Writes", writes, writeCount * sizeof(writes[0]));
+    B3cPrivRingTraceWriteLog(L"F1PrivErrorCount", L"F1PrivErrorDropped",
+        L"F1PrivAckTimeouts", L"F1PrivErrors");
+    TraceDurable(L"F1Result", Out->Result);
+}
+
+#include "swgpu-blit.inc"
+
+static ULONG B3ePowerDownGpu(PSWGPU_DEVICE Dev, PSWGPU_RESIDENT_POWER Power)
+{
+    ULONG i, error = 0u;
+    NTSTATUS writeStatus;
+    if (Power == NULL || !Power->Valid) return 0u;
+    TraceDurable(L"B3ePowerDownBegin", 1u);
+    if (Power->ClocksOn) {
+        if (Dev->GpcManaged && !Dev->BlitReset && !F2cPark(Dev)) error |= 0x20u;
+        Wr(Dev->Mc, MC_HOTRESET_CTRL_1, Rd(Dev->Mc, MC_HOTRESET_CTRL_1) | MC_HOTRESET_GPU);
+        for (i = 0; i < 500u && !(Rd(Dev->Mc, MC_HOTRESET_STAT_1) & MC_HOTRESET_GPU); ++i) Us(10);
+        Trace(L"B3eMcFlushPolls", i);
+        if (i == 500u) error |= 1u;
+        Us(10);
+        Wr(Dev->Pmc, PMC_GPU_RG_CNTRL, 1u);
+        (VOID)Rd(Dev->Pmc, PMC_GPU_RG_CNTRL);
+        Us(10);
+        Wr(Dev->Car, CAR_RST_DEV_X_SET, CLK_X_GPU);
+        Us(10);
+        Wr(Dev->Car, CAR_CLK_ENB_X_CLR, (CLK_X_GPU | CLK_X_PLLG_REF) & ~Power->ClkX);
+        Wr(Dev->Mc, MC_HOTRESET_CTRL_1,
+            (Rd(Dev->Mc, MC_HOTRESET_CTRL_1) & ~MC_HOTRESET_GPU) |
+            (Power->McHotResetCtrl & MC_HOTRESET_GPU));
+        if (Power->FuseChanged) Wr(Dev->Car, CAR_CLK_ENB_H_CLR, CLK_H_FUSE);
+        if (Power->OutcChanged) Wr(Dev->Car, CAR_PLLP_OUTC, Power->PllOutc);
+        Us(10);
+        Power->ClocksOn = FALSE;
+        Dev->GpcManaged = FALSE;
+    }
+    if (Power->RailOn) {
+        writeStatus = I2cWrite(Dev->Pmic, MAX77620_GPIO6, Power->Gpio6);
+        Trace(L"B3ePowerDownGpioStatus", (ULONG)writeStatus); if (!NT_SUCCESS(writeStatus)) error |= 2u;
+        writeStatus = I2cWrite(Dev->Vdd, MAX77621_VOUT, Power->Vout);
+        Trace(L"B3ePowerDownVoutStatus", (ULONG)writeStatus); if (!NT_SUCCESS(writeStatus)) error |= 4u;
+        writeStatus = I2cWrite(Dev->Vdd, MAX77621_VOUT_DVS, Power->VoutDvs);
+        Trace(L"B3ePowerDownDvsStatus", (ULONG)writeStatus); if (!NT_SUCCESS(writeStatus)) error |= 8u;
+        Power->RailOn = FALSE;
+    }
+    if (!Dev->BlitUnsafe) {
+        GrVmCleanupAfterGpuReset(Dev);
+        AcrVmCleanupAfterGpuReset(Dev);
+    } else {
+        error |= 16u; /* Quarantined backing stays reserved. */
+    }
+    Dev->CopyInFlight = FALSE;
+    Dev->BlitReset = Dev->BlitUnsafe;
+    E4TracePool(&Dev->DmaPool);
+    Power->Valid = FALSE;
+    Trace(L"B3ePowerDownError", error);
+    TraceDurable(L"B3ePowerDownDone", 1u);
+    return error;
+}
+
+/* Source selection follows nvgpu gk20a_pm_finalize_poweron(): PFIFO/PGRAPH
+ * on nonstall, and PGRAPH/PFIFO/PRIV_RING/LTC/PBUS on stall. Only PMC BAR0
+ * registers are used; the Tegra MC block/routing is never touched here. */
+static ULONG B3eEnableInterruptSources(PSWGPU_DEVICE Dev)
+{
+    volatile UCHAR *B = Dev != NULL ? Dev->Bar0 : NULL;
+    ULONG writes[12][4] = { { 0u } }, writeCount = 0u;
+    ULONG result = 0u;
+    if (Dev == NULL || B == NULL || !Dev->HaveInterruptResources ||
+        Dev->StallInterrupt == NULL || Dev->NonstallInterrupt == NULL)
+        return 0u;
+    InterlockedExchange(&Dev->E3NonstallCount, 0);
+    InterlockedExchange(&Dev->E3StallCount, 0);
+    InterlockedExchange(&Dev->E3StallUnits, 0);
+    InterlockedExchange(&Dev->E3FirstMcIntr0, 0);
+    InterlockedExchange(&Dev->E3FirstMcIntr1, 0);
+    InterlockedExchange(&Dev->E3LastMcIntr0, 0);
+    InterlockedExchange(&Dev->E3LastMcIntr1, 0);
+    InterlockedExchange(&Dev->E3FirstSet, 0);
+    KeClearEvent(&Dev->E3Event);
+    B3cPrivRingResetWriteLog();
+    /* Claude 0.7.3: PFIFO CHANNEL_INTR reaches PMC INTR_1 only with FIFO_INTR_EN_1 bit 31
+     * (0.7.2 hardware: FIFO_INTR_0 0x80000000 latched while PMC INTR_1 stayed 0).
+     * Clear the stale latch (W1C) first, then route it. */
+    if (!B3cD5Write(B, writes, &writeCount, RTL_NUMBER_OF(writes), FIFO_INTR_0, FIFO_INTR_0_CHANNEL_INTR) ||
+        !B3cD5Write(B, writes, &writeCount, RTL_NUMBER_OF(writes), FIFO_INTR_EN_1, FIFO_INTR_0_CHANNEL_INTR)) {
+        result = 0xE00000A9u;
+        (VOID)B3cD5Write(B, writes, &writeCount, RTL_NUMBER_OF(writes), FIFO_INTR_EN_1, 0u);
+        goto done;
+    }
+    if (!B3cD5Write(B, writes, &writeCount, RTL_NUMBER_OF(writes),
+                    PMC_INTR_MASK_STALL,
+                    PMC_INTR_PFIFO_PENDING | PMC_INTR_PGRAPH_PENDING |
+                    0x40000000u | 0x02000000u | 0x10000000u) ||
+        !B3cD5Write(B, writes, &writeCount, RTL_NUMBER_OF(writes),
+                    PMC_INTR_MASK_NONSTALL,
+                    PMC_INTR_PFIFO_PENDING | PMC_INTR_PGRAPH_PENDING)) {
+        result = 0xE00000A9u;
+        (VOID)B3cD5Write(B, writes, &writeCount, RTL_NUMBER_OF(writes), PMC_INTR_EN_STALL, 0u);
+        (VOID)B3cD5Write(B, writes, &writeCount, RTL_NUMBER_OF(writes), PMC_INTR_EN_NONSTALL, 0u);
+        (VOID)B3cD5Write(B, writes, &writeCount, RTL_NUMBER_OF(writes), PMC_INTR_MASK_STALL, 0u);
+        (VOID)B3cD5Write(B, writes, &writeCount, RTL_NUMBER_OF(writes), PMC_INTR_MASK_NONSTALL, 0u);
+        goto done;
+    }
+    InterlockedExchange(&Dev->E3IsrActive, 1);
+    if (!B3cD5Write(B, writes, &writeCount, RTL_NUMBER_OF(writes), PMC_INTR_EN_STALL, 1u) ||
+        !B3cD5Write(B, writes, &writeCount, RTL_NUMBER_OF(writes), PMC_INTR_EN_NONSTALL, 1u)) {
+        InterlockedExchange(&Dev->E3IsrActive, 0);
+        (VOID)B3cD5Write(B, writes, &writeCount, RTL_NUMBER_OF(writes), PMC_INTR_MASK_STALL, 0u);
+        (VOID)B3cD5Write(B, writes, &writeCount, RTL_NUMBER_OF(writes), PMC_INTR_MASK_NONSTALL, 0u);
+        (VOID)B3cD5Write(B, writes, &writeCount, RTL_NUMBER_OF(writes), PMC_INTR_EN_STALL, 0u);
+        (VOID)B3cD5Write(B, writes, &writeCount, RTL_NUMBER_OF(writes), PMC_INTR_EN_NONSTALL, 0u);
+        result = 0xE00000A9u;
+        goto done;
+    }
+    Dev->InterruptSourcesEnabled = TRUE;
+done:
+    Trace(L"E3InterruptSourceResult", result);
+    Trace(L"E3HaveInterrupts", Dev->HaveInterruptResources ? 1u : 0u);
+    TraceBin(L"E3InterruptWrites", writes, writeCount * sizeof(writes[0]));
+    B3cPrivRingTraceWriteLog(L"E3PrivErrorCount", L"E3PrivErrorDropped",
+        L"E3PrivAckTimeouts", L"E3PrivErrors");
+    return result;
+}
+
+static BOOLEAN B3eIrqDrainBarrier(WDFINTERRUPT Interrupt, WDFCONTEXT Context)
+{
+    UNREFERENCED_PARAMETER(Interrupt);
+    UNREFERENCED_PARAMETER(Context);
+    return TRUE;
+}
+
+static ULONG B3eDisableInterruptSources(PSWGPU_DEVICE Dev, BOOLEAN DrainIsrs)
+{
+    volatile UCHAR *B = Dev != NULL ? Dev->Bar0 : NULL;
+    ULONG writes[8][4] = { { 0u } }, writeCount = 0u;
+    ULONG result = 0u;
+    if (Dev == NULL) return STATUS_INVALID_PARAMETER;
+    if (B != NULL) {
+        B3cPrivRingResetWriteLog();
+        if (!B3cD5Write(B, writes, &writeCount, RTL_NUMBER_OF(writes), PMC_INTR_EN_STALL, 0u)) result = 0xE00000A9u;
+        if (!B3cD5Write(B, writes, &writeCount, RTL_NUMBER_OF(writes), PMC_INTR_EN_NONSTALL, 0u)) result = 0xE00000A9u;
+        if (!B3cD5Write(B, writes, &writeCount, RTL_NUMBER_OF(writes), PMC_INTR_MASK_STALL, 0u)) result = 0xE00000A9u;
+        if (!B3cD5Write(B, writes, &writeCount, RTL_NUMBER_OF(writes), PMC_INTR_MASK_NONSTALL, 0u)) result = 0xE00000A9u;
+        if (!B3cD5Write(B, writes, &writeCount, RTL_NUMBER_OF(writes), FIFO_INTR_EN_1, 0u)) result = 0xE00000A9u;
+    }
+    InterlockedExchange(&Dev->E3IsrActive, 0);
+    /* During a live IOCTL, drain any ISR that passed the gate before reset.
+     * KMDF manages the vectors across D0 transitions. This keeps them usable
+     * for another Resident start in the same hardware lifetime. */
+    if (DrainIsrs) {
+        if (Dev->StallInterrupt != NULL)
+            (VOID)WdfInterruptSynchronize(Dev->StallInterrupt, B3eIrqDrainBarrier, NULL);
+        if (Dev->NonstallInterrupt != NULL)
+            (VOID)WdfInterruptSynchronize(Dev->NonstallInterrupt, B3eIrqDrainBarrier, NULL);
+    }
+    Dev->InterruptSourcesEnabled = FALSE;
+    Trace(L"E3InterruptDisableResult", result);
+    TraceBin(L"E3InterruptDisableWrites", writes, writeCount * sizeof(writes[0]));
+    B3cPrivRingTraceWriteLog(L"E3ShutdownPrivErrorCount", L"E3ShutdownPrivErrorDropped",
+        L"E3ShutdownPrivAckTimeouts", L"E3ShutdownPrivErrors");
+    return result;
+}
+
+static NTSTATUS StartResident(PSWGPU_DEVICE Dev)
 {
     UCHAR vout0 = 0, dvs0 = 0, gpio0 = 0, v = 0;
     ULONG clkx0, clkh0, outc0, rg, clkx, rstx, boot0 = 0xDEADDEADu, t0 = 0, t1 = 0, th = 0, en = 0, i;
+    ULONG e1Result = 0u;
     BOOLEAN railOn = FALSE, clocksOn = FALSE, outcChanged = FALSE, fuseChanged = FALSE;
     NTSTATUS st;
 
-    /* ACR may leave signed Falcon firmware running. Always reset the GPU and
-     * release the temporary DMA mappings before returning from the opt-in run. */
-    if (Mode == 5) KeepOn = FALSE;
+    if (g_ResidentOwner != NULL || Dev->BlitUnsafe || g_GrVm.Arena != NULL) {
+        TraceDurable(L"E1Result", STATUS_DEVICE_BUSY);
+        return STATUS_DEVICE_BUSY;
+    }
+    Dev->ResidentActive = FALSE;
+    Dev->ResidentShutdownResult = 0u;
+    TraceDurable(L"B3aResult", 0xFFFFFFFFu);
+    TraceDurable(L"B3eResidentActive", 0u);
 
     Step(1);    /* read what is there now */
     st = I2cRead(Dev->Vdd, MAX77621_VOUT, &vout0);
     if (NT_SUCCESS(st)) st = I2cRead(Dev->Vdd, MAX77621_VOUT_DVS, &dvs0);
     if (NT_SUCCESS(st)) st = I2cRead(Dev->Pmic, MAX77620_GPIO6, &gpio0);
-    if (!NT_SUCCESS(st)) { Trace(L"Result", (ULONG)st); return st; }
+    if (!NT_SUCCESS(st)) {
+        Trace(L"Result", (ULONG)st);
+        TraceDurable(L"E1Result", (ULONG)st);
+        return st;
+    }
     clkx0 = Rd(Dev->Car, CAR_CLK_OUT_ENB_X);
     clkh0 = Rd(Dev->Car, CAR_CLK_OUT_ENB_H);
     outc0 = Rd(Dev->Car, CAR_PLLP_OUTC);
+    Dev->ResidentPower.Vout = vout0;
+    Dev->ResidentPower.VoutDvs = dvs0;
+    Dev->ResidentPower.Gpio6 = gpio0;
+    Dev->ResidentPower.ClkX = clkx0;
+    Dev->ResidentPower.ClkH = clkh0;
+    Dev->ResidentPower.PllOutc = outc0;
+    Dev->ResidentPower.McHotResetCtrl = Rd(Dev->Mc, MC_HOTRESET_CTRL_1);
+    Dev->ResidentPower.Valid = TRUE;
+    Dev->ResidentPower.RailOn = FALSE;
+    Dev->ResidentPower.ClocksOn = FALSE;
+    Dev->ResidentPower.OutcChanged = FALSE;
+    Dev->ResidentPower.FuseChanged = FALSE;
 
-    /* 0.3.11: start the run with a clean MC interrupt status (write 1 to
-     * clear, as B2a already does), so the reads below show only new errors. */
-    Trace(L"McIntBeforePowerUp", Rd(Dev->Mc, MC_INTSTATUS));
+    /* Clear stale GPU bring-up error status before recording new errors. */
+    TraceDetail(L"McIntBeforePowerUp", Rd(Dev->Mc, MC_INTSTATUS));
     Wr(Dev->Mc, MC_INTSTATUS, Rd(Dev->Mc, MC_INTSTATUS));
-    Trace(L"McIntPowerUpCleared", Rd(Dev->Mc, MC_INTSTATUS));
+    TraceDetail(L"McIntPowerUpCleared", Rd(Dev->Mc, MC_INTSTATUS));
 
     Step(2);    /* VDD_GPU 1.0 V, enable pin high */
     st = I2cWrite(Dev->Vdd, MAX77621_VOUT_DVS, VDD_GPU_1000MV);
     if (NT_SUCCESS(st)) st = I2cWrite(Dev->Vdd, MAX77621_VOUT, VDD_GPU_1000MV);
     if (NT_SUCCESS(st)) st = I2cWrite(Dev->Pmic, MAX77620_GPIO6, GPIO_PUSHPULL_HIGH);
     railOn = TRUE;      /* restore below even after a partial write */
+    Dev->ResidentPower.RailOn = TRUE;
     if (!NT_SUCCESS(st)) goto down;
     Ms(2);
-    if (NT_SUCCESS(I2cRead(Dev->Pmic, MAX77620_GPIO6, &v))) Trace(L"Gpio6On", v);
-    if (NT_SUCCESS(I2cRead(Dev->Vdd, MAX77621_VOUT, &v))) Trace(L"VoutOn", v);
+    if (NT_SUCCESS(I2cRead(Dev->Pmic, MAX77620_GPIO6, &v))) TraceDetail(L"Gpio6On", v);
+    Dev->VoutOnRaw = MAXULONG;
+    if (NT_SUCCESS(I2cRead(Dev->Vdd, MAX77621_VOUT, &v))) {
+        Dev->VoutOnRaw = v;
+        TraceDetail(L"VoutOn", v);
+    }
 
     Step(3);    /* clocks */
     /* R410 test: the boot firmware leaves OUT5 enabled but undivided
@@ -7323,12 +8034,14 @@ static NTSTATUS PowerTest(PSWGPU_DEVICE Dev, BOOLEAN KeepOn, ULONG Mode)
         Wr(Dev->Car, CAR_PLLP_OUTC, (outc0 & 0x0000FFFFu) | PLLP_OUT5_204MHZ | PLLP_OUT5_OVRRIDE |
                                     PLLP_OUT5_CLKEN | PLLP_OUT5_RSTN);
         outcChanged = TRUE;
+        Dev->ResidentPower.OutcChanged = TRUE;
     }
-    if (!(clkh0 & CLK_H_FUSE)) { Wr(Dev->Car, CAR_CLK_ENB_H_SET, CLK_H_FUSE); fuseChanged = TRUE; }
+    if (!(clkh0 & CLK_H_FUSE)) { Wr(Dev->Car, CAR_CLK_ENB_H_SET, CLK_H_FUSE); fuseChanged = TRUE; Dev->ResidentPower.FuseChanged = TRUE; }
     Wr(Dev->Car, CAR_CLK_ENB_X_SET, CLK_X_GPU | CLK_X_PLLG_REF);
     clocksOn = TRUE;
+    Dev->ResidentPower.ClocksOn = TRUE;
     Us(10);
-    Trace(L"PllpOutcOn", Rd(Dev->Car, CAR_PLLP_OUTC));
+    TraceDetail(L"PllpOutcOn", Rd(Dev->Car, CAR_PLLP_OUTC));
 
     Step(4);    /* reset assert */
     Wr(Dev->Car, CAR_RST_DEV_X_SET, CLK_X_GPU);
@@ -7338,17 +8051,15 @@ static NTSTATUS PowerTest(PSWGPU_DEVICE Dev, BOOLEAN KeepOn, ULONG Mode)
     Wr(Dev->Pmc, PMC_GPU_RG_CNTRL, 0);
     (VOID)Rd(Dev->Pmc, PMC_GPU_RG_CNTRL);
     Us(10);
-    Trace(L"McIntAfterClampOff", Rd(Dev->Mc, MC_INTSTATUS));
+    TraceDetail(L"McIntAfterClampOff", Rd(Dev->Mc, MC_INTSTATUS));
 
     Step(6);    /* reset deassert with the gpu clock briefly off (nvgpu) */
     Wr(Dev->Car, CAR_CLK_ENB_X_CLR, CLK_X_GPU);
     Wr(Dev->Car, CAR_RST_DEV_X_CLR, CLK_X_GPU);
     Wr(Dev->Car, CAR_CLK_ENB_X_SET, CLK_X_GPU);
     Us(10);
-    /* 0.3.10 (read only): where does MC hot reset status bit 2 drop to 0?
-     * 0.3.9 saw it 1 with the GPU off and 0 already before the B2a DMA. */
-    Trace(L"McHotStatAfterReset", Rd(Dev->Mc, MC_HOTRESET_STAT_1));
-    Trace(L"McIntAfterReset", Rd(Dev->Mc, MC_INTSTATUS));
+    TraceDetail(L"McHotStatAfterReset", Rd(Dev->Mc, MC_HOTRESET_STAT_1));
+    TraceDetail(L"McIntAfterReset", Rd(Dev->Mc, MC_INTSTATUS));
 
     Step(7);    /* MC flush, flush done */
     Wr(Dev->Mc, MC_HOTRESET_CTRL_1, Rd(Dev->Mc, MC_HOTRESET_CTRL_1) | MC_HOTRESET_GPU);
@@ -7357,14 +8068,14 @@ static NTSTATUS PowerTest(PSWGPU_DEVICE Dev, BOOLEAN KeepOn, ULONG Mode)
     Us(10);
     Wr(Dev->Mc, MC_HOTRESET_CTRL_1, Rd(Dev->Mc, MC_HOTRESET_CTRL_1) & ~MC_HOTRESET_GPU);
     Us(10);
-    Trace(L"McHotStatAfterFlush", Rd(Dev->Mc, MC_HOTRESET_STAT_1));
+    TraceDetail(L"McHotStatAfterFlush", Rd(Dev->Mc, MC_HOTRESET_STAT_1));
 
     rg = Rd(Dev->Pmc, PMC_GPU_RG_CNTRL);
     clkx = Rd(Dev->Car, CAR_CLK_OUT_ENB_X);
     rstx = Rd(Dev->Car, CAR_RST_DEVICES_X);
-    Trace(L"RgCntrlOn", rg);
-    Trace(L"ClkXOn", clkx);
-    Trace(L"RstXOn", rstx);
+    TraceDetail(L"RgCntrlOn", rg);
+    TraceDetail(L"ClkXOn", clkx);
+    TraceDetail(L"RstXOn", rstx);
     if ((rg & 1) || !(clkx & CLK_X_GPU) || (rstx & CLK_X_GPU) || Dev->Bar0 == NULL) {
         Trace(L"Result", 0xE0000001u);      /* not safe to touch BAR0 */
         st = STATUS_DEVICE_NOT_READY;
@@ -7384,65 +8095,468 @@ static NTSTATUS PowerTest(PSWGPU_DEVICE Dev, BOOLEAN KeepOn, ULONG Mode)
     TraceDurable(L"PtimerRead", 1);
     if (((boot0 >> 20) & 0x1FF) == 0x12B) {   /* only write into a GPU that answered as GM20B */
         Wr(Dev->Bar0, NV_PFB_MMU_WPR_INFO, 2);
-        Trace(L"WprStart", Rd(Dev->Bar0, NV_PFB_MMU_WPR_INFO));
+        TraceDetail(L"WprStart", Rd(Dev->Bar0, NV_PFB_MMU_WPR_INFO));
         Wr(Dev->Bar0, NV_PFB_MMU_WPR_INFO, 3);
-        Trace(L"WprLimit", Rd(Dev->Bar0, NV_PFB_MMU_WPR_INFO));
+        TraceDetail(L"WprLimit", Rd(Dev->Bar0, NV_PFB_MMU_WPR_INFO));
     }
-    Trace(L"PmcEnable", en);
-    Trace(L"Ptimer0", t0);
-    Trace(L"Ptimer1", t1);
-    Trace(L"PtimerHi", th);
-    Trace(L"McHotStatAfterBar0", Rd(Dev->Mc, MC_HOTRESET_STAT_1));
-    Trace(L"McIntAfterBar0", Rd(Dev->Mc, MC_INTSTATUS));
-    Trace(L"Chipset", (boot0 >> 20) & 0x1FF);
-    Trace(L"ChipRev", boot0 & 0xFF);
+    TraceDetail(L"PmcEnable", en);
+    TraceDetail(L"Ptimer0", t0);
+    TraceDetail(L"Ptimer1", t1);
+    TraceDetail(L"PtimerHi", th);
+    TraceDetail(L"McHotStatAfterBar0", Rd(Dev->Mc, MC_HOTRESET_STAT_1));
+    TraceDetail(L"McIntAfterBar0", Rd(Dev->Mc, MC_INTSTATUS));
+    TraceDetail(L"Chipset", (boot0 >> 20) & 0x1FF);
+    TraceDetail(L"ChipRev", boot0 & 0xFF);
     st = (((boot0 >> 20) & 0x1FF) == 0x12B) ? STATUS_SUCCESS : STATUS_DEVICE_HARDWARE_ERROR;
     Trace(L"Result", (ULONG)st);
-    if (NT_SUCCESS(st) && Mode == 2) ProbeB1(Dev);
-    if (NT_SUCCESS(st) && Mode == 3) ProbeB2a(Dev);
-    if (NT_SUCCESS(st) && Mode == 4) ProbeB3a(Dev, FALSE);
-    if (NT_SUCCESS(st) && Mode == 5) ProbeB3a(Dev, TRUE);
-    if (KeepOn && !g_GrVm.Attempted) { Step(100); return st; }
-    if (KeepOn && g_GrVm.Attempted)
-        TraceDurable(L"B3cC2dKeepOnReset", 1u); /* C2d backing must be released after reset. */
-
+    if (NT_SUCCESS(st)) {
+        e1Result = StartGpuFirmware(Dev);
+        if (e1Result != 0u) st = STATUS_DEVICE_HARDWARE_ERROR;
+        else if (!Dev->ResidentActive) {
+            e1Result = 0xE00000A5u;
+            st = STATUS_DEVICE_HARDWARE_ERROR;
+        }
+    }
+    if (NT_SUCCESS(st) && Dev->ResidentActive) {
+        ULONG gpcKhz = ReadParam(L"GpcKhz", 0u);
+        F2C_STEP clock = {0};
+        clock.TargetKhz = gpcKhz;
+        if (gpcKhz != 0u) {
+            clock.Result = F2cProgram(Dev, F2cReadSpeedo(), &clock);
+            if (!NT_SUCCESS((NTSTATUS)clock.Result) && !F2cReturnToBypass(Dev)) {
+                TraceDurable(L"F2cResidentClockResult", clock.Result);
+                (VOID)B3eResidentShutdown(Dev, TRUE);
+                TraceDurable(L"E1Result", STATUS_DEVICE_HARDWARE_ERROR);
+                return STATUS_DEVICE_HARDWARE_ERROR;
+            }
+        }
+        Trace(L"F2cResidentClockKhz", gpcKhz);
+        Trace(L"F2cResidentClockCvbMv", clock.CvbMv);
+        Trace(L"F2cResidentLockPolls", clock.LockPolls);
+        Trace(L"F2cResidentRampPolls", clock.RampPolls);
+        TraceDurable(L"F2cResidentClockResult", clock.Result);
+        {
+            /* Claude 0.7.0: enable the GPU interrupt sources only once the GPU is
+             * resident. A failure leaves them off (E3 then reports it); the
+             * resident GPU itself stays usable as in 0.6.0. */
+            ULONG irqResult = B3eEnableInterruptSources(Dev);
+            TraceDurable(L"E3IrqEnableResult", irqResult);
+        }
+        TraceDurable(L"E1Result", 0u);
+        TraceDurable(L"B3eResidentActive", 1u);
+        E4TracePool(&Dev->DmaPool);
+        Step(110);
+        return st;
+    }
 down:
     Step(10);   /* power down, put everything back */
-    if (clocksOn) {
-        Wr(Dev->Mc, MC_HOTRESET_CTRL_1, Rd(Dev->Mc, MC_HOTRESET_CTRL_1) | MC_HOTRESET_GPU);
-        for (i = 0; i < 500 && !(Rd(Dev->Mc, MC_HOTRESET_STAT_1) & MC_HOTRESET_GPU); ++i) Us(10);
-        Us(10);
-        Wr(Dev->Pmc, PMC_GPU_RG_CNTRL, 1);
-        (VOID)Rd(Dev->Pmc, PMC_GPU_RG_CNTRL);
-        Us(10);
-        Wr(Dev->Car, CAR_RST_DEV_X_SET, CLK_X_GPU);
-        Us(10);
-        FreeB2aPagesAfterGpuReset();
-        GrVmCleanupAfterGpuReset(Dev);
-        AcrVmCleanupAfterGpuReset(Dev);
-        Wr(Dev->Car, CAR_CLK_ENB_X_CLR, (CLK_X_GPU | CLK_X_PLLG_REF) & ~clkx0);
-        Wr(Dev->Mc, MC_HOTRESET_CTRL_1, Rd(Dev->Mc, MC_HOTRESET_CTRL_1) & ~MC_HOTRESET_GPU);
-        if (fuseChanged) Wr(Dev->Car, CAR_CLK_ENB_H_CLR, CLK_H_FUSE);
-        if (outcChanged) Wr(Dev->Car, CAR_PLLP_OUTC, outc0);
-        Us(10);
+    Dev->ResidentPower.ClocksOn = clocksOn;
+    Dev->ResidentPower.RailOn = railOn;
+    Dev->ResidentPower.OutcChanged = outcChanged;
+    Dev->ResidentPower.FuseChanged = fuseChanged;
+    {
+        ULONG powerError = B3ePowerDownGpu(Dev, &Dev->ResidentPower);
+        Trace(L"B3ePowerDownResult", powerError);
     }
-    if (railOn) {
-        (VOID)I2cWrite(Dev->Pmic, MAX77620_GPIO6, gpio0);
-        (VOID)I2cWrite(Dev->Vdd, MAX77621_VOUT, vout0);
-        (VOID)I2cWrite(Dev->Vdd, MAX77621_VOUT_DVS, dvs0);
+    if (Dev->ResidentIdleRefHeld) {
+        WdfDeviceResumeIdle(Dev->Device);
+        Dev->ResidentIdleRefHeld = FALSE;
     }
     Step(11);
+    TraceDurable(L"E1Result", e1Result != 0u ? e1Result : (ULONG)st);
+    Dev->ResidentActive = FALSE;
+    Dev->ResidentPower.Valid = FALSE;
     return st;
 }
 
 /* ------------------------------------------------------------------- PnP */
+
+static ULONG B3eResidentShutdown(PSWGPU_DEVICE Dev, BOOLEAN DrainIsrs)
+{
+    ULONG writes[64][4] = { { 0u } }, diagWrites[64][4] = { { 0u } };
+    ULONG writeCount = 0u, diagWriteCount = 0u, error = 0u;
+    ULONG preemptPolls = 0u, preemptLast = 0u, runlistPolls = 0u, runlistLast = 0u;
+    if (Dev == NULL || !Dev->ResidentActive) {
+        if (Dev != NULL) Trace(L"B3eShutdownNoop", 1u);
+        return Dev ? Dev->ResidentShutdownResult : STATUS_INVALID_PARAMETER;
+    }
+    if (g_ResidentOwner != NULL && g_ResidentOwner != Dev) {
+        TraceDurable(L"B3eShutdownOwnerMismatch", 1u);
+        return STATUS_DEVICE_BUSY;
+    }
+    TraceDurable(L"B3eShutdownBegin", 1u);
+    Step(111);
+    InterlockedExchange(&Dev->BlitOnline, 0);
+    if (!Dev->BlitReset) {
+        /* Stop GPU interrupt generation and drain ISR access before reset. */
+        (VOID)B3eDisableInterruptSources(Dev, DrainIsrs);
+        error = B3cD2CleanupPublishedState(Dev, writes, &writeCount,
+            Dev->ResidentChannelEnabled, Dev->ResidentRunlistSubmitted,
+            Dev->ResidentInstBound, Dev->ResidentChannelId,
+            Dev->ResidentRunlistEmptyValue, &preemptPolls, &preemptLast,
+            &runlistPolls, &runlistLast, TRUE, diagWrites, &diagWriteCount);
+    } else {
+        Dev->InterruptSourcesEnabled = FALSE;
+        g_D2Bar1Bound = g_D2UserdBar1Set = g_D2PbdmaMasksSaved = 0u;
+    }
+    TraceBin(L"B3eShutdownWrites", writes, sizeof(writes));
+    TraceBin(L"B3eShutdownDiagWrites", diagWrites, sizeof(diagWrites));
+    B3cPrivRingTraceWriteLog(L"B3eShutdownPrivErrorCount",
+        L"B3eShutdownPrivErrorDropped", L"B3eShutdownPrivAckTimeouts",
+        L"B3eShutdownPrivErrors");
+    Dev->ResidentChannelEnabled = FALSE;
+    Dev->ResidentRunlistSubmitted = FALSE;
+    Dev->ResidentInstBound = FALSE;
+    Trace(L"B3eShutdownPreemptPolls", preemptPolls);
+    Trace(L"B3eShutdownPreemptLast", preemptLast);
+    Trace(L"B3eShutdownRunlistPolls", runlistPolls);
+    Trace(L"B3eShutdownRunlistLast", runlistLast);
+    {
+        ULONG powerError = B3ePowerDownGpu(Dev, &Dev->ResidentPower);
+        Trace(L"B3ePowerDownResult", powerError);
+        error |= (powerError << 16);
+    }
+    if (Dev->ResidentIdleRefHeld) {
+        WdfDeviceResumeIdle(Dev->Device);
+        Dev->ResidentIdleRefHeld = FALSE;
+    }
+    Dev->ResidentActive = FALSE;
+    g_ResidentOwner = NULL;
+    Dev->ResidentShutdownResult = error;
+    TraceDurable(L"B3eShutdownResult", error);
+    TraceDurable(L"B3eResidentActive", 0u);
+    return error;
+}
+
+#include "swgpu-idle.inc"
+
+static VOID B3eResidentStatus(PSWGPU_DEVICE Dev, PSWGPU_RESIDENT_STATUS Out)
+{
+    volatile UCHAR *B = Dev->Bar0;
+    ULONG pmc = 0u, lo0 = 0u, lo1 = 0u, hi = 0u;
+    RtlZeroMemory(Out, sizeof(*Out));
+    Out->Version = SWGPU_VERSION;
+    Out->Resident = Dev->ResidentActive && !Dev->BlitReset ? 1u : 0u;
+    Trace(L"F3LastWaitUs", Dev->BlitLastWaitUs);
+    Trace(L"F3LastPolls", Dev->BlitLastPolls);
+    Trace(L"F3Reset", Dev->BlitReset);
+    Out->ShutdownResult = Dev->ResidentShutdownResult;
+    if (B == NULL || Out->Resident == 0u) {
+        Trace(L"B3eStatusResident", Out->Resident);
+        return;
+    }
+    Out->Boot0 = Rd(B, NV_PMC_BOOT_0);
+    lo0 = Rd(B, NV_PTIMER_TIME_0);
+    hi = Rd(B, NV_PTIMER_TIME_1);
+    lo1 = Rd(B, NV_PTIMER_TIME_0);
+    Out->PtimerLoBefore = lo0; Out->PtimerHi = hi; Out->PtimerLoAfter = lo1;
+    Out->PtimerDelta = lo1 - lo0;
+    pmc = Rd(B, NV_PMC_ENABLE); Out->PmcEnable = pmc;
+    Out->PrivRingStatus0 = Rd(B, 0x0012005Cu);
+    Out->PrivRingStatus1 = Rd(B, 0x00120060u);
+    Out->FecsMailbox0 = Rd(B, 0x00409800u);
+    Out->FecsCpuctl = Rd(B, 0x00409100u);
+    Out->FifoEngineStatus = Rd(B, 0x00002640u);
+    Out->CcsrChannel = Rd(B, 0x00800004u);
+    Out->PbdmaStatus = Rd(B, 0x00003080u);
+    Out->PbdmaIntr0 = Rd(B, 0x00040108u);
+    Out->MmuFaultStatus = Rd(B, 0x000025A0u);
+    if (pmc & (1u << 12)) {
+        Out->GrIntr = Rd(B, 0x00400100u);
+        Out->GrStatus = Rd(B, 0x00400700u);
+    }
+#define STATUS_TRACE(name, field) Trace(L"B3eStatus" name, Out->field)
+    STATUS_TRACE(L"Resident", Resident); STATUS_TRACE(L"Boot0", Boot0);
+    STATUS_TRACE(L"PtimerLoBefore", PtimerLoBefore); STATUS_TRACE(L"PtimerHi", PtimerHi);
+    STATUS_TRACE(L"PtimerLoAfter", PtimerLoAfter); STATUS_TRACE(L"PtimerDelta", PtimerDelta);
+    STATUS_TRACE(L"PmcEnable", PmcEnable); STATUS_TRACE(L"PrivRingStatus0", PrivRingStatus0);
+    STATUS_TRACE(L"PrivRingStatus1", PrivRingStatus1); STATUS_TRACE(L"FecsMailbox0", FecsMailbox0);
+    STATUS_TRACE(L"FecsCpuctl", FecsCpuctl); STATUS_TRACE(L"FifoEngineStatus", FifoEngineStatus);
+    STATUS_TRACE(L"CcsrChannel", CcsrChannel); STATUS_TRACE(L"PbdmaStatus", PbdmaStatus);
+    STATUS_TRACE(L"PbdmaIntr0", PbdmaIntr0); STATUS_TRACE(L"GrIntr", GrIntr);
+    STATUS_TRACE(L"GrStatus", GrStatus); STATUS_TRACE(L"MmuFaultStatus", MmuFaultStatus);
+    STATUS_TRACE(L"ShutdownResult", ShutdownResult);
+#undef STATUS_TRACE
+}
+
+static VOID SwGpuDispatchIoctl(WDFQUEUE Queue, WDFREQUEST Request,
+    size_t OutputBufferLength, size_t InputBufferLength, ULONG IoControlCode)
+{
+    WDFDEVICE Device = WdfIoQueueGetDevice(Queue);
+    PSWGPU_DEVICE Dev = SwGpuGetDevice(Device);
+    PSWGPU_RESIDENT_STATUS out = NULL;
+    PSWGPU_E2_RESULT e2Out = NULL;
+    PSWGPU_E3_RESULT e3Out = NULL;
+    NTSTATUS status;
+    UNREFERENCED_PARAMETER(InputBufferLength);
+    if (Dev->BlitReset && IoControlCode != IOCTL_SWGPU_RESIDENT_STATUS &&
+        IoControlCode != IOCTL_SWGPU_RESIDENT_STOP) {
+        WdfRequestComplete(Request, STATUS_DEVICE_NOT_READY);
+        return;
+    }
+    if (IoControlCode == IOCTL_SWGPU_BLIT_TEST) {
+        SWGPU_F2_RESULT *result = NULL;
+        if (!Dev->ResidentActive) {
+            WdfRequestComplete(Request, STATUS_DEVICE_NOT_READY);
+            return;
+        }
+        status = WdfRequestRetrieveOutputBuffer(Request, sizeof(*result), (PVOID *)&result, NULL);
+        if (!NT_SUCCESS(status)) {
+            WdfRequestComplete(Request, status);
+            return;
+        }
+        F2Benchmark(Dev, result);
+        WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, sizeof(*result));
+        return;
+    }
+    if (IoControlCode == IOCTL_SWGPU_COPY_TEST) {
+        PSWGPU_F1_RESULT copy = NULL;
+        if (!Dev->ResidentActive || g_ResidentOwner != Dev) {
+            WdfRequestComplete(Request, STATUS_DEVICE_NOT_READY);
+            return;
+        }
+        if (Dev->CopyInFlight) {
+            WdfRequestComplete(Request, STATUS_DEVICE_BUSY);
+            return;
+        }
+        status = WdfRequestRetrieveOutputBuffer(Request, sizeof(*copy), (PVOID *)&copy, NULL);
+        if (!NT_SUCCESS(status)) {
+            WdfRequestComplete(Request, status);
+            return;
+        }
+        F1CopyTest(Dev, copy);
+        WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, sizeof(*copy));
+        return;
+    }
+    if (Dev->CopyInFlight &&
+        (IoControlCode == IOCTL_SWGPU_SUBMIT_TEST || IoControlCode == IOCTL_SWGPU_IRQ_TEST)) {
+        WdfRequestComplete(Request, STATUS_DEVICE_BUSY);
+        return;
+    }
+    if (IoControlCode == IOCTL_SWGPU_CYCLE_TEST) {
+        PSWGPU_E4_RESULT cycle = NULL;
+        SWGPU_E2_RESULT submit;
+        const SWGPU_DMA_POOL *pool = &Dev->DmaPool;
+
+        if (Dev->ResidentActive || g_ResidentOwner != NULL) {
+            WdfRequestComplete(Request, STATUS_DEVICE_BUSY);
+            return;
+        }
+        status = WdfRequestRetrieveOutputBuffer(Request, sizeof(*cycle),
+            (PVOID *)&cycle, NULL);
+        if (!NT_SUCCESS(status)) {
+            WdfRequestComplete(Request, status);
+            return;
+        }
+        RtlZeroMemory(cycle, sizeof(*cycle));
+        cycle->Version = SWGPU_VERSION;
+        cycle->SubmitResult = STATUS_DEVICE_NOT_READY;
+        cycle->StopResult = STATUS_DEVICE_NOT_READY;
+        /* The power-managed sequential queue holds D0 through start, test
+         * and stop. Keep all three in one request so other IOCTLs cannot
+         * interleave with the temporary resident session. */
+        status = StartResident(Dev);
+        cycle->StartResult = NT_SUCCESS(status) ? 0u : ReadParam(L"E1Result", (ULONG)status);
+        if (NT_SUCCESS(status) && Dev->ResidentActive) {
+            cycle->SubmitResult = B3eResidentSubmitTest(Dev, &submit, TRUE);
+            cycle->Rounds = submit.Rounds;
+            cycle->MaxPolls = submit.MaxPolls;
+        }
+        if (Dev->ResidentActive)
+            cycle->StopResult = B3eResidentShutdown(Dev, TRUE);
+        cycle->PoolResult = pool->Result;
+        cycle->PoolBytes = pool->Bytes;
+        cycle->PoolUsedPeak = pool->UsedPeak;
+        cycle->PoolFallbacks = pool->Fallbacks;
+        cycle->PoolAllocs = pool->Allocs;
+        cycle->PoolFrees = pool->Frees;
+        cycle->PoolFailures = pool->Failures;
+        cycle->PoolUsed = pool->Used;
+        Trace(L"E4CycleStartResult", cycle->StartResult);
+        Trace(L"E4CycleSubmitResult", cycle->SubmitResult);
+        Trace(L"E4CycleStopResult", cycle->StopResult);
+        Trace(L"E4CycleRounds", cycle->Rounds);
+        Trace(L"E4CycleMaxPolls", cycle->MaxPolls);
+        WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, sizeof(*cycle));
+        return;
+    }
+    if (IoControlCode == IOCTL_SWGPU_IRQ_TEST) {
+        if (!Dev->ResidentActive || g_ResidentOwner != Dev) {
+            Trace(L"E3IoctlNotReady", STATUS_DEVICE_NOT_READY);
+            WdfRequestComplete(Request, STATUS_DEVICE_NOT_READY); return;
+        }
+        if (OutputBufferLength < sizeof(SWGPU_E3_RESULT)) {
+            WdfRequestComplete(Request, STATUS_BUFFER_TOO_SMALL); return;
+        }
+        status = WdfRequestRetrieveOutputBuffer(Request, sizeof(SWGPU_E3_RESULT),
+            (PVOID *)&e3Out, NULL);
+        if (!NT_SUCCESS(status)) { WdfRequestComplete(Request, status); return; }
+        TraceDurable(L"B3eControlMode", 10u);
+        (VOID)B3eResidentIrqTest(Dev, e3Out);
+        WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, sizeof(*e3Out));
+        return;
+    }
+    if (IoControlCode == IOCTL_SWGPU_SUBMIT_TEST) {
+        if (!Dev->ResidentActive || g_ResidentOwner != Dev) {
+            Trace(L"E2IoctlNotReady", STATUS_DEVICE_NOT_READY);
+            WdfRequestComplete(Request, STATUS_DEVICE_NOT_READY); return;
+        }
+        if (OutputBufferLength < sizeof(SWGPU_E2_RESULT)) {
+            WdfRequestComplete(Request, STATUS_BUFFER_TOO_SMALL); return;
+        }
+        status = WdfRequestRetrieveOutputBuffer(Request, sizeof(SWGPU_E2_RESULT),
+            (PVOID *)&e2Out, NULL);
+        if (!NT_SUCCESS(status)) { WdfRequestComplete(Request, status); return; }
+        TraceDurable(L"B3eControlMode", 9u);
+        (VOID)B3eResidentSubmitTest(Dev, e2Out, FALSE);
+        WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, sizeof(*e2Out));
+        return;
+    }
+    if (IoControlCode != IOCTL_SWGPU_RESIDENT_STATUS &&
+        IoControlCode != IOCTL_SWGPU_RESIDENT_STOP) {
+        WdfRequestComplete(Request, STATUS_INVALID_DEVICE_REQUEST); return;
+    }
+    if (OutputBufferLength < sizeof(SWGPU_RESIDENT_STATUS)) {
+        WdfRequestComplete(Request, STATUS_BUFFER_TOO_SMALL); return;
+    }
+    status = WdfRequestRetrieveOutputBuffer(Request, sizeof(SWGPU_RESIDENT_STATUS),
+        (PVOID *)&out, NULL);
+    if (!NT_SUCCESS(status)) { WdfRequestComplete(Request, status); return; }
+    if (IoControlCode == IOCTL_SWGPU_RESIDENT_STOP) {
+        TraceDurable(L"B3eControlMode", 8u);
+        B3eResidentStatus(Dev, out);
+        G1ManualStop(Dev);
+        out->ShutdownResult = B3eResidentShutdown(Dev, TRUE);
+        G1TraceState(Dev);
+        Trace(L"B3eStatusShutdownResult", out->ShutdownResult);
+    } else {
+        Step(112);
+        if (Dev->ResidentActive && !Dev->BlitReset && Dev->Bar0 != NULL) {
+            ULONG timerBefore = Rd(Dev->Bar0, NV_PTIMER_TIME_0);
+            KeStallExecutionProcessor(1000u);
+            Trace(L"E5PtimerNsPer1ms", Rd(Dev->Bar0, NV_PTIMER_TIME_0) - timerBefore);
+        }
+        TraceDurable(L"B3eControlMode", 7u);
+        B3eResidentStatus(Dev, out);
+    }
+    WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, sizeof(*out));
+}
+
+VOID SwGpuEvtIoDeviceControl(WDFQUEUE Queue, WDFREQUEST Request,
+    size_t OutputBufferLength, size_t InputBufferLength, ULONG IoControlCode)
+{
+    PSWGPU_DEVICE dev = SwGpuGetDevice(WdfIoQueueGetDevice(Queue));
+    if (InterlockedCompareExchange(&dev->BlitGate, 1, 0) != 0) {
+        WdfRequestComplete(Request, STATUS_DEVICE_BUSY);
+        return;
+    }
+    SwGpuDispatchIoctl(Queue, Request, OutputBufferLength, InputBufferLength, IoControlCode);
+    InterlockedExchange(&dev->BlitGate, 0);
+}
+
+/* Complete this kernel-only IRP inline. A present must not queue behind a
+ * benchmark. Both dispatch paths share the same gate, including Stop. */
+static NTSTATUS SwGpuBlitInternal(WDFDEVICE Device, PIRP Irp)
+{
+    PSWGPU_DEVICE dev = SwGpuGetDevice(Device);
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
+    NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
+    if (stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_SWGPU_PRESENT_BLIT &&
+        Irp->RequestorMode == KernelMode && KeGetCurrentIrql() == PASSIVE_LEVEL &&
+        stack->Parameters.DeviceIoControl.InputBufferLength == sizeof(SWGPU_BLIT_REQUEST) &&
+        Irp->AssociatedIrp.SystemBuffer != NULL) {
+        status = STATUS_DEVICE_NOT_READY;
+        if (InterlockedCompareExchange(&dev->BlitOnline, 0, 0) == 0) {
+            if (!G1RequestWake(dev)) {
+                /* Keep the offline diagnostics for the legacy policy. */
+                Trace(L"F3NotReadyWhy", 0x80000000u);
+                Trace(L"F3NotReadyCount", ReadParam(L"F3NotReadyCount", 0u) + 1u);
+                Trace(L"F3OfflineResident", dev->ResidentActive ? 1u : 0u);
+                Trace(L"F3OfflineIdleRef", dev->ResidentIdleRefHeld ? 1u : 0u);
+            }
+        } else {
+            status = STATUS_DEVICE_BUSY;
+            if (InterlockedCompareExchange(&dev->BlitGate, 1, 0) == 0) {
+                status = InterlockedCompareExchange(&dev->BlitOnline, 0, 0) != 0
+                    ? F3Present(dev, (const SWGPU_BLIT_REQUEST *)Irp->AssociatedIrp.SystemBuffer)
+                    : STATUS_DEVICE_NOT_READY;
+                if (NT_SUCCESS(status))
+                    InterlockedExchange64(&dev->LastBlitTime, (LONG64)KeQueryInterruptTime());
+                InterlockedExchange(&dev->BlitGate, 0);
+            }
+        }
+    }
+    Irp->IoStatus.Status = status;
+    Irp->IoStatus.Information = 0u;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return status;
+}
+
+static BOOLEAN SwGpuDrainBlit(PSWGPU_DEVICE Dev, ULONG TimeoutMs)
+{
+    ULONG polls;
+    BOOLEAN acquired = FALSE;
+    ULONGLONG start = KeQueryInterruptTime();
+    InterlockedExchange(&Dev->BlitOnline, 0);
+    for (polls = 1u; ; ++polls) {
+        acquired = InterlockedCompareExchange(&Dev->BlitGate, 1, 0) == 0;
+        if (acquired || KeQueryInterruptTime() - start >= TimeoutMs * 10000ull ||
+            polls == TimeoutMs) break;
+        Ms(1u);
+    }
+    Trace(L"F3DrainPolls", polls);
+    Trace(L"F3DrainStatus", acquired ? 0u : (ULONG)STATUS_IO_TIMEOUT);
+    return acquired;
+}
+
+static NTSTATUS SwGpuEvtD0Ready(WDFDEVICE Device, WDF_POWER_DEVICE_STATE PreviousState)
+{
+    PSWGPU_DEVICE dev = SwGpuGetDevice(Device);
+    KIRQL oldIrql;
+    UNREFERENCED_PARAMETER(PreviousState);
+    KeAcquireSpinLock(&dev->PowerLock, &oldIrql);
+    dev->PowerD0 = TRUE;
+    dev->PowerPaused = FALSE;
+    if (!dev->PowerFinal && dev->ResidentActive && !dev->BlitReset)
+        InterlockedExchange(&dev->BlitOnline, 1);
+    KeReleaseSpinLock(&dev->PowerLock, oldIrql);
+    G1ResumeScheduler(dev);
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS SwGpuEvtD0Quiesce(WDFDEVICE Device, WDF_POWER_DEVICE_STATE TargetState)
+{
+    PSWGPU_DEVICE dev = SwGpuGetDevice(Device);
+    return G1Pause(dev, TargetState == WdfPowerDeviceD3Final) ?
+           STATUS_SUCCESS : STATUS_DEVICE_BUSY;
+}
+
+NTSTATUS SwGpuEvtD0Exit(WDFDEVICE Device, WDF_POWER_DEVICE_STATE TargetState)
+{
+    PSWGPU_DEVICE Dev = SwGpuGetDevice(Device);
+    if (TargetState == WdfPowerDeviceD3Final && !G1Pause(Dev, TRUE))
+        return STATUS_DEVICE_BUSY;
+    if (!SwGpuDrainBlit(Dev, TargetState == WdfPowerDeviceD3Final ? G1_DRAIN_MS : 200u))
+        return STATUS_DEVICE_BUSY;
+    if (TargetState == WdfPowerDeviceD3Final) {
+        (VOID)B3eResidentShutdown(Dev, FALSE);
+        G1ReleaseIdleIfOff(Dev);
+        G1TraceState(Dev);
+    }
+    InterlockedExchange(&Dev->BlitGate, 0);
+    if (TargetState != WdfPowerDeviceD3Final) G1ResumeScheduler(Dev);
+    return STATUS_SUCCESS;
+}
 
 NTSTATUS SwGpuEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST Raw, WDFCMRESLIST Translated)
 {
     PSWGPU_DEVICE Dev = SwGpuGetDevice(Device);
     ULONG Count = WdfCmResourceListGetCount(Translated), Index, Mem = 0, I2c = 0;
     PHYSICAL_ADDRESS Pa;
-    UNREFERENCED_PARAMETER(Raw);
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR irqRaw[2] = { NULL, NULL };
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR irqTranslated[2] = { NULL, NULL };
+    ULONG interruptCount = 0u;
+    NTSTATUS interruptStatus = STATUS_SUCCESS;
 
     for (Index = 0; Index < Count; ++Index) {
         PCM_PARTIAL_RESOURCE_DESCRIPTOR Desc = WdfCmResourceListGetDescriptor(Translated, Index);
@@ -7457,13 +8571,21 @@ NTSTATUS SwGpuEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST Raw, WDFCMRESLIS
             LARGE_INTEGER *Id = (I2c == 0) ? &Dev->VddId : &Dev->PmicId;    /* DSDT order */
             if (I2c < 2) { Id->LowPart = Desc->u.Connection.IdLowPart; Id->HighPart = (LONG)Desc->u.Connection.IdHighPart; }
             ++I2c;
+        } else if (Desc->Type == CmResourceTypeInterrupt) {
+            PCM_PARTIAL_RESOURCE_DESCRIPTOR rawDesc =
+                Index < WdfCmResourceListGetCount(Raw) ? WdfCmResourceListGetDescriptor(Raw, Index) : NULL;
+            if (interruptCount < RTL_NUMBER_OF(irqTranslated)) {
+                irqRaw[interruptCount] = rawDesc;
+                irqTranslated[interruptCount] = Desc;
+            }
+            ++interruptCount;
         }
     }
     Trace(L"ResMem", Mem);
     Trace(L"ResI2c", I2c);
-    Trace(L"Bar0Lo", Dev->Bar0Phys.LowPart);
-    Trace(L"Bar1Lo", Dev->Bar1Phys.LowPart);
-    Trace(L"Bar1Len", Dev->Bar1Len);
+    TraceDetail(L"Bar0Lo", Dev->Bar0Phys.LowPart);
+    TraceDetail(L"Bar1Lo", Dev->Bar1Phys.LowPart);
+    TraceDetail(L"Bar1Len", Dev->Bar1Len);
     if (Mem < 2 || I2c < 2 || Dev->Bar0Len < BAR0_MAP_LEN ||
         Dev->Bar1Len < BAR1_D3_MAP_LEN) return STATUS_DEVICE_CONFIGURATION_ERROR;
 
@@ -7480,6 +8602,56 @@ NTSTATUS SwGpuEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST Raw, WDFCMRESLIS
     Dev->Mc = (volatile UCHAR *)MmMapIoSpaceEx(Pa, MC_LEN, PAGE_READWRITE | PAGE_NOCACHE);
     if (!Dev->Bar0 || !Dev->Bar1Cpu || !Dev->Car || !Dev->Pmc || !Dev->Mc)
         return STATUS_INSUFFICIENT_RESOURCES;
+    Dev->HaveInterruptResources = FALSE;
+    Dev->InterruptSourcesEnabled = FALSE;
+    Dev->InterruptResourceCount = 0u;
+    InterlockedExchange(&Dev->E3IsrActive, 0);
+    Dev->StallInterrupt = NULL;
+    Dev->NonstallInterrupt = NULL;
+    Trace(L"E3InterruptResourceCount", interruptCount);
+    Dev->InterruptResourceCount = interruptCount;
+    if (interruptCount >= 2u && irqRaw[0] != NULL && irqRaw[1] != NULL) {
+        WDF_INTERRUPT_CONFIG interruptConfig;
+        WDF_OBJECT_ATTRIBUTES interruptAttributes;
+        WDF_INTERRUPT_CONFIG_INIT(&interruptConfig, SwGpuEvtStallInterruptIsr, NULL);
+        interruptConfig.EvtInterruptDpc = SwGpuEvtInterruptDpc;
+        interruptConfig.InterruptRaw = irqRaw[0];
+        interruptConfig.InterruptTranslated = irqTranslated[0];
+        /* Claude 0.7.2: ShareVector stays WdfUseDefault; in PrepareHardware anything else is
+           STATUS_INVALID_DEVICE_STATE (0xC0000184). The framework uses the resource's share disposition. */
+        interruptConfig.AutomaticSerialization = FALSE;
+        /* Claude 0.7.1: no ParentObject (0xC020020F STATUS_WDF_PARENT_ASSIGNMENT_NOT_ALLOWED);
+           an interrupt's parent is always its device. */
+        WDF_OBJECT_ATTRIBUTES_INIT(&interruptAttributes);
+        interruptStatus = WdfInterruptCreate(Device, &interruptConfig,
+                                              &interruptAttributes, &Dev->StallInterrupt);
+        if (NT_SUCCESS(interruptStatus)) {
+            WDF_INTERRUPT_CONFIG_INIT(&interruptConfig, SwGpuEvtNonstallInterruptIsr, NULL);
+            interruptConfig.EvtInterruptDpc = SwGpuEvtInterruptDpc;
+            interruptConfig.InterruptRaw = irqRaw[1];
+            interruptConfig.InterruptTranslated = irqTranslated[1];
+            /* Claude 0.7.2: ShareVector stays WdfUseDefault; in PrepareHardware anything else is
+           STATUS_INVALID_DEVICE_STATE (0xC0000184). The framework uses the resource's share disposition. */
+            interruptConfig.AutomaticSerialization = FALSE;
+            interruptStatus = WdfInterruptCreate(Device, &interruptConfig,
+                                                  &interruptAttributes, &Dev->NonstallInterrupt);
+        }
+        if (NT_SUCCESS(interruptStatus)) {
+            Dev->HaveInterruptResources = TRUE;
+        } else {
+            if (Dev->StallInterrupt != NULL) { WdfObjectDelete(Dev->StallInterrupt); Dev->StallInterrupt = NULL; }
+            if (Dev->NonstallInterrupt != NULL) { WdfObjectDelete(Dev->NonstallInterrupt); Dev->NonstallInterrupt = NULL; }
+        }
+    }
+    Trace(L"E3InterruptCreateStatus", (ULONG)interruptStatus);
+    Trace(L"E3HaveInterrupts", Dev->HaveInterruptResources ? 1u : 0u);
+    E4ReservePool(Dev);
+    {
+        KIRQL oldIrql;
+        KeAcquireSpinLock(&Dev->PowerLock, &oldIrql);
+        Dev->PowerFinal = FALSE;
+        KeReleaseSpinLock(&Dev->PowerLock, oldIrql);
+    }
     return STATUS_SUCCESS;
 }
 
@@ -7487,11 +8659,21 @@ NTSTATUS SwGpuEvtReleaseHardware(WDFDEVICE Device, WDFCMRESLIST Translated)
 {
     PSWGPU_DEVICE Dev = SwGpuGetDevice(Device);
     UNREFERENCED_PARAMETER(Translated);
+    if (!G1Pause(Dev, TRUE)) return STATUS_DEVICE_BUSY;
+    if (!SwGpuDrainBlit(Dev, G1_DRAIN_MS)) return STATUS_DEVICE_BUSY;
+    (VOID)B3eResidentShutdown(Dev, FALSE);
+    G1ReleaseIdleIfOff(Dev);
+    G1TraceState(Dev);
+    E4ReleasePool(Dev);
+    if (Dev->StallInterrupt != NULL) { WdfObjectDelete(Dev->StallInterrupt); Dev->StallInterrupt = NULL; }
+    if (Dev->NonstallInterrupt != NULL) { WdfObjectDelete(Dev->NonstallInterrupt); Dev->NonstallInterrupt = NULL; }
+    Dev->HaveInterruptResources = FALSE;
     if (Dev->Bar0) { MmUnmapIoSpace((PVOID)Dev->Bar0, BAR0_MAP_LEN); Dev->Bar0 = NULL; }
     if (Dev->Bar1Cpu) { MmUnmapIoSpace((PVOID)Dev->Bar1Cpu, Dev->Bar1MapLen); Dev->Bar1Cpu = NULL; }
     if (Dev->Car)  { MmUnmapIoSpace((PVOID)Dev->Car, CAR_LEN);       Dev->Car = NULL; }
     if (Dev->Pmc)  { MmUnmapIoSpace((PVOID)Dev->Pmc, PMC_LEN);       Dev->Pmc = NULL; }
     if (Dev->Mc)   { MmUnmapIoSpace((PVOID)Dev->Mc, MC_LEN);         Dev->Mc = NULL; }
+    InterlockedExchange(&Dev->BlitGate, 0);
     return STATUS_SUCCESS;
 }
 
@@ -7500,7 +8682,10 @@ NTSTATUS SwGpuEvtSelfManagedIoInit(WDFDEVICE Device)
     PSWGPU_DEVICE Dev = SwGpuGetDevice(Device);
     NTSTATUS st;
     ULONG mode;
+    BOOLEAN autoResident;
 
+    g_Verbose = ReadParam(L"Verbose", 0u) != 0u;
+    Trace(L"E5VerboseActive", g_Verbose ? 1u : 0u);
     Trace(L"Version", SWGPU_VERSION);
     Trace(L"StartCount", ReadParam(L"StartCount", 0) + 1);
     st = OpenTarget(Device, Dev->VddId, &Dev->Vdd);
@@ -7511,18 +8696,45 @@ NTSTATUS SwGpuEvtSelfManagedIoInit(WDFDEVICE Device)
     Snapshot(Dev, FALSE);
 
     mode = ReadParam(L"PowerTest", 0);
-    if (mode >= 1 && mode <= 5) {     /* 5 = isolated B3c signed ACR boot */
-        BOOLEAN keep = ReadParam(L"KeepOn", 0) == 1;
+    /* Claude 0.12.4: boot guard for the persistent AutoResident (F3). If the
+     * previous auto start never finished (hang/reset during GPU bring-up),
+     * turn AutoResident and the clock request off instead of looping. */
+    if (mode != 6u && ReadParam(L"AutoResident", 0u) == 1u &&
+        ReadParam(L"AutoResidentPending", 0u) == 1u) {
+        TraceDurable(L"AutoResident", 0u);
+        TraceDurable(L"GpcKhz", 0u);
+        TraceDurable(L"AutoResidentPending", 0u);
+        TraceDurable(L"AutoResidentGuardTripped", 1u);
+    }
+    autoResident = ReadParam(L"AutoResident", 0u) == 1u;
+    if (autoResident && ReadParam(L"IdlePowerOffMs", G1_DEFAULT_IDLE_MS) != 0u)
+        Dev->PowerDisabled = G1BootLatch(FALSE);
+    if (mode == 6u || (autoResident && !Dev->PowerDisabled)) {
         LARGE_INTEGER t0, t1, f;
-        TraceDurable(L"PowerTest", 0);      /* once: a hang does not repeat at the next boot */
+        ULONG bootUs;
+        BOOLEAN autoStart = mode != 6u;
+        TraceDurable(L"PowerTest", 0);
+        if (autoStart) TraceDurable(L"AutoResidentPending", 1u);
         Trace(L"Result", 0xFFFFFFFFu);
-        Trace(L"Boot0", 0);
+        TraceDetail(L"Boot0", 0);
         t0 = KeQueryPerformanceCounter(&f);
-        (VOID)PowerTest(Dev, keep, mode);
-        t1 = KeQueryPerformanceCounter(NULL);
-        Trace(L"TestUs", (ULONG)((t1.QuadPart - t0.QuadPart) * 1000000 / (f.QuadPart ? f.QuadPart : 1)));
-        Snapshot(Dev, TRUE);
+        if (SwGpuDrainBlit(Dev, 200u)) {
+            st = B3eStartOnline(Dev, autoStart, FALSE);
+            t1 = KeQueryPerformanceCounter(NULL);
+            Snapshot(Dev, TRUE);
+            InterlockedExchange(&Dev->BlitGate, 0);
+        } else {
+            st = STATUS_DEVICE_BUSY;
+            TraceDurable(L"E1Result", (ULONG)st);
+            t1 = KeQueryPerformanceCounter(NULL);
+        }
+        bootUs = (ULONG)((t1.QuadPart - t0.QuadPart) * 1000000 / (f.QuadPart ? f.QuadPart : 1));
+        Trace(L"TestUs", bootUs);
         Trace(L"TestRuns", ReadParam(L"TestRuns", 0) + 1);
+        if (autoStart) TraceDurable(L"AutoResidentPending", 0u);
+        G1StartPolicy(Dev, autoResident, st, bootUs);
+    } else {
+        G1StartPolicy(Dev, autoResident, STATUS_DEVICE_NOT_READY, 0u);
     }
     return STATUS_SUCCESS;      /* the device always starts: it only reports */
 }
@@ -7539,11 +8751,35 @@ NTSTATUS SwGpuEvtDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT DeviceInit)
     Pnp.EvtDevicePrepareHardware = SwGpuEvtPrepareHardware;
     Pnp.EvtDeviceReleaseHardware = SwGpuEvtReleaseHardware;
     Pnp.EvtDeviceSelfManagedIoInit = SwGpuEvtSelfManagedIoInit;
+    Pnp.EvtDeviceD0Exit = SwGpuEvtD0Exit;
+    Pnp.EvtDeviceD0EntryPostInterruptsEnabled = SwGpuEvtD0Ready;
+    Pnp.EvtDeviceD0ExitPreInterruptsDisabled = SwGpuEvtD0Quiesce;
     WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &Pnp);
+    WdfDeviceInitSetDeviceType(DeviceInit, FILE_DEVICE_UNKNOWN);
+    /* Claude 0.5.1: an unnamed PnP FDO rejects WdfDeviceInitAssignSDDLString (0xC0000079).
+       Admin-only access now comes from the INF [SwGpu_Inst.NT.HW] Security value. */
+    Status = WdfDeviceInitAssignWdmIrpPreprocessCallback(DeviceInit, SwGpuBlitInternal,
+        IRP_MJ_INTERNAL_DEVICE_CONTROL, NULL, 0);
+    if (!NT_SUCCESS(Status)) return Status;
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&Attributes, SWGPU_DEVICE);
     Status = WdfDeviceCreate(&DeviceInit, &Attributes, &Device);
     if (!NT_SUCCESS(Status)) return Status;
     SwGpuGetDevice(Device)->Device = Device;
+    G1CreateObjects(SwGpuGetDevice(Device));
+    KeInitializeEvent(&SwGpuGetDevice(Device)->E3Event, SynchronizationEvent, FALSE);
+    Status = WdfDeviceCreateDeviceInterface(Device, &SwGpuBlitDeviceInterface, NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+    {
+        WDF_IO_QUEUE_CONFIG QueueConfig;
+        WDF_OBJECT_ATTRIBUTES QueueAttributes;
+        WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&QueueConfig, WdfIoQueueDispatchSequential);
+        QueueConfig.PowerManaged = WdfTrue;
+        QueueConfig.EvtIoDeviceControl = SwGpuEvtIoDeviceControl;
+        WDF_OBJECT_ATTRIBUTES_INIT(&QueueAttributes);
+        QueueAttributes.ExecutionLevel = WdfExecutionLevelPassive;
+        Status = WdfIoQueueCreate(Device, &QueueConfig, &QueueAttributes, WDF_NO_HANDLE);
+        if (!NT_SUCCESS(Status)) return Status;
+    }
     return STATUS_SUCCESS;
 }
 
