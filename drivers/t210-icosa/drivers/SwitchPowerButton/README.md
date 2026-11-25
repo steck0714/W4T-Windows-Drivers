@@ -1,36 +1,97 @@
-# SwitchPowerButton (ACPI\SWOA0601)
+# SwitchPowerButton (switchpwrbtn)
 
-1.0.0.2 adds an optional hold action ported from windows-switch's `swhid`. Everything is off by
-default; with no registry value the driver behaves exactly like 1.0.0.1.
+[日本語](README-ja.md)
 
-| Registry (`HKLM\SYSTEM\CurrentControlSet\Services\switchpwrbtn\Parameters`) | Meaning |
+KMDF driver for the Nintendo Switch (Erista) power button, plus restart-to-hekate and power-off
+at the end of a Windows shutdown. Device `ACPI\SWOA0601` (UEFI R374 or later), the MAX77620 PMIC
+at I2C5 address 0x3C. Install it with `kits/Switch-PowerButton`.
+
+## Power button
+
+- The button drives the PMIC's EN0 input; there is no SoC GPIO for it.
+- Every 50 ms the driver reads ONOFFSTAT (0x15, bit 2 = held) and ONOFFIRQ (0x0B, clear on read,
+  so a press shorter than one poll is still seen) through SPB.
+- Presses are reported as a HID System Control "System Power Down" button through VHF (`vhf.sys`
+  as a lower filter). Windows then applies the power button action from Power Options.
+- Holding the button for several seconds still powers the PMIC off by itself.
+
+## Restart and shut down (1.0.2.0)
+
+Windows on the Switch completes its shutdown, but its last firmware call never resets or powers off
+the console (it never reaches the UEFI ResetSystem, on either boot chain). The driver does it itself
+in `EvtDeviceD0Exit`, when the power manager powers the devices down for S5; file systems and
+registry hives are flushed before that. `WdfDeviceGetSystemPowerAction` tells which it is.
+
+- **Restart** (`PowerActionShutdownReset`): reboot-to-payload, the same steps as switchroot's bl31
+  (`r2p_reboot_to_payload`, `tegra_soc_prepare_system_reset`):
+  1. CAR `SCLK_BURST_POLICY` (0x28) = 0x10000000, `SCLK_RATE` (0x30) = 0, wait 1 ms.
+  2. Clear IRAM 0x40010000–0x4003FFFF, copy the payload to 0x40010000, zero the 32-byte boot
+     configuration at +0x94.
+  3. PMC `SCRATCH0` (0x50) |= 1 (warmboot), `SCRATCH45` (0x234) = 0x2E38DFFF, `SCRATCH46` (0x238)
+     = 0x6001DC28, `SCRATCH33` (0x120) = 0x40010000, `SCRATCH40` (0x13C) = 0x6000F208.
+  4. `PMC_CNTRL` (0x0) |= `MAIN_RST` (0x10).
+
+  Erista only (APB_MISC `GP_HIDREV` major revision < 2). The payload (default
+  `\Device\Harddisk0\Partition1\bootloader\update.bin`, hekate on the SD's FAT partition) is read
+  into nonpaged memory while Windows runs, never at shutdown; 0x200 to 0x30000 bytes. Without a
+  payload the driver calls PSCI `SYSTEM_RESET`; switchroot's bl31 then does R2P with the payload
+  hekate gave it, coreboot's bl31 does a plain reset.
+- **Shut down** (`PowerActionShutdown`/`ShutdownOff`): MAX77620 `ONOFFCNFG2` (0x42) &= ~`SFT_RST_WK`
+  (bit 7), then `ONOFFCNFG1` (0x41) = `SFT_RST` (bit 7), as Linux `max77620_pm_power_off`;
+  `PWR_OFF` (bit 1) as a fallback. Through SPB first, then the I2C5 registers (0x7000D000) directly
+  if the I2C controller no longer takes requests.
+- The backlight PWM (0x7000A000) is switched off first, as a marker: black with the backlight off
+  means the driver got there.
+- Other power actions (device removal, driver update, hibernate, sleep) do nothing.
+
+Tested on hardware on 2026-11-17 (Erista, Windows 11): restart returns to the hekate menu both when
+Windows was booted from hekate and from RCM (coreboot); shut down powers the console off (tested on
+the hekate chain).
+
+## Parameters
+
+`HKLM\SYSTEM\CurrentControlSet\Services\switchpwrbtn\Parameters`, read at start and every 10 s.
+
+| Value | Meaning |
 |---|---|
-| `HoldSasMs` (DWORD) = 0 / absent | off: every press/release is reported at once as System Power Down |
-| `HoldSasMs` = 1000..6000 | a press shorter than this is reported on **release**; a press held this long sends **Ctrl+Alt+Del** (keyboard collection) and no power action for that press |
+| `ResetEnable` | 1 (default): the driver restarts and powers off. 0: leave it to Windows (hangs, as before) |
+| `RestartMethod` | 0 auto (payload loaded: R2P; else PSCI), 1 PMC only, 2 PSCI `SYSTEM_RESET`, 3 plain PMC reset, 4 backlight off only (test) |
+| `PowerOffMethod` | 0 PMIC (default), 1 backlight off only (test), 2 leave it to Windows |
+| `FastStartup` | 0 (default) keep Windows fast startup off (since 1.0.4.0), 1 leave it alone. With fast startup on, Shut down is a hybrid hibernate: the console does not power off and comes back to the logon screen |
+| `PayloadPath` | REG_SZ, NT path of the payload |
+| `RebootToId` | REG_SZ, 1–7 printable ASCII characters, no spaces (1.0.3.0). After a restart hekate autoboots the `hekate_ipl.ini` entry whose `id=` key matches. Empty (default): the hekate menu |
+| `RebootToIndex` | DWORD (1.0.3.0), used when `RebootToId` is empty: autoboot entry N of `hekate_ipl.ini` (the first entry after `[config]` is 1). 0: the menu |
 
-Set it, then disable/enable the device (or reboot):
+The restart target is passed as hekate's boot configuration (`boot_cfg_t`, hekate `bdk/utils/types.h`):
+`boot_cfg` = 0x05 (AUTOBOOT_EN | FROM_ID) with `id[8]`, or `boot_cfg` = 0x01 with `autoboot` = N. It is
+written to the payload at +0x94 for R2P from Windows, or handed to switchroot's bl31 with SiP
+0xC2FFFE04 (R2P_SET_CFG) before PSCI. Holding VOL- while hekate starts still opens its menu.
+
+The driver writes its state to the same key (`DriverVersion`, `Hidrev`, `Erista`, `Mapped`,
+`PayloadStatus`, `PayloadSize`, `PayloadWord0`, …); `kits/Switch-PowerButton/Status.cmd` shows them.
+
+## Build
+
+```powershell
+.\tools\Build-Driver.ps1 -Name switchpwrbtn -Sources drivers\SwitchPowerButton\src\switchpwrbtn.c `
+  -Inf drivers\SwitchPowerButton\switchpwrbtn.inf -OutDir build\SwitchPowerButton -Libs vhfkm.lib,libcntpr.lib `
+  -ExtraIncludes '$Kits\Include\10.0.19041.0\km\spb\1.0','$Kits\Include\10.0.26100.0\shared'
+```
+
+`release\Make-Release.ps1` builds it as part of a release.
+
+## W4T addition: hold action (HoldSasMs)
+
+Not in upstream. Registry DWORD `Services\switchpwrbtn\Parameters\HoldSasMs` (0 / absent = off; otherwise 1000..6000).
+
+- A press shorter than this is reported on **release** as a normal System Power Down.
+- A press held this long sends **Ctrl+Alt+Del** from a keyboard collection (Windows shows its security screen with the power menu) and no power action for that press.
+- The keyboard collection is only created when `HoldSasMs` is non-zero. With 0 the behaviour is the same as upstream.
+- Upper limit 6000 ms: Windows starts its forced shutdown at a 7 s hold.
+- Edge logic: `src/hold_sas.h` (host test: `tests/test_hold_sas.c`).
 
     reg add HKLM\SYSTEM\CurrentControlSet\Services\switchpwrbtn\Parameters /v HoldSasMs /t REG_DWORD /d 4000 /f
 
-Notes
-- The keyboard collection exists only when `HoldSasMs` is non-zero. Windows may treat a hardware
-  keyboard as present and stop auto-showing the touch keyboard; that is the reason it is opt-in.
-- The power action moves from press to release in that mode, so it is slightly later.
-- The MAX77620 still powers off by itself on a long hold (after several seconds), as before.
-- The edge logic is in `src/hold_sas.h`; `tests/test_hold_sas.c` runs on any host (`tools/run_host_tests.sh`).
-- **Not built with the WDK and not run on a console.** Only the host test and a stubbed syntax check were done.
-- Lite (t214) has its own 1.0.0.5 driver (wake/IRQ state machine); this change is not applied there.
+## W4T addition: sleep (SelfManagedIoSuspend / Restart)
 
-## Why the upper limit is 6000 ms
-Microsoft documents that Windows recognises a power-button hold at about 7 s and starts a forced
-shutdown, with firmware cutting power at about 10 s. Values above 6000 are clamped so the Ctrl+Alt+Del
-happens before that. In hold mode Windows only sees the power press on release, so for a long hold it
-does not see the press at all; the PMIC's own hardware power-off after a long hold still applies.
-
-## Cross-checks done (2026-11-16)
-- MAX77620 `ONOFFIRQ` 0x0B, `ONOFFSTAT` 0x15: match the mainline Linux `max77620.h` and winx's `Max77620.h`.
-- Bit layout (ONOFFSTAT.EN0 = 0x04, ONOFFIRQ EN0_F = 0x04 / EN0_R = 0x08) could **not** be confirmed from any public
-  source reachable here (Linux/NetBSD headers omit it; hekate's header was not reachable). It rests on the
-  existing winx 1.0.0.1 driver, swhid (`1<<2`) and the Stage 3 self-test, which are field-tested.
-- HID: Power Down is Generic Desktop 0x81 (System Control collection 0x80) per Microsoft; Windows on tablets maps
-  Power+Volume-Down to Ctrl+Alt+Del natively (Win10+), so `HoldSasMs` is only needed where that chord is unavailable.
+On system sleep the polling timer is stopped. On resume the hold logic is re-seeded from the current button level and the PMIC's latched ONOFFIRQ is dropped, so **the press that woke the console is not reported as a new press**. Shutdown and restart are still handled by upstream's `EvtDeviceD0Exit`.
