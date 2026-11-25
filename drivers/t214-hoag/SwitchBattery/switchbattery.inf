@@ -8,7 +8,7 @@ Class       = Battery
 ClassGuid   = {72631e54-78a4-11d0-bcf7-00aa00b7b32a}
 Provider    = %Mfg%
 CatalogFile = switchbattery.cat
-DriverVer   = 11/08/2026,1.0.0.11
+DriverVer   = 11/15/2026,1.0.0.14
 PnpLockdown = 1
 
 [DestinationDirs]
@@ -44,6 +44,17 @@ HKR,,PdBoard,0x00010001,0
 
 [Lite_Policy]
 HKR,,PdBoard,0x00010001,1
+
+; \\.\SwitchBattery: SYSTEM and Administrators full, the logged-on
+; (interactive) user read/write so SwitchPowerTray can query/set ChargeLimit.
+[SwBat_Inst.NT.HW]
+AddReg = SwBat_HW_AddReg
+
+[LiteBat_Inst.NT.HW]
+AddReg = SwBat_HW_AddReg
+
+[SwBat_HW_AddReg]
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)"
 
 [LiteBat_Inst.NT.Services]
 AddService = switchbattery, 0x00000002, SwBat_Service

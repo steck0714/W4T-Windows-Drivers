@@ -1,3 +1,13 @@
+SwitchGpu 0.9.0 retains these notices for the resident initialization and
+submission paths. Version numbers below identify when the referenced code
+or register definitions entered the driver. The standalone power, topology,
+physical DMA and firmware experiment entry points were removed.
+
+0.11.0 F2/F3 extends the existing GM20B small-page and Tegra SMMU table
+encodings to borrowed MDL pages. The multi-line CE launch and pitch fields use
+NVIDIA open-gpu-doc clb0b5.h (see the F1 reference below). No additional
+third-party implementation code was incorporated.
+
 The 4K small-page PDE encoding in switchgpu.c is adapted from
 Linux nouveau v6.12, nvkm/subdev/mmu/vmmgf100.c, gf100_vmm_pgd_pde.
 https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/nouveau/nvkm/subdev/mmu/vmmgf100.c
@@ -459,3 +469,64 @@ MIT Mesa Nouveau source src/nouveau/vulkan/nvk_cmd_clear.c, functions
 emit_clear_rects() and nvk_CmdClearAttachments(). These definitions and
 method values are used as data; no third-party source code was copied or
 adapted. Original MIT notices remain with the referenced files.
+
+0.7.0 E3 interrupt source selection and acknowledgement flow were cross-checked
+against MIT nvgpu L4T 1ae0167d functions gk20a_intr_isr_stall(),
+gk20a_intr_isr_nonstall(), gk20a_intr_thread_nonstall(),
+gk20a_fifo_nonstall_isr(), and gr_gk20a_handle_nonstall(), plus the MIT
+GM20B register headers hw_mc_gm20b.h, hw_fifo_gm20b.h, and hw_gr_gm20b.h.
+The NON_STALL_INT method definition was checked against NVIDIA open-gpu-doc
+dev_pbdma.ref and class B06F method definitions. Register and method values
+are used as data; no third-party source code was copied or adapted.
+
+0.10.0 F1 copy-engine references (hardware facts and method values only):
+- Linux Nouveau nvkm/engine/device/base.c (GM20B registers CE instance 2),
+  nvkm/engine/ce/gm200.c (MAXWELL_DMA_COPY_A), ce/gk104.c (CE interrupt mask,
+  status and launch error), and nvkm/engine/fifo/gk104.c (TOP runlist routing).
+  Nouveau CE sources: Copyright 2012/2015 Red Hat Inc., MIT.
+  https://github.com/torvalds/linux/tree/v6.12/drivers/gpu/drm/nouveau/nvkm/engine
+- NVIDIA nvgpu gk20a/fifo_gk20a.h (GR copy engine identification) and
+  hw_ce2_gm20b.h (CE2 interrupt status), consulted for facts only.
+  https://android.googlesource.com/kernel/tegra/+/android-tegra-3.10/drivers/gpu/nvgpu/gk20a/fifo_gk20a.h
+- devkitPro/deko3d source/dk_queue.cpp and source/maxwell/gpu_base.cpp
+  (Copy and 3D on the Switch GPU channel), source/maxwell/helpers.h
+  (subchannel 4 and class-only non-incrementing SET_OBJECT), engine_copy.def
+  and gpu_transfer.cpp (linear copy flags and byte length).
+  https://github.com/devkitPro/deko3d/tree/master/source/maxwell
+- NVIDIA open-gpu-doc clb0b5.h and clb06f.h (CE launch/fence and host
+  acquire/release/nonstall methods), Copyright (c) 2019/2020 NVIDIA
+  Corporation, MIT.
+  https://github.com/NVIDIA/open-gpu-doc/blob/master/classes/dma-copy/clb0b5.h
+  https://github.com/NVIDIA/open-gpu-doc/blob/master/classes/host/clb06f.h
+
+0.11.1 F2b read-only clock references (hardware facts only):
+- Nouveau nvkm/subdev/clk/gk20a.c and gk20a.h (gk20a_pllg_calc_rate,
+  gk20a_clk_ctor, output divider encodings), gm20b.c (gm20b_clk_init,
+  pl_to_div and gm20b_pstates). MIT; NVIDIA Corporation, 2014/2016.
+  https://github.com/torvalds/linux/tree/v6.12/drivers/gpu/drm/nouveau/nvkm/subdev/clk
+- NVIDIA nvgpu L4T hw_trim_gm20b.h (PLL, DVFS, mux, slowdown and
+  TRIM counter fields), clk_gm20b.c gm20b_clk_get_gpcclk_clock_counter
+  (reference window and count semantics). NVIDIA open-gpu-doc B06F (GPFIFO length).
+- Linux tegra210.dtsi and Tegra CAR clk-tegra210.c / clk-tegra-fixed.c
+  (GPU ref and CAR oscillator/reference divider facts); CTCaer Hekate
+  bdk/soc/hw_init.c (Switch crystal fact). No GPL source was copied.
+
+0.12.0 F2c legacy GPCPLL references (register and clock/voltage data):
+- Nouveau nvkm/subdev/clk/gk20a.c and gk20a.h (gk20a_clk_setup_slide,
+  gk20a_pllg_enable, gk20a_pllg_slide, gk20a_pllg_program_mnp_slide,
+  gk20a_clk_fini), and clk/gm20b.c (gm20b_pllg_params, pl_to_div).
+- Nouveau nvkm/subdev/volt/gm20b.c (non-NA gm20b_cvb_coef and speedo
+  ID 0 voltage floor); volt/gk20a.c (CVB evaluation and rounding).
+  NVIDIA Corporation, 2014/2016, MIT.
+  https://codebrowser.dev/linux/linux/drivers/gpu/drm/nouveau/nvkm/subdev/clk/
+  https://codebrowser.dev/linux/linux/drivers/gpu/drm/nouveau/nvkm/subdev/volt/
+- nvgpu hw_trim_gm20b.h and clk_gm20b.c (legacy SYNC_MODE and TRIM
+  reference window); Tegra210 fuse-tegra30.c and speedo-tegra210.c
+  (read-only shadow address and silicon revision conversions).
+  GPL sources were used for hardware facts only.
+
+SwitchDisplay 1.8.0 F4: the DC flip reuses SwitchDisplay's own
+TvWriteWindow sequence. Tegra DRM dc.h (READ_MUX, ACT_REQ, WIN_A error
+bits) and dc.c (tegra_dc_finish_page_flip, active address readback) were
+consulted for hardware facts only. No third-party code was copied.
+https://github.com/torvalds/linux/tree/v6.12/drivers/gpu/drm/tegra

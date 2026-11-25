@@ -90,6 +90,7 @@ typedef struct _TEGRA_I2C_DEVICE {
     PKEVENT SdGate;
     HANDLE SdGateHandle;
     ULONG PhysLow;              /* low 32 bits of the MMIO base, for logging */
+    ULONG Hidrev;               /* Used only for the optional I2C5 CPU regulator probe. */
     volatile LONG Errors, Nacks, Timeouts, LastError, LastAddress;
 } TEGRA_I2C_DEVICE, *PTEGRA_I2C_DEVICE;
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(TEGRA_I2C_DEVICE, TegraI2cGetDevice)
@@ -141,6 +142,18 @@ static VOID TegraI2cTraceErrors(PTEGRA_I2C_DEVICE Dev)
 
 /* -------------------------------------------------------------- hardware */
 
+static ULONG TegraI2cReadHidrev(VOID)
+{
+    PHYSICAL_ADDRESS address;
+    address.QuadPart = 0x70000804; /* APB_MISC_GP_HIDREV on both Tegra210 revisions */
+    PULONG reg = (PULONG)MmMapIoSpaceEx(address, sizeof(ULONG), PAGE_READONLY | PAGE_NOCACHE);
+    if (reg == NULL) return 0;
+    ULONG value = READ_REGISTER_ULONG(reg);
+    MmUnmapIoSpace(reg, sizeof(ULONG));
+    return value;
+}
+
+
 static ULONG RdReg(PTEGRA_I2C_DEVICE Dev, ULONG Off)
 {
     return READ_REGISTER_ULONG((PULONG)(Dev->Base + Off));
@@ -160,20 +173,20 @@ static BOOLEAN TegraI2cWaitClear(PTEGRA_I2C_DEVICE Dev, ULONG Off, ULONG Mask, U
         }
         KeStallExecutionProcessor(5);
     }
-    return FALSE;
+    return (RdReg(Dev, Off) & Mask) == 0;
 }
 
-static VOID TegraI2cLoadConfig(PTEGRA_I2C_DEVICE Dev)
+static BOOLEAN TegraI2cLoadConfig(PTEGRA_I2C_DEVICE Dev)
 {
     WrReg(Dev, I2C_CONFIG_LOAD, CONFIG_LOAD_ALL);
-    (VOID)TegraI2cWaitClear(Dev, I2C_CONFIG_LOAD, 1, 10000);
+    return TegraI2cWaitClear(Dev, I2C_CONFIG_LOAD, 1, 10000);
 }
 
-static VOID TegraI2cResetFifos(PTEGRA_I2C_DEVICE Dev)
+static BOOLEAN TegraI2cResetFifos(PTEGRA_I2C_DEVICE Dev)
 {
     WrReg(Dev, I2C_INT_STATUS, 0xFFFFFFFF);
     WrReg(Dev, I2C_FIFO_CONTROL, RdReg(Dev, I2C_FIFO_CONTROL) | FIFO_FLUSH_TX_RX);
-    (VOID)TegraI2cWaitClear(Dev, I2C_FIFO_CONTROL, FIFO_FLUSH_TX_RX, 10000);
+    return TegraI2cWaitClear(Dev, I2C_FIFO_CONTROL, FIFO_FLUSH_TX_RX, 10000);
 }
 
 /* After an arbitration loss or timeout: 9 clock pulses to free a stuck slave. */
@@ -181,12 +194,13 @@ static VOID TegraI2cBusClear(PTEGRA_I2C_DEVICE Dev)
 {
     ULONG Waited;
     WrReg(Dev, I2C_BUS_CLEAR_CONFIG, (9u << 16) | (1u << 2) | 1u);  /* threshold 9, STOP, enable */
-    TegraI2cLoadConfig(Dev);
-    for (Waited = 0; Waited < 10000; Waited += 5) {
-        if ((RdReg(Dev, I2C_INT_STATUS) & INT_BUS_CLEAR_DONE) != 0) {
-            break;
+    if (TegraI2cLoadConfig(Dev)) {
+        for (Waited = 0; Waited < 10000; Waited += 5) {
+            if ((RdReg(Dev, I2C_INT_STATUS) & INT_BUS_CLEAR_DONE) != 0) {
+                break;
+            }
+            KeStallExecutionProcessor(5);
         }
-        KeStallExecutionProcessor(5);
     }
     WrReg(Dev, I2C_INT_STATUS, 0xFFFFFFFF);
 }
@@ -200,7 +214,9 @@ static NTSTATUS TegraI2cTransfer(PTEGRA_I2C_DEVICE Dev, USHORT Address, BOOLEAN 
     if (Length == 0 || Length > I2C_MAX_TRANSFER) {
         return STATUS_INVALID_PARAMETER;
     }
-    TegraI2cResetFifos(Dev);
+    if (!TegraI2cResetFifos(Dev)) {
+        goto RecoverBusTimeout;
+    }
 
     WrReg(Dev, I2C_TX_FIFO, HDR0_I2C_PACKET1);
     WrReg(Dev, I2C_TX_FIFO, Length - 1);
@@ -270,9 +286,10 @@ Error:
     return STATUS_IO_DEVICE_ERROR;
 
 Timeout:
+    TegraI2cResetFifos(Dev);
+RecoverBusTimeout:
     InterlockedIncrement(&Dev->Timeouts);
     InterlockedExchange(&Dev->LastAddress, Address);
-    TegraI2cResetFifos(Dev);
     TegraI2cBusClear(Dev);
     TegraI2cTraceErrors(Dev);
     return STATUS_IO_TIMEOUT;
@@ -302,21 +319,6 @@ static NTSTATUS TegraI2cMdlCopy(PMDL Mdl, PUCHAR Flat, SIZE_T Length, BOOLEAN To
     return (Offset == Length) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL;
 }
 
-/* Microsoft: KeStallExecutionProcessor should not stall longer than ~50 us. Short delays still stall; longer ones
- * wait (below DISPATCH_LEVEL) so a 1 ms request does not hold a CPU, and are capped at 1 ms at DISPATCH_LEVEL. */
-static VOID TegraI2cDelayUs(ULONG Us)
-{
-    if (Us <= 50) {
-        KeStallExecutionProcessor(Us);
-    } else if (KeGetCurrentIrql() < DISPATCH_LEVEL) {
-        LARGE_INTEGER Interval;
-        Interval.QuadPart = -(LONGLONG)Us * 10;
-        (VOID)KeDelayExecutionThread(KernelMode, FALSE, &Interval);
-    } else {
-        KeStallExecutionProcessor(Us > 1000 ? 1000 : Us);
-    }
-}
-
 /* Run SPB transfers [0, Count) of Request; repeated start between them. */
 static VOID TegraI2cRunRequest(WDFDEVICE Controller, SPBTARGET Target, SPBREQUEST Request, ULONG Count)
 {
@@ -344,7 +346,7 @@ static VOID TegraI2cRunRequest(WDFDEVICE Controller, SPBTARGET Target, SPBREQUES
             break;
         }
         if (Desc.DelayInUs != 0) {
-            TegraI2cDelayUs(Desc.DelayInUs > 1000 ? 1000 : Desc.DelayInUs);
+            KeStallExecutionProcessor(Desc.DelayInUs > 1000 ? 1000 : Desc.DelayInUs);
         }
         Bounce = (PUCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, Desc.TransferLength, 'c2iT');
         if (Bounce == NULL) {
@@ -463,6 +465,10 @@ NTSTATUS TegraI2cEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST Raw, WDFCMRES
     if (Dev->PhysLow == 0x7000d000 && Dev->SdGate == NULL) {
         Dev->SdGate = TegraI2c5OpenGate(&Dev->SdGateHandle);
         if (Dev->SdGate == NULL) return STATUS_INSUFFICIENT_RESOURCES;
+        Dev->Hidrev = TegraI2cReadHidrev();
+        TegraI2cTrace(Dev, L"Hidrev", Dev->Hidrev);
+        /* Publish the current counters before this device's first I2C5 probe. */
+        TegraI2cTraceErrors(Dev);
     }
     NTSTATUS GateStatus = TegraI2c5Acquire(Dev->SdGate);
     if (!NT_SUCCESS(GateStatus)) return GateStatus;
@@ -473,12 +479,13 @@ NTSTATUS TegraI2cEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST Raw, WDFCMRES
     /* Packet mode, interrupts masked (version 1 polls). */
     WrReg(Dev, I2C_INT_MASK, 0);
     WrReg(Dev, I2C_CNFG, RdReg(Dev, I2C_CNFG) | CNFG_PACKET_MODE);
-    TegraI2cLoadConfig(Dev);
-    TegraI2cResetFifos(Dev);
+    if (!TegraI2cLoadConfig(Dev) || !TegraI2cResetFifos(Dev)) {
+        GateStatus = STATUS_IO_TIMEOUT;
+    }
     TegraI2cTrace(Dev, L"CnfgAfter", RdReg(Dev, I2C_CNFG));
     TegraI2c5Release(Dev->SdGate);
 
-    return STATUS_SUCCESS;
+    return GateStatus;
 }
 
 NTSTATUS TegraI2cEvtReleaseHardware(WDFDEVICE Device, WDFCMRESLIST Translated)
@@ -519,7 +526,12 @@ NTSTATUS TegraI2cEvtD0Entry(WDFDEVICE Device, WDF_POWER_DEVICE_STATE PreviousSta
         TegraI2cSelfTest(Dev, 0x6B, 0x0A, L"SelfTest_BQ24193_Rev");     /* expect 0x2F */
     } else if (Dev->PhysLow == 0x7000D000) {
         TegraI2cSelfTest(Dev, 0x3C, 0x15, L"SelfTest_MAX77620_OnOffStat");
-        TegraI2cSelfTest(Dev, 0x1B, 0x00, L"SelfTest_MAX77621_Vout");   /* CPU rail, expect 0xC3 after R365 */
+        /* The original Tegra210 uses MAX77621. Tegra210B01 uses MAX77812. */
+        if ((Dev->Hidrev & 0xFFF0u) == 0x2110u) {
+            TegraI2cSelfTest(Dev, 0x1B, 0x00, L"SelfTest_MAX77621_Vout");
+        } else {
+            TegraI2cTrace(Dev, L"SelfTest_MAX77621_Vout", (ULONG)STATUS_NOT_SUPPORTED);
+        }
     }
     TegraI2c5Release(Dev->SdGate);
     TegraI2cTrace(Dev, L"D0EntryDone", 1);
@@ -576,7 +588,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
         RtlCopyMemory(&TegraI2cParamsPath[RegistryPath->Length / sizeof(WCHAR)], L"\\Parameters", sizeof(L"\\Parameters"));
         (VOID)RtlCreateRegistryKey(RTL_REGISTRY_ABSOLUTE, TegraI2cParamsPath);
     }
-    TegraI2cTrace(NULL, L"DriverVersion", 5);
+    TegraI2cTrace(NULL, L"DriverVersion", 7);
 
     WDF_DRIVER_CONFIG_INIT(&Config, TegraI2cEvtDeviceAdd);
     return WdfDriverCreate(DriverObject, RegistryPath, WDF_NO_OBJECT_ATTRIBUTES, &Config, WDF_NO_HANDLE);
