@@ -22,6 +22,7 @@ RUNTIME_OK = {
     "SWOA0F01": "GPU: published only with -D SWITCH_LITE_GPU (macro T214_GPU_ACPI_ID)",
     "SWOA0F02": "Erista GPU: published only with -D SWITCH_ERISTA_GPU (acpi/t210)",
     "SWOA0902": "Lite SIO: Lite-only build flag",
+    "SWOA0E01": "Erista display (switchdisplay): the DISP node comes from UEFI R408+ (winx), not from this repo's DSDT copy",
 }
 
 def dsdt_ids(text):

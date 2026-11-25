@@ -1,3 +1,12 @@
+/* W4T-CREDIT-BEGIN
+ * Origin : hayato41200/Windows-for-Switch-Drivers, Erista (t210/Icosa) driver set, which matched an older
+ *          ruje0504-2/Windows-for-Switch-Drivers commit (docs/HAYATO-DRIVER-AUDIT-ja.md); later edits are in CREDITS.md.
+ * Authors: hayato41200, ruje0504-2 (and their contributors). The upstream file has no author or
+ *          copyright line, so per-file authorship is not recorded here.
+ * License: GPL-2.0, from the LICENSE of this directory (the file has no SPDX tag of its own).
+ * Refs   : see CREDITS.md (per-source table).
+ * Credit block added by W4T (2026-11-25); full table in CREDITS.md.
+ * W4T-CREDIT-END */
 /*
  * switchdisplay.sys - WDDM display-only (KMDOD) driver for the Nintendo Switch
  * (Tegra210) built-in 720x1280 DSI panel.
