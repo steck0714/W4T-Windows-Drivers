@@ -2,8 +2,11 @@
 #![forbid(unsafe_code)]
 //! fwfetch - collect, from YOUR OWN Switch SD card, the files this project may not redistribute
 //! (NVIDIA / Broadcom / Switchroot builds). Read-only on every source; stages outside any git work tree.
+mod archive;
+mod download;
 mod ext4;
 mod ihex;
+mod image;
 mod initramfs;
 mod manifest;
 mod part;
@@ -16,13 +19,21 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 const HELP: &str = "\
-fwfetch 1.1 - read firmware you may not redistribute from files YOU downloaded or own (read-only), verify, stage. Switchroot need NOT be installed on the Switch.
+fwfetch 1.2 - read firmware you may not redistribute from YOUR OWN files (SD card, downloads; read-only), verify, stage.
+(No SD card with an installed Switchroot is needed: see --image and --archive.)
 
 USAGE: fwfetch [OPTIONS]
   --profile <aula|lite|erista|all>   what to collect (default: aula)
-  --search-root <DIR>                folder to search (the downloaded Switchroot files: bl31.bin + switchroot/install/l4t.00, l4t.01, ... which are read
-                                     as ONE ext4 image, read-only; or a rootfs copy, kernel tree); repeatable
+  --search-root <DIR>                folder to search (FAT32 'switchroot' parent, rootfs copy, kernel tree); repeatable
   --disk <FILE|\\\\.\\PhysicalDriveN>    raw disk / partition image to scan for an ext4 volume (read-only); repeatable
+  --image <FILE>                     same as --disk, meant for files. A numbered piece (l4t.00) is joined with l4t.01, l4t.02, ... so the
+                                     downloaded Switchroot root-file-system image is read directly - nothing has to be flashed to an SD card
+  --archive <FILE>                   a .deb, a tar, or a tar.gz / .tbz2 / .tar.xz to read the files from (read-only); repeatable.
+                                     e.g. NVIDIA's jetson-210_linux_r32.7.6_aarch64.tbz2 (GPU + XUSB firmware). zstd is not supported
+  --download                         for files still missing after the local search: download them from the OFFICIAL sources listed in the
+                                     manifest (NVIDIA Jetson Linux package for GPU / XUSB firmware, the hekate release for sc7entry/sc7exit)
+                                     with the system's curl, streamed and never saved whole. Meant for the Switch itself at Windows start-up.
+                                     Wi-Fi / Bluetooth firmware and bl31.bin have no such source (Wi-Fi also needs that firmware to get online)
   --auto                             Windows: also every ready drive letter, every volume WITHOUT a drive letter (the Switch's FAT32
                                      'switchroot' partition often has none), and (administrator) every physical disk
   --out-dir <DIR>                    staging directory (default %LOCALAPPDATA%\\W4T\\fw-cache). Refused inside a git work tree
@@ -45,6 +56,8 @@ fn parse() -> Result<Option<run::Opts>, String> {
         out_dir: None,
         search_roots: vec![],
         disks: vec![],
+        archives: vec![],
+        download: false,
         auto: false,
         deploy: None,
         deploy_gpu: None,
@@ -79,6 +92,9 @@ fn parse() -> Result<Option<run::Opts>, String> {
             "--out-dir" => o.out_dir = Some(winvol::resolve_dir(&val("--out-dir")?, None)?),
             "--search-root" => o.search_roots.push(PathBuf::from(val("--search-root")?)),
             "--disk" => o.disks.push(PathBuf::from(val("--disk")?)),
+            "--image" => o.disks.push(PathBuf::from(val("--image")?)),
+            "--download" => o.download = true,
+            "--archive" => o.archives.push(PathBuf::from(val("--archive")?)),
             "--deploy" => o.deploy = Some(winvol::resolve_dir(&val("--deploy")?, None)?),
             "--deploy-gpu" => o.deploy_gpu = Some(winvol::resolve_dir(&val("--deploy-gpu")?, Some("TegraGpu"))?),
             "--deploy-drivers" => o.deploy_drivers = Some(winvol::resolve_dir(&val("--deploy-drivers")?, Some(""))?),

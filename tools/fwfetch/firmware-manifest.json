@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "about": "Files this project must NOT redistribute. They are taken from files the user owns or downloaded (Switchroot files read as-is; Switchroot is NOT installed on the Switch) and staged outside the repository. 'sha256' / 'size' are only filled in where a published value exists (windows-switch v0.8.0 ADD_THESE_FILES.txt / PUT_*_HERE.txt); everything else is trust-on-first-use and is marked unverified in the report. 'layout' says how sure we are about WHERE the file sits: documented = named by an upstream document, guess = a plausible path that has not been checked on a real image (the hash check rejects wrong guesses where a hash exists).",
+ "about": "Files this project must NOT redistribute. They are taken from the user's own device/SD card (Switchroot install) and staged outside the repository. 'sha256' / 'size' are only filled in where a published value exists (windows-switch v0.8.0 ADD_THESE_FILES.txt / PUT_*_HERE.txt); everything else is trust-on-first-use and is marked unverified in the report. A source may carry its own sha256: it is then taken only when the bytes match (used for gpu_nv_acr_ucode_prod, whose Windows name differs from the L4T name acr_ucode.bin: the alias is accepted only for the exact bytes that mesa-switch-woa docs/DRIVER.md documents under that Windows name). ext4 sources are looked up in every root-file-system-like volume: ext4 partitions, joined image pieces such as l4t.00/l4t.01, and --archive files (.deb, tar, tbz2). 'layout' says how sure we are about WHERE the file sits: documented = named by an upstream document, guess = a plausible path that has not been checked on a real image (the hash check rejects wrong guesses where a hash exists).",
  "profiles": {
   "aula": [
    "bl31",
@@ -227,7 +227,25 @@
   },
   {
    "id": "gpu_nv_acr_ucode_prod",
-   "gpu": "nv_acr_ucode_prod.bin"
+   "gpu": "nv_acr_ucode_prod.bin",
+   "sources": [
+    {
+     "type": "ext4",
+     "paths": [
+      "lib/firmware/gm20b/acr_ucode.bin",
+      "lib/firmware/tegra21x/acr_ucode.bin"
+     ],
+     "sha256": "f948c259ca1c9fc8aad3013fe67372243be025b2790016f0ad9e60f7f4534841"
+    },
+    {
+     "type": "fs",
+     "paths": [
+      "lib/firmware/gm20b/acr_ucode.bin",
+      "lib/firmware/tegra21x/acr_ucode.bin"
+     ],
+     "sha256": "f948c259ca1c9fc8aad3013fe67372243be025b2790016f0ad9e60f7f4534841"
+    }
+   ]
   },
   {
    "id": "gpu_pmu_bl",
@@ -319,6 +337,40 @@
       "bootloader/sys/l4t/sc7exit.bin"
      ]
     }
+   ]
+  }
+ ],
+ "downloads": [
+  {
+   "id": "nvidia_l4t_bsp",
+   "what": "NVIDIA Jetson Linux (L4T) 32.7.6 driver package for Tegra X1 - official NVIDIA download, read while it arrives, never saved whole (no published checksum: files are checked against the manifest hashes where there are any)",
+   "type": "url",
+   "url": "https://developer.nvidia.com/downloads/embedded/l4t/r32_release_v7.6/t210/jetson-210_linux_r32.7.6_aarch64.tbz2",
+   "provides": [
+    "gpu_NETB_img",
+    "gpu_fecs",
+    "gpu_gpccs",
+    "gpu_nv_acr_ucode_prod",
+    "gpu_pmu_bl",
+    "gpu_gpmu_ucode_image",
+    "gpu_gpmu_ucode_desc",
+    "gpu_pmu_sig",
+    "gpu_fecs_sig",
+    "xusb_t210",
+    "xusb_t210b01"
+   ]
+  },
+  {
+   "id": "hekate_release",
+   "what": "hekate release package (CTCaer, GitHub): contains bootloader/sys/l4t/sc7entry.bin and sc7exit.bin",
+   "type": "github_latest",
+   "api": "https://api.github.com/repos/CTCaer/hekate/releases/latest",
+   "asset_prefix": "hekate_ctcaer_",
+   "asset_suffix": ".zip",
+   "download_prefix": "https://github.com/CTCaer/hekate/releases/download/",
+   "provides": [
+    "sc7entry",
+    "sc7exit"
    ]
   }
  ],

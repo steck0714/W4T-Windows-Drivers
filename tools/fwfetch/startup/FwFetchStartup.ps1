@@ -15,7 +15,13 @@
 
   fwfetch exit code 0 = everything found, 2 = something missing (tried again at the next start: the card may not be
   readable yet, or the file is not on it), 1 = error. This script exits 0 only when the final check is clean.
-  Never writes to the SD card. Never uses the network.
+  Never writes to the SD card.
+
+  Network (default; -NoDownload turns it off): files that are STILL missing after the local search are fetched ON THIS DEVICE, at
+  start-up, from the official sources in the manifest (NVIDIA's Jetson Linux package for the GPU / XUSB firmware, the hekate
+  release for sc7entry/sc7exit) with curl.exe - streamed, never stored whole. Needs internet at that moment; a failed attempt is
+  simply repeated at a later start, but at most every -DownloadIntervalHours hours (the NVIDIA package is about 1 GB). Wi-Fi / Bluetooth
+  firmware and bl31.bin have no such source, and Wi-Fi cannot fetch its own firmware: use USB-LAN / USB tethering the first time.
 
   Drive letters: nothing here assumes Windows is on C:. -GpuDir / -DriverDir take 'auto' (= this Windows' System32\drivers), a path
   with %SystemRoot% / {SystemRoot}, or a plain path; a path saved by an older install whose '<letter>:\...\System32\drivers' letter is no
@@ -27,9 +33,9 @@ param(
   [string]$CacheDir = (Join-Path $env:ProgramData 'W4T\fw-cache'),
   [string]$GpuDir = '',            # 'auto' = <SystemRoot>\System32\drivers\TegraGpu of THIS Windows (erista / lite). Windows on a Switch is rarely on C: (it lives on the SD card), so do not type a drive letter
   [string]$DriverDir = '',         # 'auto' = <SystemRoot>\System32\drivers of THIS Windows: Wi-Fi / Bluetooth firmware is put into <DriverDir>\SwitchWOA and \switchwifi (needs fwfetch --deploy-drivers)
-  [string[]]$SearchRoot = @(),     # extra folders fwfetch searches, e.g. the downloaded Switchroot folder (bl31.bin + switchroot\install\l4t.00, l4t.01 ...) kept on this Switch's Windows disk. NO Switchroot install needed
-  [string[]]$Disk = @(),           # extra raw disk / image files to read as ext4 (read-only)
-  [switch]$Force                   # ignore the done marker and always run fwfetch
+  [switch]$Force,                  # ignore the done marker and always run fwfetch
+  [switch]$NoDownload,             # never download (SD card / local files only)
+  [int]$DownloadIntervalHours = 6  # a failed download is not repeated sooner than this
 )
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -147,8 +153,13 @@ $code = 0
 if ($needFetch) {
   if (Test-Path $marker) { Remove-Item $marker -Force }
   $a = @('--profile', $Profile, '--auto', '--out-dir', $CacheDir)
-  foreach ($r in $SearchRoot) { if (Test-Path -LiteralPath $r) { $a += @('--search-root', $r) } else { Log "search root not found (skipped): $r" } }
-  foreach ($dk in $Disk) { if (Test-Path -LiteralPath $dk) { $a += @('--disk', $dk) } else { Log "disk image not found (skipped): $dk" } }
+  $stamp = Join-Path $CacheDir 'download.stamp'
+  $dlOk = -not $NoDownload
+  if ($dlOk -and -not $Force -and (Test-Path $stamp)) {
+    $age = (New-TimeSpan -Start (Get-Item $stamp).LastWriteTime -End (Get-Date)).TotalHours
+    if ($age -ge 0 -and $age -lt $DownloadIntervalHours) { $dlOk = $false; Log ('download skipped: last attempt {0:N1} h ago' -f $age) }
+  }
+  if ($dlOk) { $a += '--download'; Set-Content -Path $stamp -Value (Get-Date -Format u) -Encoding ascii }
   if ($GpuDir) { New-Item -ItemType Directory -Force $GpuDir | Out-Null; $a += @('--deploy-gpu', $GpuDir) }
   if ($DriverDir) { New-Item -ItemType Directory -Force $DriverDir | Out-Null; $a += @('--deploy-drivers', $DriverDir) }
   Log "start: fwfetch $($a -join ' ')"

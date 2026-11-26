@@ -7,7 +7,7 @@ What this proves: the reader/extractor logic on images this script builds itself
 do not crash the binary.
 What it does NOT prove: that a real Switchroot image has these paths / this compression (see README-ja.md).
 """
-import gzip, hashlib, json, os, random, re, shutil, struct, subprocess, sys, tempfile
+import bz2, gzip, hashlib, io, json, lzma, os, random, re, shutil, struct, subprocess, sys, tarfile, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.dirname(HERE)
@@ -57,8 +57,30 @@ def ihex(data, base=0):
 
 def run(args, cwd=None, manifest=None, env=None):
     extra = ["--manifest", manifest] if manifest else []
-    p = subprocess.run([BIN] + extra + args, capture_output=True, text=True, cwd=cwd, env=env)
+    try:
+        p = subprocess.run([BIN] + extra + args, capture_output=True, text=True, cwd=cwd, env=env, timeout=300)
+    except subprocess.TimeoutExpired:
+        return 124, "TIMEOUT (hang)"
     return p.returncode, p.stdout + p.stderr
+
+# ---- archive builders (stdlib only: tar + gzip/bzip2/xz, and a hand-made ar for .deb) ----
+def tar_bytes(members, comp="", fmt=tarfile.USTAR_FORMAT):
+    bio = io.BytesIO()
+    with tarfile.open(fileobj=bio, mode="w:" + comp, format=fmt) as t:
+        for n, b in members:
+            ti = tarfile.TarInfo(n); ti.size = len(b); ti.mode = 0o644
+            t.addfile(ti, io.BytesIO(b))
+    return bio.getvalue()
+
+def ar_bytes(members):
+    out = b"!<arch>\n"
+    for n, b in members:
+        out += ("%-16s%-12d%-6d%-6d%-8s%-10d`\n" % (n + "/", 0, 0, 0, "100644", len(b))).encode() + b + (b"\n" if len(b) % 2 else b"")
+    return out
+
+def deb_bytes(files, comp):
+    return ar_bytes([("debian-binary", b"2.0\n"), ("control.tar.gz", tar_bytes([("./control", b"Package: x\n")], "gz")),
+                     ("data.tar." + comp, tar_bytes(files, comp))])
 
 def mkdisk(path, part_img, scheme):
     size = os.path.getsize(part_img)
@@ -198,22 +220,6 @@ try:
     rc, log = run(["--profile", "lite", "--search-root", sd, "--out-dir", "auto"], manifest=mp, env=envr)
     check("'auto' is not accepted for --out-dir", rc == 1 and "auto" in log, log[-300:])
 
-    # 3c. Switchroot download pieces (switchroot/install/l4t.00, .01, .02: one ext4 image cut into pieces) read back to back - NO Switchroot
-    #     installed, NO disk: the firmware inside the pieces is found. Odd piece sizes make a read straddle a piece boundary.
-    raw = open(part, "rb").read(); cuts = [9_999_991, 9_999_991 + 7_777_777]
-    pk = os.path.join(tmp, "pack"); inst = os.path.join(pk, "switchroot", "install"); os.makedirs(inst)
-    for i, (a, b) in enumerate(zip([0] + cuts, cuts + [len(raw)])): open(os.path.join(inst, "l4t.%02d" % i), "wb").write(raw[a:b])
-    out3c = os.path.join(tmp, "out3c")
-    rc, log = run(["--profile", "aula", "--search-root", sd, "--search-root", pk, "--out-dir", out3c], manifest=mp)
-    check("l4t.00/.01/.02 pieces: read as one ext4 image, aula completes", rc == 0 and "Switchroot image pieces" in log and "nothing is installed" in log, log[-900:])
-    check("l4t pieces: hcd and Wi-Fi firmware found inside the split image",
-          open(os.path.join(out3c, "agent/bt/BCM4356A3.hcd"), "rb").read() == HCD and open(os.path.join(out3c, "agent/wifi/brcmfmac4356A3-pcie.bin"), "rb").read() == BCM)
-    # gap (l4t.01 missing): the set ends at l4t.00; a truncated image must not crash anything
-    shutil.rmtree(os.path.join(tmp, "pack2"), ignore_errors=True); i2 = os.path.join(tmp, "pack2", "switchroot", "install"); os.makedirs(i2)
-    shutil.copy(os.path.join(inst, "l4t.00"), i2); shutil.copy(os.path.join(inst, "l4t.02"), i2)
-    rc, log = run(["--profile", "aula", "--search-root", os.path.join(tmp, "pack2"), "--out-dir", os.path.join(tmp, "out3d")], manifest=mp)
-    check("l4t pieces with a gap / truncated image: no crash", "panicked" not in log and rc in (0, 2), log[-600:])
-
     # 4. Intel-HEX route (kernel tree), no ext4 at all
     kt = os.path.join(tmp, "ktree/firmware/brcm"); os.makedirs(kt)
     open(os.path.join(kt, "brcmfmac4356A3-pcie.bin.ihex"), "w").write(ihex(BCM))
@@ -310,6 +316,172 @@ try:
     check("erista: sc7entry/sc7exit staged byte-identical", rd("bootloader/sys/l4t/sc7entry.bin") == SC7E and rd("bootloader/sys/l4t/sc7exit.bin") == SC7X, log[-700:])
     check("erista: T210 XUSB firmware staged", rd("tegra21x_xusb_firmware") == XU21, log[-700:])
     check("erista profile now wants bl31 too", "bl31" in log)
+
+    # ============ 12. No installed Switchroot needed: the root file system image as it is downloaded (l4t.00, l4t.01, ...) ============
+    raw = open(part, "rb").read(); cuts = [5000037, 7000003]
+    pieces = [raw[:cuts[0]], raw[cuts[0]:cuts[0] + cuts[1]], raw[cuts[0] + cuts[1]:]]   # odd sizes: reads straddle two pieces
+    spl = os.path.join(tmp, "split"); os.makedirs(spl)
+    for i, pc in enumerate(pieces): open(os.path.join(spl, "l4t.%02d" % i), "wb").write(pc)
+    out12 = os.path.join(tmp, "out12"); gdir12 = os.path.join(tmp, "gpu12")
+    rc, log = run(["--profile", "lite", "--search-root", sd, "--image", os.path.join(spl, "l4t.00"), "--out-dir", out12, "--deploy-gpu", gdir12], manifest=mp)
+    check("split image l4t.00/01/02 is joined and read (lite profile, exit 0)", rc == 0 and "+2 more piece(s)" in log, log[-900:])
+    check("GPU files read from the joined pieces are byte-identical", all(os.path.exists(os.path.join(gdir12, n)) and open(os.path.join(gdir12, n), "rb").read() == b for n, b in GPU.items()))
+    check("Wi-Fi/BT firmware read from the joined pieces", open(os.path.join(out12, "agent/bt/BCM4356A3.hcd"), "rb").read() == HCD and open(os.path.join(out12, "agent/wifi/brcmfmac4356A3-pcie.bin"), "rb").read() == BCM)
+    sdx = os.path.join(tmp, "sdx"); shutil.copytree(sd, sdx); os.makedirs(os.path.join(sdx, "switchroot", "install"))
+    for i, pc in enumerate(pieces): open(os.path.join(sdx, "switchroot", "install", "l4t.%02d" % i), "wb").write(pc)
+    out12b = os.path.join(tmp, "out12b")
+    rc, log = run(["--profile", "aula", "--search-root", sdx, "--out-dir", out12b], manifest=mp)
+    check("switchroot/install/l4t.00 is found by itself under a search root (no --image, nothing flashed)", rc == 0 and "more piece(s)" in log, log[-900:])
+    os.remove(os.path.join(spl, "l4t.01"))   # a missing piece: the image is cut short
+    rc, log = run(["--profile", "lite", "--search-root", sd, "--image", os.path.join(spl, "l4t.00"), "--out-dir", os.path.join(tmp, "out12c")], manifest=mp)
+    check("split image with a missing piece: reported, no crash", rc in (0, 1, 2) and "panicked" not in log, log[-400:])
+
+    # ============ 13. Archives that need no SD card at all: NVIDIA's driver package (nested tbz2), .deb (xz / gz), plain tar ============
+    ACR_L4T = blob(3000)                                    # stands for L4T's gm20b/acr_ucode.bin
+    gpu_l4t = {n: b for n, b in GPU.items() if n != "nv_acr_ucode_prod.bin"}
+    fw_members = [("lib/firmware/tegra21x/" + n, b) for n, b in gpu_l4t.items()] + [
+        ("lib/firmware/gm20b/acr_ucode.bin", ACR_L4T), ("lib/firmware/tegra21x_xusb_firmware", XU21), ("lib/firmware/other.bin", blob(500))]
+    inner = tar_bytes(fw_members, "bz2")                    # = nv_tegra/nvidia_drivers.tbz2
+    bsp = tar_bytes([("Linux_for_Tegra/bootloader/x.bin", blob(700)), ("Linux_for_Tegra/rootfs/big.bin", blob(3_000_000)),
+                     ("Linux_for_Tegra/nv_tegra/nvidia_drivers.tbz2", inner), ("Linux_for_Tegra/nv_tegra/other.tbz2", tar_bytes([("lib/firmware/tegra21x/fecs.bin", b"WRONG")], "bz2"))], "bz2")
+    arc = os.path.join(tmp, "arc"); os.makedirs(arc)
+    open(os.path.join(arc, "jetson-210_linux_r32.7.6_aarch64.tbz2"), "wb").write(bsp)
+    open(os.path.join(arc, "fw-xz.deb"), "wb").write(deb_bytes([("./" + n, b) for n, b in fw_members], "xz"))
+    open(os.path.join(arc, "fw-gz.deb"), "wb").write(deb_bytes([("./" + n, b) for n, b in fw_members], "gz"))
+    open(os.path.join(arc, "fw.tar"), "wb").write(tar_bytes(fw_members))
+    # roots that carry what an archive does not: hekate's sc7 files, bl31, the board file, the Wi-Fi/BT ihex (kernel tree)
+    er2 = os.path.join(tmp, "erista-root2"); os.makedirs(os.path.join(er2, "bootloader/sys/l4t")); os.makedirs(os.path.join(er2, "switchroot/ubuntu"))
+    os.makedirs(os.path.join(er2, "lib/firmware/brcm")); os.makedirs(os.path.join(er2, "firmware/brcm"))
+    open(os.path.join(er2, "bootloader/sys/l4t/sc7entry.bin"), "wb").write(SC7E); open(os.path.join(er2, "bootloader/sys/l4t/sc7exit.bin"), "wb").write(SC7X)
+    open(os.path.join(er2, "switchroot/ubuntu/bl31.bin"), "wb").write(BL31); open(os.path.join(er2, "lib/firmware/brcm/brcmfmac4356A3-pcie.txt"), "wb").write(TXT)
+    open(os.path.join(er2, "firmware/brcm/brcmfmac4356A3-pcie.bin.ihex"), "w").write(ihex(BCM)); open(os.path.join(er2, "firmware/brcm/BCM4356A3.hcd.ihex"), "w").write(ihex(HCD))
+    m2 = json.load(open(mp))     # the synthetic manifest, with the ACR alias pinned to the synthetic L4T acr_ucode.bin
+    for f in m2["files"]:
+        if f["id"] == "gpu_nv_acr_ucode_prod":
+            for src in f["sources"]: src["sha256"] = sha(ACR_L4T)
+    mp2 = os.path.join(tmp, "manifest2.json"); json.dump(m2, open(mp2, "w"), indent=1)
+    def same(root, rel, want):
+        q = os.path.join(root, *rel.split("/")); return os.path.exists(q) and open(q, "rb").read() == want
+
+    for label, name, tag in [("NVIDIA driver package (tbz2 inside tbz2)", "jetson-210_linux_r32.7.6_aarch64.tbz2", "a"), (".deb with data.tar.xz", "fw-xz.deb", "b"),
+                             (".deb with data.tar.gz", "fw-gz.deb", "c"), ("plain tar", "fw.tar", "d")]:
+        o13 = os.path.join(tmp, "out13" + tag)
+        rc, log = run(["--profile", "erista", "--search-root", er2, "--archive", os.path.join(arc, name), "--out-dir", o13], manifest=mp2)
+        check("erista profile completes from " + label, rc == 0, log[-1100:])
+        check("  " + label + ": all 8 GPU files + L4T XUSB firmware byte-identical",
+              all(same(o13, "gpu/" + n, b) for n, b in gpu_l4t.items()) and same(o13, "tegra21x_xusb_firmware", XU21), log[-600:])
+        check("  " + label + ": acr_ucode.bin staged as nv_acr_ucode_prod.bin and marked verified (documented hash)",
+              same(o13, "gpu/nv_acr_ucode_prod.bin", ACR_L4T) and json.load(open(os.path.join(o13, "fw-lock.json")))["gpu_nv_acr_ucode_prod"]["verified"] is True)
+    check("only wanted members are used: the decoy fecs.bin in a non-driver nested tbz2 is ignored", same(os.path.join(tmp, "out13a"), "gpu/fecs.bin", GPU["fecs.bin"]))
+
+    rc, log = run(["--profile", "erista", "--search-root", er2, "--archive", os.path.join(arc, "fw.tar"), "--out-dir", os.path.join(tmp, "out13e")])   # REAL manifest: documented hash differs from the synthetic ACR
+    check("acr_ucode.bin with other bytes is NOT accepted under the Windows name (real documented hash)",
+          "[MISS ] gpu_nv_acr_ucode_prod" in log and "documented SHA-256" in log and not os.path.exists(os.path.join(tmp, "out13e", "gpu", "nv_acr_ucode_prod.bin")), log[-700:])
+    o13f = os.path.join(tmp, "out13f")
+    rc, log = run(["--profile", "erista", "--search-root", er2, "--archive", os.path.join(arc, "fw.tar"), "--out-dir", o13f, "--require-known-hash"], manifest=mp2)
+    check("--require-known-hash still takes the hash-gated alias, and skips the unhashed GPU files",
+          same(o13f, "gpu/nv_acr_ucode_prod.bin", ACR_L4T) and not os.path.exists(os.path.join(o13f, "gpu", "fecs.bin")) and "no published hash" in log, log[-700:])
+    loose = os.path.join(tmp, "loose/lib/firmware/gm20b"); os.makedirs(loose); open(os.path.join(loose, "acr_ucode.bin"), "wb").write(ACR_L4T)
+    o13g = os.path.join(tmp, "out13g")
+    rc, log = run(["--profile", "lite", "--search-root", os.path.join(tmp, "loose"), "--out-dir", o13g], manifest=mp2)
+    check("the alias also works for a plain folder (fs source)", same(o13g, "gpu/nv_acr_ucode_prod.bin", ACR_L4T), log[-500:])
+
+    # name tricks: GNU long names, pax paths, the ustar prefix field - all must resolve to the same wanted path
+    deepname = "./" * 60 + "lib/firmware/tegra21x/fecs.bin"
+    for fmt, nm in [(tarfile.GNU_FORMAT, "gnu"), (tarfile.PAX_FORMAT, "pax")]:
+        tp = os.path.join(arc, "long-" + nm + ".tar"); open(tp, "wb").write(tar_bytes([(deepname, GPU["fecs.bin"])], "", fmt))
+        o13h = os.path.join(tmp, "out13h-" + nm)
+        rc, log = run(["--profile", "erista", "--archive", tp, "--out-dir", o13h], manifest=mp2)
+        check("tar member with a " + nm + " long name is found", same(o13h, "gpu/fecs.bin", GPU["fecs.bin"]), log[-400:])
+
+    # zstd and non-archives are reported, never guessed
+    open(os.path.join(arc, "z.deb"), "wb").write(ar_bytes([("debian-binary", b"2.0\n"), ("data.tar.zst", b"\x28\xb5\x2f\xfd" + b"z" * 5000)]))
+    rc, log = run(["--profile", "erista", "--archive", os.path.join(arc, "z.deb"), "--out-dir", os.path.join(tmp, "out13i")], manifest=mp2)
+    check(".deb with zstd data is reported as unsupported (no crash)", "zstd archive not supported" in log and rc in (1, 2), log[-400:])
+    open(os.path.join(arc, "notes.txt"), "wb").write(b"hello" * 500)
+    rc, log = run(["--profile", "erista", "--archive", os.path.join(arc, "notes.txt"), "--out-dir", os.path.join(tmp, "out13j")], manifest=mp2)
+    check("a file that is not an archive is reported (no crash)", "not a recognised archive" in log and rc in (1, 2), log[-400:])
+    rc, log = run(["--profile", "erista", "--archive", os.path.join(arc, "missing.deb"), "--out-dir", os.path.join(tmp, "out13k")], manifest=mp2)
+    check("a missing archive is reported (no crash)", "archive not found" in log and rc in (1, 2), log[-300:])
+    gt2 = os.path.join(tmp, "gittree2"); os.makedirs(gt2); subprocess.run(["git", "init", "-q", gt2], check=True)
+    rc, log = run(["--profile", "erista", "--archive", os.path.join(arc, "fw.tar"), "--out-dir", os.path.join(gt2, "fw")], manifest=mp2)
+    check("--archive does not weaken the git-work-tree refusal", rc == 1 and "Refusing" in log, log[-300:])
+
+    # robustness: corrupted / truncated archives must never crash or hang the binary
+    fz2 = random.Random(7); bad13 = []
+    for nm in ["jetson-210_linux_r32.7.6_aarch64.tbz2", "fw-xz.deb", "fw-gz.deb", "fw.tar"]:
+        orig = open(os.path.join(arc, nm), "rb").read()
+        for i in range(40):
+            b = bytearray(orig)
+            for _ in range(fz2.choice([1, 4, 32])):
+                pos = fz2.choice([fz2.randrange(0, min(len(b), 4096)), fz2.randrange(0, len(b))]); b[pos] = fz2.getrandbits(8)
+            if i % 8 == 0: b = b[:fz2.randrange(1, len(b))]
+            fp = os.path.join(tmp, "fuzz-arc"); open(fp, "wb").write(b)
+            rc, log = run(["--profile", "erista", "--archive", fp, "--out-dir", os.path.join(tmp, "outza"), "--quiet"], manifest=mp2)
+            if rc not in (0, 1, 2) or "panicked" in log: bad13.append((nm, i, rc, log[-120:]))
+    check("160 corrupted/truncated archives (.tbz2 / .deb xz / .deb gz / tar): no crash, no hang", not bad13, str(bad13[:3]))
+
+    # ============ 14. On-device download (--download): a local HTTP server stands in for NVIDIA / GitHub ============
+    import threading, http.server, zipfile
+    zbuf = io.BytesIO()
+    with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("bootloader/sys/l4t/sc7entry.bin", SC7E); zf.writestr("bootloader/sys/l4t/sc7exit.bin", SC7X)
+        zf.writestr("bootloader/sys/l4t/bpmpfw.bin", blob(300)); zf.writestr("bootloader/readme.txt", "x" * 2000)
+    ZIPB = zbuf.getvalue()
+    BSPB = open(os.path.join(arc, "jetson-210_linux_r32.7.6_aarch64.tbz2"), "rb").read()
+    srv_state = {"port": 0, "hits": []}
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+        def do_GET(self):
+            srv_state["hits"].append(self.path)
+            base = "http://127.0.0.1:%d/" % srv_state["port"]
+            if self.path == "/bsp.tbz2": body = BSPB
+            elif self.path == "/dl/hekate_ctcaer_9.9.9.zip": body = ZIPB
+            elif self.path == "/api/latest":
+                body = json.dumps({"assets": [{"name": "hekate_ctcaer_9.9.9_Nyx_1.zip", "browser_download_url": "http://evil.example/x.zip"},
+                                              {"name": "hekate_ctcaer_9.9.9.zip", "browser_download_url": base + "dl/hekate_ctcaer_9.9.9.zip"}]}).encode()
+            elif self.path == "/redir": self.send_response(302); self.send_header("Location", base + "bsp.tbz2"); self.end_headers(); return
+            else: self.send_response(404); self.end_headers(); return
+            self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H); srv_state["port"] = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = "http://127.0.0.1:%d/" % srv_state["port"]
+    m3 = json.load(open(mp2))
+    gpu_ids = [f["id"] for f in m3["files"] if f["id"].startswith("gpu_")]
+    m3["downloads"] = [
+        {"id": "bsp", "what": "test bsp", "type": "url", "url": base + "redir", "provides": gpu_ids + ["xusb_t210"]},
+        {"id": "hekate", "what": "test hekate", "type": "github_latest", "api": base + "api/latest", "asset_prefix": "hekate_ctcaer_",
+         "asset_suffix": ".zip", "download_prefix": base + "dl/", "provides": ["sc7entry", "sc7exit"]}]
+    mp3 = os.path.join(tmp, "manifest3.json"); json.dump(m3, open(mp3, "w"), indent=1)
+    envd = dict(os.environ, FWFETCH_TEST_LOOPBACK="1")
+    empty = os.path.join(tmp, "empty-root"); os.makedirs(empty)
+    o14 = os.path.join(tmp, "out14")
+    rc, log = run(["--profile", "erista", "--search-root", empty, "--download", "--out-dir", o14], manifest=mp3, env=envd)
+    check("--download: GPU firmware comes from the (redirected) package stream", same(o14, "gpu/fecs.bin", GPU["fecs.bin"]) and same(o14, "gpu/nv_acr_ucode_prod.bin", ACR_L4T), log[-700:])
+    check("--download: XUSB firmware comes from the package", same(o14, "tegra21x_xusb_firmware", XU21), log[-400:])
+    check("--download: sc7entry / sc7exit come from the release zip (asset chosen by name, foreign URL ignored)",
+          same(o14, "bootloader/sys/l4t/sc7entry.bin", SC7E) and same(o14, "bootloader/sys/l4t/sc7exit.bin", SC7X), log[-500:])
+    check("--download: files without an official source are reported missing (exit 2)", rc == 2 and "bl31" in log, log[-300:])
+    n_before = len(srv_state["hits"])
+    o14b = os.path.join(tmp, "out14b")
+    rc, log = run(["--profile", "erista", "--search-root", er2, "--archive", os.path.join(arc, "fw.tar"), "--download", "--out-dir", o14b], manifest=mp3, env=envd)
+    check("--download: nothing is downloaded when the files are found locally", len(srv_state["hits"]) == n_before, str(srv_state["hits"][n_before:]))
+    n_before = len(srv_state["hits"])
+    o14c = os.path.join(tmp, "out14c")
+    rc, log = run(["--profile", "erista", "--search-root", empty, "--out-dir", o14c], manifest=mp3, env=envd)
+    check("without --download nothing is fetched", len(srv_state["hits"]) == n_before and not os.path.exists(os.path.join(o14c, "gpu", "fecs.bin")), log[-300:])
+    rc, log = run(["--profile", "erista", "--search-root", empty, "--download", "--out-dir", os.path.join(tmp, "out14d")], manifest=mp3)
+    check("loopback http is refused without the test switch", rc == 1 and "https" in log, log[-300:])
+    m4 = json.load(open(mp3)); m4["downloads"][0]["url"] = base + "missing404"
+    mp4 = os.path.join(tmp, "manifest4.json"); json.dump(m4, open(mp4, "w"))
+    rc, log = run(["--profile", "erista", "--search-root", empty, "--download", "--out-dir", os.path.join(tmp, "out14e")], manifest=mp4, env=envd)
+    check("a failing download is a warning, the run continues (hekate part still works)", rc == 2 and "warning" in log and "panicked" not in log, log[-400:])
+    for bad in ["http://developer.nvidia.com/x", "https://evil.example/x", "https://github.com.evil.example/x", "https://user@github.com/x"]:
+        mb = json.load(open(mp3)); mb["downloads"][0]["url"] = bad
+        mpb = os.path.join(tmp, "manifest-bad.json"); json.dump(mb, open(mpb, "w"))
+        rc, log = run(["--profile", "erista", "--search-root", empty, "--download", "--out-dir", os.path.join(tmp, "out14f")], manifest=mpb, env=envd)
+        check("manifest URL refused: " + bad, rc == 1 and "manifest" in log, log[-200:])
+    httpd.shutdown()
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 
