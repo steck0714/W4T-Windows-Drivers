@@ -13,3 +13,11 @@
 - 署名用 PFX を GitHub のシークレット（`SWOA_PFX_BASE64` / `SWOA_PFX_PASSWORD`）に入れると毎回同じ証明書になり、`.cer` を入れ直さずに済む。入れない場合は**実行ごとに別の証明書**なので、必ずその実行の `.cer` を使う。
 - HAC-001-01（Iowa）はドライバ一式が無いので `.cer` は入らない（スクリプトだけ）。
 - 実機での確認は済んでいない。
+
+## 更新（アップデート）
+新しいビルドを入れるときは、管理者の PowerShell で `Update-SwitchDrivers.ps1` を実行する（証明書の手作業は不要）。
+- そのビルドの `SwitchWOA-Test.cer` が未信頼なら自動で信頼（Root と TrustedPublisher）に追加する。固定の証明書（シークレット `SWOA_PFX_BASE64`、作り方は `make-signing-cert.yml`）で作ったビルドなら、毎回同じ `.cer` なので何も起きない。
+- 全 INF を `pnputil /add-driver … /install` で入れる。Windows は DriverVer が高いときだけ置き換えるので、CI は毎回 DriverVer を増やして入れる（`tools/ci/stamp_driver_ver.py`）。
+- `-CheckOnly` で入れずに一覧だけ見られる。ログ: `%ProgramData%\W4T\logs\update-drivers.log`。再起動で新しいドライバが読み込まれる。
+- ファームウェアは更新に含まれない（fwfetch の起動時タスクが保つ）。
+- テスト署名自体が未設定なら先に `Install-TestSigning.cmd` を一度実行して再起動する。

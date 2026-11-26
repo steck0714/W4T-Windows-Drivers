@@ -22,6 +22,7 @@ param(
   [string]$GpuDir = '',
   [string]$DriverDir = '',   # 'auto' = this Windows' System32\drivers (Wi-Fi / Bluetooth firmware for the SwitchWOA drivers)
   [string]$Exe = (Join-Path $PSScriptRoot 'fwfetch.exe'),
+  [switch]$NoDownload,       # the task never downloads (SD card / local files only); default: missing files are fetched on the Switch at start-up
   [switch]$Remove
 )
 $ErrorActionPreference = 'Stop'
@@ -65,6 +66,7 @@ $drvArg = ConvertTo-TaskDir $DriverDir ''
 $cmd = '& (Join-Path $env:ProgramData ''W4T\fwfetch\FwFetchStartup.ps1'') -Profile ' + $Profile   # single quotes: $env:ProgramData must NOT be expanded now
 if ($gpuArg) { $cmd += " -GpuDir $gpuArg" }
 if ($drvArg) { $cmd += " -DriverDir $drvArg" }
+if ($NoDownload) { $cmd += ' -NoDownload' }
 $cmd += '; exit $LASTEXITCODE'
 $arg = '-NoProfile -ExecutionPolicy Bypass -Command "' + $cmd.Replace('"', '\"') + '"'
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arg
@@ -72,7 +74,7 @@ $trigger = New-ScheduledTaskTrigger -AtStartup
 $trigger.Delay = 'PT1M'    # give the SD / storage stack time to come up
 $daily = New-ScheduledTaskTrigger -Daily -At 3:30am   # also re-checks (and repairs) files damaged while Windows stays up
 $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 90)   # a slow link may need a while for the ~1 GB NVIDIA package -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($trigger, $daily) -Principal $principal -Settings $settings -Force | Out-Null
-Write-Host "registered '$taskName' (profile $Profile). It runs 1 minute after every start (and daily at 03:30): it checks every firmware file against its pinned SHA-256, puts damaged or missing ones back (from the cache, else from the SD) and keeps trying until everything is found; log: $env:ProgramData\W4T\logs\fwfetch-startup.log"
+Write-Host "registered '$taskName' (profile $Profile). It runs 1 minute after every start (and daily at 03:30): it checks every firmware file against its pinned SHA-256, puts damaged or missing ones back (from the cache, else from the SD) and keeps trying until everything is found (files still missing are downloaded on this device from the official NVIDIA / hekate sources unless -NoDownload); log: $env:ProgramData\W4T\logs\fwfetch-startup.log"
 Write-Host "run it now: Start-ScheduledTask -TaskName '$taskName'"

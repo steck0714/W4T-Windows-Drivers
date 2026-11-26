@@ -1,8 +1,8 @@
 # Build info: HAC-001
 
 - model: HAC-001
-- commit: e653687a35909acbe78edb11ca9a78177ff9bb73
-- built: 2026-11-26 04:34:14Z
+- commit: aff5ba80ecc9d4fa087e89921af5b10916dd7dae
+- built: 2026-11-26 05:29:12Z
 - WDK for most drivers: 10.0.19041.0 (a driver with its own wdk entry, e.g. Wi-Fi, uses that one)
 - signed with: a new self-signed certificate made by this run
 
