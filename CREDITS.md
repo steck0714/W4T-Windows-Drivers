@@ -67,6 +67,8 @@
 - 2026-11-24: `reference/ruje0504-2/mesa-switch-woa/tegra-x1-wddm/` を `b1596cc`→`16e0b75`(1112 ファイル、バイナリなし)、`reference/ruje0504-2/winx/` を `0d797d1`→`36197a3` へ差分更新。引き続き無改変(Claude による作業。ユーザー steck0714 の指示)。
 - 2026-11-20: 上流の参照コピーを追加(いずれも無改変): `reference/l4t-nvgpu-extra/`(CTCaer/switch-l4t-kernel-nvgpu `1ae0167` の追加分、MIT)、`reference/linux-nouveau-v6.12/`(Linux v6.12 の nouveau)、`reference/ruje0504-2/mesa-switch-woa/`(`tegra-x1-wddm/` のみ、`b1596cc`)、`reference/ruje0504-2/winx/`(`0d797d1`、ビルド済みバイナリは除外)。TegraGpu の PDE / MMU / ACR の照合用。各 `README.md` と `MANIFEST.sha256`(Claude による作業。ユーザー steck0714 の指示)。
 
+- 2026-11-26: fwfetch が Switchroot の配布物(`bl31.bin`、分割された `switchroot/install/l4t.00`・`l4t.01`…)を Switch に入れずに読み取り専用で読めるようにした(Switchroot との共存は不可のため)。DriverVer 自動増加(`tools/ci/stamp_driver_ver.py`)、Switch 上の更新スクリプト(`tools/testsign/Update-SwitchDrivers.ps1`)、固定のテスト証明書を作る `make-signing-cert.yml` を追加(Claude による作業、ユーザー steck0714 の指示)。
+
 ## 含めないもの
 Broadcom ファームウェア、NVIDIA の GPU / XUSB ファームウェア、`bl31.bin`、秘密鍵。ファームウェアは `tools/fwfetch/` が利用者の実機（Switchroot を入れた SD）から取り出す。ビルド済みの `.sys` / `.exe` は 2026-11-18 から `build/` に置いてよい。
 

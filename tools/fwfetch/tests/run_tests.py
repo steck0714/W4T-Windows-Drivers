@@ -198,6 +198,22 @@ try:
     rc, log = run(["--profile", "lite", "--search-root", sd, "--out-dir", "auto"], manifest=mp, env=envr)
     check("'auto' is not accepted for --out-dir", rc == 1 and "auto" in log, log[-300:])
 
+    # 3c. Switchroot download pieces (switchroot/install/l4t.00, .01, .02: one ext4 image cut into pieces) read back to back - NO Switchroot
+    #     installed, NO disk: the firmware inside the pieces is found. Odd piece sizes make a read straddle a piece boundary.
+    raw = open(part, "rb").read(); cuts = [9_999_991, 9_999_991 + 7_777_777]
+    pk = os.path.join(tmp, "pack"); inst = os.path.join(pk, "switchroot", "install"); os.makedirs(inst)
+    for i, (a, b) in enumerate(zip([0] + cuts, cuts + [len(raw)])): open(os.path.join(inst, "l4t.%02d" % i), "wb").write(raw[a:b])
+    out3c = os.path.join(tmp, "out3c")
+    rc, log = run(["--profile", "aula", "--search-root", sd, "--search-root", pk, "--out-dir", out3c], manifest=mp)
+    check("l4t.00/.01/.02 pieces: read as one ext4 image, aula completes", rc == 0 and "Switchroot image pieces" in log and "nothing is installed" in log, log[-900:])
+    check("l4t pieces: hcd and Wi-Fi firmware found inside the split image",
+          open(os.path.join(out3c, "agent/bt/BCM4356A3.hcd"), "rb").read() == HCD and open(os.path.join(out3c, "agent/wifi/brcmfmac4356A3-pcie.bin"), "rb").read() == BCM)
+    # gap (l4t.01 missing): the set ends at l4t.00; a truncated image must not crash anything
+    shutil.rmtree(os.path.join(tmp, "pack2"), ignore_errors=True); i2 = os.path.join(tmp, "pack2", "switchroot", "install"); os.makedirs(i2)
+    shutil.copy(os.path.join(inst, "l4t.00"), i2); shutil.copy(os.path.join(inst, "l4t.02"), i2)
+    rc, log = run(["--profile", "aula", "--search-root", os.path.join(tmp, "pack2"), "--out-dir", os.path.join(tmp, "out3d")], manifest=mp)
+    check("l4t pieces with a gap / truncated image: no crash", "panicked" not in log and rc in (0, 2), log[-600:])
+
     # 4. Intel-HEX route (kernel tree), no ext4 at all
     kt = os.path.join(tmp, "ktree/firmware/brcm"); os.makedirs(kt)
     open(os.path.join(kt, "brcmfmac4356A3-pcie.bin.ihex"), "w").write(ihex(BCM))

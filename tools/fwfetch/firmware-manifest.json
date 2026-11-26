@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "about": "Files this project must NOT redistribute. They are taken from the user's own device/SD card (Switchroot install) and staged outside the repository. 'sha256' / 'size' are only filled in where a published value exists (windows-switch v0.8.0 ADD_THESE_FILES.txt / PUT_*_HERE.txt); everything else is trust-on-first-use and is marked unverified in the report. 'layout' says how sure we are about WHERE the file sits: documented = named by an upstream document, guess = a plausible path that has not been checked on a real image (the hash check rejects wrong guesses where a hash exists).",
+ "about": "Files this project must NOT redistribute. They are taken from files the user owns or downloaded (Switchroot files read as-is; Switchroot is NOT installed on the Switch) and staged outside the repository. 'sha256' / 'size' are only filled in where a published value exists (windows-switch v0.8.0 ADD_THESE_FILES.txt / PUT_*_HERE.txt); everything else is trust-on-first-use and is marked unverified in the report. 'layout' says how sure we are about WHERE the file sits: documented = named by an upstream document, guess = a plausible path that has not been checked on a real image (the hash check rejects wrong guesses where a hash exists).",
  "profiles": {
   "aula": [
    "bl31",

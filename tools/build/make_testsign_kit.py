@@ -11,7 +11,7 @@ import argparse, hashlib, json, os, shutil, sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 SRC = os.path.join(ROOT, "tools", "testsign")
-FILES = ["Install-TestSigning.cmd", "Stage0-SwitchSetup.ps1", "Set-SwitchTestSigning.ps1", "README-ja.md"]
+FILES = ["Install-TestSigning.cmd", "Stage0-SwitchSetup.ps1", "Set-SwitchTestSigning.ps1", "Update-SwitchDrivers.ps1", "README-ja.md"]
 FORBIDDEN = {".pfx", ".p12", ".pvk", ".key", ".pem", ".snk"}
 
 

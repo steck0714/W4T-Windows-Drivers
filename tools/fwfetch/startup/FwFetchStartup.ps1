@@ -27,6 +27,8 @@ param(
   [string]$CacheDir = (Join-Path $env:ProgramData 'W4T\fw-cache'),
   [string]$GpuDir = '',            # 'auto' = <SystemRoot>\System32\drivers\TegraGpu of THIS Windows (erista / lite). Windows on a Switch is rarely on C: (it lives on the SD card), so do not type a drive letter
   [string]$DriverDir = '',         # 'auto' = <SystemRoot>\System32\drivers of THIS Windows: Wi-Fi / Bluetooth firmware is put into <DriverDir>\SwitchWOA and \switchwifi (needs fwfetch --deploy-drivers)
+  [string[]]$SearchRoot = @(),     # extra folders fwfetch searches, e.g. the downloaded Switchroot folder (bl31.bin + switchroot\install\l4t.00, l4t.01 ...) kept on this Switch's Windows disk. NO Switchroot install needed
+  [string[]]$Disk = @(),           # extra raw disk / image files to read as ext4 (read-only)
   [switch]$Force                   # ignore the done marker and always run fwfetch
 )
 $ErrorActionPreference = 'Stop'
@@ -145,6 +147,8 @@ $code = 0
 if ($needFetch) {
   if (Test-Path $marker) { Remove-Item $marker -Force }
   $a = @('--profile', $Profile, '--auto', '--out-dir', $CacheDir)
+  foreach ($r in $SearchRoot) { if (Test-Path -LiteralPath $r) { $a += @('--search-root', $r) } else { Log "search root not found (skipped): $r" } }
+  foreach ($dk in $Disk) { if (Test-Path -LiteralPath $dk) { $a += @('--disk', $dk) } else { Log "disk image not found (skipped): $dk" } }
   if ($GpuDir) { New-Item -ItemType Directory -Force $GpuDir | Out-Null; $a += @('--deploy-gpu', $GpuDir) }
   if ($DriverDir) { New-Item -ItemType Directory -Force $DriverDir | Out-Null; $a += @('--deploy-drivers', $DriverDir) }
   Log "start: fwfetch $($a -join ' ')"

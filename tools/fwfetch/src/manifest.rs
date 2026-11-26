@@ -32,6 +32,9 @@ pub struct Source {
     pub scan: Vec<String>,
     pub member: Option<String>,
     pub search_dir: Option<String>,
+    /// SHA-256 that THIS source must match (and that counts as verification when it does). For a file that is stored under a
+    /// different name elsewhere (e.g. L4T's gm20b/acr_ucode.bin): it is taken only if its bytes are exactly the documented ones.
+    pub sha256: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -48,6 +51,26 @@ pub struct FileEntry {
     pub sources: Vec<Source>,
 }
 
+/// An official download that can supply some of the files when they are not found locally (`--download`).
+/// `url` is fetched as it is; `github_latest` asks the GitHub release API for the newest release and takes the asset whose
+/// name starts with `asset_prefix` and ends with `asset_suffix`. Only https URLs on the hosts in `download::HOSTS` are accepted.
+#[derive(Deserialize, Clone, Default)]
+pub struct Download {
+    pub id: String,
+    #[serde(default)]
+    pub what: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub url: Option<String>,
+    pub api: Option<String>,
+    pub asset_prefix: Option<String>,
+    pub asset_suffix: Option<String>,
+    pub download_prefix: Option<String>,
+    /// ids of the files this download can supply
+    #[serde(default)]
+    pub provides: Vec<String>,
+}
+
 #[derive(Deserialize)]
 pub struct GpuTemplate {
     pub what: String,
@@ -59,6 +82,8 @@ pub struct Manifest {
     pub profiles: BTreeMap<String, Vec<String>>,
     pub files: Vec<FileEntry>,
     pub gpu_template: GpuTemplate,
+    #[serde(default)]
+    pub downloads: Vec<Download>,
 }
 
 /// One concrete thing to collect (GPU shorthand already expanded).
@@ -95,7 +120,7 @@ fn check_hash(id: &str, e: &Expect) -> Result<(), String> {
     Ok(())
 }
 
-pub type Loaded = (BTreeMap<String, Vec<String>>, BTreeMap<String, Entry>);
+pub type Loaded = (BTreeMap<String, Vec<String>>, BTreeMap<String, Entry>, Vec<Download>);
 
 pub fn load(text: &str) -> Result<Loaded, String> {
     let m: Manifest = serde_json::from_str(text).map_err(|e| format!("manifest: {e}"))?;
@@ -118,10 +143,14 @@ pub fn load(text: &str) -> Result<Loaded, String> {
                 drivers: Vec::new(),
                 gpu_name: Some(g.clone()),
                 stage_rel: format!("gpu/{g}"),
-                sources: vec![
+                // the template places first; a GPU entry may add its own sources (hash-gated aliases) after them
+                sources: [
                     Source { kind: "ext4".into(), paths: paths.clone(), ..Default::default() },
                     Source { kind: "fs".into(), paths, ..Default::default() },
-                ],
+                ]
+                .into_iter()
+                .chain(f.sources.iter().cloned())
+                .collect(),
             }
         } else {
             let first = f.deploy.windows_switch.first().ok_or_else(|| format!("manifest: '{}' has no deploy path", f.id))?;
@@ -151,6 +180,9 @@ pub fn load(text: &str) -> Result<Loaded, String> {
                     return Err(format!("manifest: unsafe source path '{p}' in '{}'", entry.id));
                 }
             }
+            if s.sha256.is_some() {
+                check_hash(&entry.id, &Expect { size: None, sha256: s.sha256.clone() })?;
+            }
         }
         if out.insert(entry.id.clone(), entry).is_some() {
             return Err(format!("manifest: duplicate id '{}'", f.id));
@@ -163,5 +195,33 @@ pub fn load(text: &str) -> Result<Loaded, String> {
             }
         }
     }
-    Ok((m.profiles, out))
+    let mut seen = std::collections::BTreeSet::new();
+    for d in &m.downloads {
+        if !seen.insert(d.id.clone()) {
+            return Err(format!("manifest: duplicate download id '{}'", d.id));
+        }
+        match d.kind.as_str() {
+            "url" => {
+                let u = d.url.as_deref().ok_or_else(|| format!("manifest: download '{}' has no url", d.id))?;
+                crate::download::check_url(u).map_err(|e| format!("manifest: download '{}': {e}", d.id))?;
+            }
+            "github_latest" => {
+                for (name, v) in [("api", &d.api), ("download_prefix", &d.download_prefix), ("asset_prefix", &d.asset_prefix), ("asset_suffix", &d.asset_suffix)] {
+                    if v.is_none() {
+                        return Err(format!("manifest: download '{}' has no {name}", d.id));
+                    }
+                }
+                for u in [d.api.as_deref().unwrap_or(""), d.download_prefix.as_deref().unwrap_or("")] {
+                    crate::download::check_url(u).map_err(|e| format!("manifest: download '{}': {e}", d.id))?;
+                }
+            }
+            other => return Err(format!("manifest: unknown download type '{other}' in '{}'", d.id)),
+        }
+        for id in &d.provides {
+            if !out.contains_key(id) {
+                return Err(format!("manifest: download '{}' provides unknown id '{id}'", d.id));
+            }
+        }
+    }
+    Ok((m.profiles, out, m.downloads))
 }

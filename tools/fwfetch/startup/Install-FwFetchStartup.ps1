@@ -14,12 +14,15 @@
 .EXAMPLE
   .\Install-FwFetchStartup.ps1 -Profile lite -GpuDir auto
   .\Install-FwFetchStartup.ps1 -Profile lite -GpuDir auto -DriverDir auto
+  .\Install-FwFetchStartup.ps1 -Profile lite -GpuDir auto -DriverDir auto -SearchRoot $env:ProgramData\W4T\fw-source   # no Switchroot on the Switch: the downloaded files sit in that folder
   .\Install-FwFetchStartup.ps1 -Profile aula
   .\Install-FwFetchStartup.ps1 -Remove
 #>
 param(
   [ValidateSet('erista', 'lite', 'aula')][string]$Profile,
   [string]$GpuDir = '',
+  [string[]]$SearchRoot = @(),   # folder(s) with the DOWNLOADED Switchroot files (bl31.bin, switchroot\install\l4t.00 / l4t.01 ...) on this Windows disk. Switchroot is NOT installed
+  [string[]]$Disk = @(),         # image file(s) / raw disk(s) with an ext4 root file system, read-only
   [string]$DriverDir = '',   # 'auto' = this Windows' System32\drivers (Wi-Fi / Bluetooth firmware for the SwitchWOA drivers)
   [string]$Exe = (Join-Path $PSScriptRoot 'fwfetch.exe'),
   [switch]$Remove
@@ -58,6 +61,13 @@ function ConvertTo-TaskDir([string]$p, [string]$sub) {
   }
   return "'" + $full.Replace("'", "''") + "'"
 }
+# Source folders: a path under %ProgramData% is stored relative to it (the letter of the SD's Windows may change); anything else as typed.
+function ConvertTo-TaskSrc([string]$p) {
+  $full = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($p)).TrimEnd('\')
+  $pd = $env:ProgramData.TrimEnd('\')
+  if ($full -like "$pd\*") { return "(Join-Path `$env:ProgramData '" + $full.Substring($pd.Length + 1).Replace("'", "''") + "')" }
+  return "'" + $full.Replace("'", "''") + "'"
+}
 $gpuArg = ConvertTo-TaskDir $GpuDir 'TegraGpu'
 $drvArg = ConvertTo-TaskDir $DriverDir ''
 
@@ -65,6 +75,8 @@ $drvArg = ConvertTo-TaskDir $DriverDir ''
 $cmd = '& (Join-Path $env:ProgramData ''W4T\fwfetch\FwFetchStartup.ps1'') -Profile ' + $Profile   # single quotes: $env:ProgramData must NOT be expanded now
 if ($gpuArg) { $cmd += " -GpuDir $gpuArg" }
 if ($drvArg) { $cmd += " -DriverDir $drvArg" }
+if ($SearchRoot) { $cmd += ' -SearchRoot @(' + (($SearchRoot | ForEach-Object { ConvertTo-TaskSrc $_ }) -join ',') + ')' }
+if ($Disk) { $cmd += ' -Disk @(' + (($Disk | ForEach-Object { ConvertTo-TaskSrc $_ }) -join ',') + ')' }
 $cmd += '; exit $LASTEXITCODE'
 $arg = '-NoProfile -ExecutionPolicy Bypass -Command "' + $cmd.Replace('"', '\"') + '"'
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arg

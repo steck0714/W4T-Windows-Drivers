@@ -108,6 +108,38 @@ fn add_volumes(path: &Path, vols: &mut Vec<Volume>, log: &Log) {
     log.say(&format!("  {} : {found} ext4 volume(s)", path.display()));
 }
 
+/// Switchroot's installer ships the Linux root file system as `switchroot/install/l4t.00`, `l4t.01`, ... : one ext4 image cut into
+/// pieces. Find such pieces under the search roots (also directly in a root) and read each set back to back, read-only,
+/// so the firmware inside is found WITHOUT installing Switchroot on the Switch. Pieces are used in name order; a set must start at 00,
+/// a gap ends it (what follows the gap is not read, so a partial download still yields whatever lies in the pieces that are there).
+fn l4t_image_sets(roots: &[PathBuf]) -> Vec<Vec<PathBuf>> {
+    let mut sets: Vec<Vec<PathBuf>> = Vec::new();
+    for root in roots {
+        for dir in [root.join("switchroot").join("install"), root.join("install"), root.clone()] {
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            let mut n: BTreeMap<u32, PathBuf> = BTreeMap::new();
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+                let Some(num) = name.strip_prefix("l4t.") else { continue };
+                if num.len() == 2 && num.bytes().all(|b| b.is_ascii_digit()) && e.metadata().map(|m| m.is_file()).unwrap_or(false) {
+                    n.insert(num.parse().unwrap_or(99), e.path());
+                }
+            }
+            let mut set = Vec::new();
+            for (i, (k, p)) in n.iter().enumerate() {
+                if *k as usize != i {
+                    break;
+                }
+                set.push(p.clone());
+            }
+            if !set.is_empty() && !sets.contains(&set) {
+                sets.push(set);
+            }
+        }
+    }
+    sets
+}
+
 fn skip_ext(p: &Path) -> bool {
     let e = p.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     matches!(e.as_str(), "7z" | "zip" | "bmp" | "ini" | "dtb" | "dtimg" | "scr" | "txt" | "md")
@@ -292,6 +324,17 @@ pub fn run(o: Opts) -> Result<i32, String> {
         }
         if denied {
             log.say("  (not administrator: physical disks are not scanned for ext4; FAT32/folder sources still work)");
+        }
+    }
+
+    for set in l4t_image_sets(&roots) {
+        let names: Vec<String> = set.iter().map(|p| p.display().to_string()).collect();
+        match Ext4::try_open_parts(&set, 0) {
+            Ok(fs) => {
+                log.say(&format!("  Switchroot image pieces ({}): ext4 volume, read-only, nothing is installed", names.join(" + ")));
+                vols.push(Volume { label: format!("l4t image {}", set[0].display()), fs });
+            }
+            Err(e) => log.say(&format!("  Switchroot image pieces ({}): not readable as ext4 ({e})", names.join(" + "))),
         }
     }
 

@@ -8,6 +8,7 @@
 |---|---|---|
 | adler2 | 2.0.1 | 0BSD OR MIT OR Apache-2.0 |
 | block-buffer | 0.10.4 | MIT OR Apache-2.0 |
+| bzip2 | 0.6.1 | MIT OR Apache-2.0 |
 | cfg-if | 1.0.5 | MIT OR Apache-2.0 |
 | cpufeatures | 0.2.17 | MIT OR Apache-2.0 |
 | crc32fast | 1.5.5 | MIT OR Apache-2.0 |
@@ -17,7 +18,9 @@
 | generic-array | 0.14.7 | MIT |
 | getrandom | 0.3.4 | MIT OR Apache-2.0 |
 | itoa | 1.0.19 | MIT OR Apache-2.0 |
+| libbz2-rs-sys | 0.2.7 | bzip2-1.0.6 |
 | libc | 0.2.191 | MIT OR Apache-2.0 |
+| lzma-rs | 0.3.0 | MIT |
 | memchr | 2.8.3 | Unlicense OR MIT |
 | miniz_oxide | 0.9.1 | MIT OR Zlib OR Apache-2.0 |
 | proc-macro2 | 1.0.107 | MIT OR Apache-2.0 |

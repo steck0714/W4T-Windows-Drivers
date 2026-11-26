@@ -16,11 +16,12 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 const HELP: &str = "\
-fwfetch 1.1 - read firmware you may not redistribute from YOUR OWN Switch SD card (read-only), verify, stage.
+fwfetch 1.1 - read firmware you may not redistribute from files YOU downloaded or own (read-only), verify, stage. Switchroot need NOT be installed on the Switch.
 
 USAGE: fwfetch [OPTIONS]
   --profile <aula|lite|erista|all>   what to collect (default: aula)
-  --search-root <DIR>                folder to search (FAT32 'switchroot' parent, rootfs copy, kernel tree); repeatable
+  --search-root <DIR>                folder to search (the downloaded Switchroot files: bl31.bin + switchroot/install/l4t.00, l4t.01, ... which are read
+                                     as ONE ext4 image, read-only; or a rootfs copy, kernel tree); repeatable
   --disk <FILE|\\\\.\\PhysicalDriveN>    raw disk / partition image to scan for an ext4 volume (read-only); repeatable
   --auto                             Windows: also every ready drive letter, every volume WITHOUT a drive letter (the Switch's FAT32
                                      'switchroot' partition often has none), and (administrator) every physical disk

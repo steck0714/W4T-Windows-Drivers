@@ -37,7 +37,12 @@ pub struct Ext4 {
 impl Ext4 {
     /// Err(why) if there is no ext superblock at `base` or the volume uses features we cannot read.
     pub fn try_open(path: &Path, base: u64) -> Res<Ext4> {
-        let mut d = Aligned::open(path).map_err(|e| e.to_string())?;
+        Self::try_open_parts(&[path.to_path_buf()], base)
+    }
+
+    /// Same, for an image split over several files read back to back (Switchroot `l4t.00`, `l4t.01`, ...).
+    pub fn try_open_parts(paths: &[std::path::PathBuf], base: u64) -> Res<Ext4> {
+        let mut d = Aligned::open_parts(paths).map_err(|e| e.to_string())?;
         let sb_off = base.checked_add(1024).ok_or("bad offset")?;
         let sb = d.read_vec(sb_off, 1024).map_err(|_| "short read".to_string())?;
         if u16le(&sb, 56)? != 0xEF53 {

@@ -1,0 +1,1929 @@
+diff --git a/tools/fwfetch/CHANGES-1.2-ja.md b/tools/fwfetch/CHANGES-1.2-ja.md
+new file mode 100644
+index 0000000..3fe425b
+--- /dev/null
++++ b/tools/fwfetch/CHANGES-1.2-ja.md
+@@ -0,0 +1,27 @@
++# fwfetch 1.2 の変更点（1.1 から）
++
++目的: **Switchroot（L4T Ubuntu / Android）を一度 SD に入れていなくても**ファームウェアを取れるようにする。
++
++## 追加
++- `--image FILE`（`--disk` と同じだが、ファイル向け）。`l4t.00` を渡すと `l4t.01`, `l4t.02`, … を連結して 1 つの ext4 イメージとして読む（`src/image.rs`, `reader.rs`）。
++- `<search-root>\switchroot\install\l4t.00` は自動検出（ファイル名は記憶に基づく・未確認）。
++- `--archive FILE`: `.deb`(data.tar.gz/.xz/.bz2)・tar・tar.gz・tbz2・tar.xz から読む（`src/archive.rs`）。NVIDIA の `jetson-210_linux_r32.7.6_aarch64.tbz2` は中の `nv_tegra/nvidia_drivers.tbz2` まで自動で入る。zstd は未対応と表示するだけ。
++- マニフェストのソースに `sha256` を追加。`gpu_nv_acr_ucode_prod` は L4T の `gm20b/acr_ucode.bin` / `tegra21x/acr_ucode.bin` を**文書化されたハッシュに一致した場合だけ**別名として採用し、検証済みとして記録する。
++
++- `--download`: 足りないファイルだけを公式配布元から **Switch 本体で起動時に** 取得（`src/download.rs`、`curl.exe` をストリーム、`downloads` はマニフェスト）。NVIDIA の BSP（GPU / XUSB）と hekate 最新リリース（sc7）。zip の読み取りを追加（`archive.rs`、`crc32fast`）。
++- 起動タスク: `FwFetchStartup.ps1` が既定で `--download` を付ける（`-NoDownload`、`-DownloadIntervalHours`＝6、タスクの実行時間上限 90 分）。
++- 対象外: Wi-Fi / BT ファームウェアと bl31（公式の入手先が無い）。Wi-Fi は初回のみ USB LAN / テザリングが要る。
++
++## 安全性
++- 読み取りのみ（`File::open`）。アーカイブは展開せずメモリ上で必要なメンバーだけ保持。メンバー名は照合にのみ使い、出力パスには使わない。
++- 展開サイズに上限（解凍爆弾対策）、ネスト深さ制限。`unsafe` は使っていない。
++
++## 依存の追加
++`lzma-rs 0.3`（MIT）、`bzip2 0.6`（MIT OR Apache-2.0）+ `libbz2-rs-sys 0.2`（bzip2-1.0.6、純 Rust）。`bzip2-rs 0.1.2` は複数ブロックのデータで失敗するため不採用。
++
++## テスト（合成データのみ）
++`tests/run_tests.py` に分割イメージ・.deb(xz/gz)・tbz2 入れ子・tar(GNU/pax 長い名前)・ハッシュ不一致・zstd/非アーカイブ・破損アーカイブ 160 件を追加。全 82 件合格（ローカル HTTP サーバーでの `--download` テスト 12 件を含む）、`cargo clippy -D warnings` 合格。
++
++## 未確認
++`--download` は実際の NVIDIA / GitHub に対して未検証（作業環境から到達できない）。
++実際の Switchroot 配布物・NVIDIA BSP・実機では未検証。BSP 内のパス（`lib/firmware/tegra21x/…`）と ACR の別名対応は資料に基づく。bl31.bin・hekate の sc7 ファイルは BSP に無いので、従来どおり Switchroot 配布物/hekate を `--search-root` で渡す。
+diff --git a/tools/fwfetch/Cargo.lock b/tools/fwfetch/Cargo.lock
+index 26b4147..6aa1401 100644
+--- a/tools/fwfetch/Cargo.lock
++++ b/tools/fwfetch/Cargo.lock
+@@ -17,6 +17,21 @@ dependencies = [
+  "generic-array",
+ ]
+ 
++[[package]]
++name = "byteorder"
++version = "1.5.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
++
++[[package]]
++name = "bzip2"
++version = "0.6.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f3a53fac24f34a81bc9954b5d6cfce0c21e18ec6959f44f56e8e90e4bb7c346c"
++dependencies = [
++ "libbz2-rs-sys",
++]
++
+ [[package]]
+ name = "cfg-if"
+ version = "1.0.5"
+@@ -32,6 +47,21 @@ dependencies = [
+  "libc",
+ ]
+ 
++[[package]]
++name = "crc"
++version = "3.4.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5eb8a2a1cd12ab0d987a5d5e825195d372001a4094a0376319d5a0ad71c1ba0d"
++dependencies = [
++ "crc-catalog",
++]
++
++[[package]]
++name = "crc-catalog"
++version = "2.5.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "217698eaf96b4a3f0bc4f3662aaa55bdf913cd54d7204591faa790070c6d0853"
++
+ [[package]]
+ name = "crc32fast"
+ version = "1.5.5"
+@@ -74,10 +104,13 @@ dependencies = [
+ 
+ [[package]]
+ name = "fwfetch"
+-version = "1.1.0"
++version = "1.2.0"
+ dependencies = [
++ "bzip2",
++ "crc32fast",
+  "flate2",
+  "getrandom",
++ "lzma-rs",
+  "serde",
+  "serde_json",
+  "sha2",
+@@ -111,12 +144,28 @@ version = "1.0.19"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
+ 
++[[package]]
++name = "libbz2-rs-sys"
++version = "0.2.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a5314d1d545fce0307c770d791adf20d997e0b63b64e1ffeed8a920e290eabe4"
++
+ [[package]]
+ name = "libc"
+ version = "0.2.191"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+ 
++[[package]]
++name = "lzma-rs"
++version = "0.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "297e814c836ae64db86b36cf2a557ba54368d03f6afcd7d947c266692f71115e"
++dependencies = [
++ "byteorder",
++ "crc",
++]
++
+ [[package]]
+ name = "memchr"
+ version = "2.8.3"
+diff --git a/tools/fwfetch/Cargo.toml b/tools/fwfetch/Cargo.toml
+index d8e2727..e7eb6bc 100644
+--- a/tools/fwfetch/Cargo.toml
++++ b/tools/fwfetch/Cargo.toml
+@@ -1,7 +1,7 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ [package]
+ name = "fwfetch"
+-version = "1.1.0"
++version = "1.2.0"
+ edition = "2024"
+ rust-version = "1.85"
+ license = "GPL-2.0-only"
+@@ -14,6 +14,10 @@ flate2 = "1"
+ serde = { version = "1", features = ["derive"] }
+ serde_json = "1"
+ getrandom = "0.3"
++# archives (.deb / tar.xz / tbz2): lzma-rs and bzip2 (libbz2-rs-sys, the pure-Rust port of libbzip2) need no C compiler (zstd is deliberately not supported). bzip2-rs 0.1 was tried and fails on multi-block streams
++lzma-rs = "0.3"
++bzip2 = "0.6"
++crc32fast = "1"
+ 
+ [profile.release]
+ opt-level = "s"
+diff --git a/tools/fwfetch/README-ja.md b/tools/fwfetch/README-ja.md
+index b8b62ea..877b7b2 100644
+--- a/tools/fwfetch/README-ja.md
++++ b/tools/fwfetch/README-ja.md
+@@ -1,7 +1,8 @@
+ # fwfetch — 再配布できないファイルを「自分の実機」から取り出す（Rust 版）
+ 
+ NVIDIA(NVIDIA Software License)・Broadcom・Switchroot ビルドのファイルは、このリポジトリにも配布物にも入れない。
+-Switchroot 系のやり方に倣い、**利用者自身の SD カード(Switchroot を入れたもの)から、読み取り専用で探して照合し、リポジトリの外に置く**。
++**利用者自身のファイルから、読み取り専用で探して照合し、リポジトリの外に置く**。
++v1.2 から **Switchroot（L4T Ubuntu / Android）を一度 SD に入れていなくても使える**（下の「Switchroot を入れずに使う」）。
+ 
+ 2026-11-18 に PowerShell + C# 版（`legacy/`）を **Rust** で作り直した。SD カードの中身は信用できない入力なので、
+ メモリ安全な言語で書き、`unsafe` を禁止している（`#![forbid(unsafe_code)]`）。実行ファイル 1 つで動き、マニフェストは埋め込み済み。
+@@ -10,6 +11,7 @@ Switchroot 系のやり方に倣い、**利用者自身の SD カード(Switchro
+ 
+ ```
+ fwfetch --profile aula|lite|erista|all  [--auto] [--search-root DIR]... [--disk FILE|\\.\PhysicalDriveN]...
++        [--image FILE]... [--archive FILE]...
+         [--out-dir DIR] [--deploy BOOT_ROOT] [--deploy-gpu DIR|auto] [--deploy-drivers DIR|auto] [--require-known-hash] [--manifest FILE] [--quiet]
+ ```
+ 
+@@ -20,6 +22,44 @@ fwfetch.exe --profile aula --auto --deploy E:\
+ fwfetch.exe --profile erista --auto --deploy-gpu auto
+ ```
+ 
++### Switchroot を入れずに使う（v1.2）
++
++これまでは「Switchroot を入れた SD の ext4 パーティション」から読む前提だった。次の入力でも読めるようにした（どれも読み取り専用、展開もフラッシュもしない）。
++
++| 入力 | 取れるもの | 備考 |
++|---|---|---|
++| `--image l4t.00` | rootfs 全体（GPU / Wi-Fi / BT / XUSB の firmware） | Switchroot の配布物にある分割 rootfs イメージ。`l4t.00`→`l4t.01`→… を連結して 1 つのイメージとして読む。SD に Flash Linux する必要なし。`<root>\switchroot\install\l4t.00` は `--search-root`/`--auto` でも自動で見つかる |
++| `--archive jetson-210_linux_r32.7.6_aarch64.tbz2` | GPU firmware・XUSB firmware | NVIDIA 公式の Jetson Linux(L4T) ドライバパッケージ。中の `nv_tegra/nvidia_drivers.tbz2` まで自動で入る |
++| `--archive nvidia-l4t-firmware_*.deb` など | 同上 | `.deb`（data.tar.gz / .xz）、tar、tar.gz、tar.xz、tbz2 |
++
++- **zstd は未対応**（検出して「未対応」と表示するだけ。推測しない）。zstd の .deb は `dpkg-deb -x` などで展開してから `--search-root` で渡す。
++- 取れないまま残るもの: **bl31.bin**（`switchroot\ubuntu\` などに置かれる Switchroot 側のファイル）、hekate の sc7entry/sc7exit（hekate のフォルダに在る。`--search-root` で渡す）、
++  Wi-Fi の board ファイル。これらは NVIDIA の BSP には含まれないので、Switchroot 配布物（7z を展開しただけでよい）か hekate を `--search-root` に渡す。
++- **`nv_acr_ucode_prod.bin`**: L4T では `gm20b/acr_ucode.bin`（または `tegra21x/acr_ucode.bin`）という名前。Windows ドライバ側の名前との別名として、
++  **mesa-switch-woa の `docs/DRIVER.md` に書かれている SHA-256 と完全に一致した場合だけ**採用する（`firmware-manifest.json` の `sha256`）。違うバイト列は別名では採用しない。
++  この別名の対応づけは、手元の資料の記述に基づくもので、実イメージでは未確認。
++- `--require-known-hash` でも、この別名（ハッシュ付きソース）は採用される。
++
++### 起動時に Switch 本体で自動ダウンロード（v1.2 `--download`）
++
++PC 側ではなく、**Switch の Windows 起動時（起動タスク）に本体の中で**足りないファイルを公式配布元から取る。
++
++```
++fwfetch.exe --profile aula --auto --download --deploy-gpu auto --deploy-drivers auto
++```
++
++- ローカル（SD・`--image`・`--archive`・`--search-root`）を先に探し、**それでも見つからない ID だけ**を、マニフェストの `downloads` から取る（見つかっていれば通信しない）。
++  - GPU firmware 一式・XUSB: NVIDIA 公式 `jetson-210_linux_r32.7.6_aarch64.tbz2`（約 1 GB）。
++  - sc7entry / sc7exit: hekate の最新リリース zip（GitHub API で最新を解決。資産名は `hekate_ctcaer_*.zip`、URL は `github.com/CTCaer/hekate/releases/download/` のみ）。
++- ダウンロードは Windows 10 1803 以降に標準で入っている `curl.exe` を使い、**受信しながらアーカイブとして読む**（巨大な一時ファイルを SD に作らない。必要なメンバーだけメモリに保持）。TLS の自前実装は無い。
++- 許可するのは `https` と `developer.nvidia.com` / `developer.download.nvidia.com` / `github.com` / `api.github.com` のみ（マニフェスト検証時に拒否。リダイレクトも https のみ）。
++  ダウンロードしたデータの中身は、ローカルのファイルと同じく**マニフェストのハッシュで検証**（ハッシュの無いものは初回採用で `UNVERIFIED` + `fw-lock.json` に固定）。
++- 起動タスクは既定で `--download` 付き（`Install-FwFetchStartup.ps1 -NoDownload` で無効）。失敗は警告にして次回に再試行するが、**既定で 6 時間以内には再ダウンロードしない**（`-DownloadIntervalHours`）。実行時間の上限は 90 分。
++- **それでも自動では取れないもの**: Wi-Fi / Bluetooth のファームウェア（BCM4356A3）と bl31.bin は、公式の配布元が見つかっていないので `--download` の対象外（Switchroot / Linux 側のファイルが必要）。
++  また Wi-Fi のファームウェア自体が無い間は Wi-Fi でダウンロードできない。**最初の 1 回は USB LAN / USB テザリング**が必要。hekate が起動時に読む sc7 ファイルは Windows 起動前に要るので、
++  Windows から入れた分は**次回の起動から**効く。
++- **未検証**: 実際の NVIDIA / GitHub への接続・実機（Windows on ARM の curl.exe）では試していない。ローカル HTTP サーバーでのテストのみ。NVIDIA の URL にはチェックサムの公開が無い。
++
+ ### ドライブ文字について（2026-11-20 修正）
+ 
+ Switch の Windows は SD カード上にあるので、**システムドライブが C: とは限らない**（逆に C: のほうが珍しいこともある）。次の前提を外した。
+@@ -54,7 +94,7 @@ Switch の Windows は SD カード上にあるので、**システムドライ
+ | リポジトリに置かない | `--out-dir`・`--deploy`・`--deploy-gpu` が git 作業ツリー内（シンボリックリンク経由も）なら拒否 |
+ | 書き込み | 一時ファイル → リネーム。出力先がシンボリックリンク・ディレクトリなら書かない |
+ | 配置前の再検証 | `--deploy` の前に、ステージ済みファイルの SHA-256 を `fw-lock.json` と照合。食い違えば配置しない |
+-| ネットワーク | 使わない（ダウンロードも通信も無い。CI の取得は `tools/ci/fw_bundle.py` が別に行う） |
++| ネットワーク | 既定では使わない。`--download` を付けたときだけ、`curl.exe` で許可ホスト（NVIDIA / GitHub）へ https 接続する |
+ 
+ ## 任天堂の著作物について
+ 
+@@ -75,6 +115,8 @@ Switch の Windows は SD カード上にあるので、**システムドライ
+ - **実機・実イメージで動かしていない**。パス（`lib/firmware/brcm/...`、`tegra21x/` など）の `layout: guess` は推測。ハッシュがあるものは
+   誤りを弾けるが、GPU 一式と board ファイルは実イメージで要確認。
+ - Switchroot の initramfs が gzip/cpio でなければ取れない（zstd/lz4/xz は検出して「未対応」と表示するだけ）。
++- **v1.2 の分割イメージ/アーカイブ対応は合成データのテストのみ**。実際の `l4t.00` や NVIDIA の BSP では未確認（ファイル名 `switchroot/install/l4t.00` は記憶に基づく。見つからなければ `--image` で直接指定する）。
++- アーカイブは必要なメンバーだけをメモリに保持する。BSP 全体（約 1.5GB の tar）を一度読むので数十秒〜数分かかる。
+ - ext4 は extents のみ・inline_data/暗号化なしを想定。古いブロックマップ方式は未対応。
+ - 物理ディスクの列挙は `PhysicalDrive0`〜`31` を順に開く方式（管理者権限が必要）。
+ - Lite の SD ミニポートは WINARM/FAT32 だけを公開する設計（`drivers/t214-hoag/README.md`）。実機の Windows から ext4 が見えない場合、
+@@ -95,7 +137,7 @@ Switch の Windows は SD カード上にあるので、**システムドライ
+ 別の文字の `…\System32\drivers` を書いた場合は、いまの Windows に読み替えて警告を出す。
+ 
+ SYSTEM で動くスケジュールタスクが、Windows の起動 1 分後に `fwfetch --profile <p> --auto --out-dir %ProgramData%\W4T\fw-cache` を実行する（`%ProgramData%` はシステムドライブ上。タスク自身も `$env:ProgramData` から実行時にスクリプトを探す）。
+-全部見つかる（終了コード 0）と印を付けて以後は何もしない。足りない（2）・エラー（1）なら次の起動でまた試す。SD には書かない。通信もしない。
++全部見つかる（終了コード 0）と印を付けて以後は何もしない。足りない（2）・エラー（1）なら次の起動でまた試す。SD には書かない。通信は `--download`（起動タスクの既定）で足りないファイルがあるときだけ（上の「起動時に Switch 本体で自動ダウンロード」）。
+ ログ: `%ProgramData%\W4T\logs\fwfetch-startup.log`（先頭付近に `Windows is on <SystemRoot>; GpuDir=… DriverDir=…` が出る）。
+ 
+ **CI（Actions）**: `.github/actions/fwfetch-import` が、非公開 zip（シークレット `FW_BUNDLE_URL`）をジョブの最初に自動で取得・展開し（`tools/ci/fw_bundle.py`。
+diff --git a/tools/fwfetch/THIRD-PARTY.md b/tools/fwfetch/THIRD-PARTY.md
+index bdf0d01..9a3626b 100644
+--- a/tools/fwfetch/THIRD-PARTY.md
++++ b/tools/fwfetch/THIRD-PARTY.md
+@@ -8,6 +8,7 @@
+ |---|---|---|
+ | adler2 | 2.0.1 | 0BSD OR MIT OR Apache-2.0 |
+ | block-buffer | 0.10.4 | MIT OR Apache-2.0 |
++| bzip2 | 0.6.1 | MIT OR Apache-2.0 |
+ | cfg-if | 1.0.5 | MIT OR Apache-2.0 |
+ | cpufeatures | 0.2.17 | MIT OR Apache-2.0 |
+ | crc32fast | 1.5.5 | MIT OR Apache-2.0 |
+@@ -17,7 +18,9 @@
+ | generic-array | 0.14.7 | MIT |
+ | getrandom | 0.3.4 | MIT OR Apache-2.0 |
+ | itoa | 1.0.19 | MIT OR Apache-2.0 |
++| libbz2-rs-sys | 0.2.7 | bzip2-1.0.6 |
+ | libc | 0.2.191 | MIT OR Apache-2.0 |
++| lzma-rs | 0.3.0 | MIT |
+ | memchr | 2.8.3 | Unlicense OR MIT |
+ | miniz_oxide | 0.9.1 | MIT OR Zlib OR Apache-2.0 |
+ | proc-macro2 | 1.0.107 | MIT OR Apache-2.0 |
+diff --git a/tools/fwfetch/firmware-manifest.json b/tools/fwfetch/firmware-manifest.json
+index 3f3f673..7c33791 100644
+--- a/tools/fwfetch/firmware-manifest.json
++++ b/tools/fwfetch/firmware-manifest.json
+@@ -1,6 +1,6 @@
+ {
+  "schema": 1,
+- "about": "Files this project must NOT redistribute. They are taken from the user's own device/SD card (Switchroot install) and staged outside the repository. 'sha256' / 'size' are only filled in where a published value exists (windows-switch v0.8.0 ADD_THESE_FILES.txt / PUT_*_HERE.txt); everything else is trust-on-first-use and is marked unverified in the report. 'layout' says how sure we are about WHERE the file sits: documented = named by an upstream document, guess = a plausible path that has not been checked on a real image (the hash check rejects wrong guesses where a hash exists).",
++ "about": "Files this project must NOT redistribute. They are taken from the user's own device/SD card (Switchroot install) and staged outside the repository. 'sha256' / 'size' are only filled in where a published value exists (windows-switch v0.8.0 ADD_THESE_FILES.txt / PUT_*_HERE.txt); everything else is trust-on-first-use and is marked unverified in the report. A source may carry its own sha256: it is then taken only when the bytes match (used for gpu_nv_acr_ucode_prod, whose Windows name differs from the L4T name acr_ucode.bin: the alias is accepted only for the exact bytes that mesa-switch-woa docs/DRIVER.md documents under that Windows name). ext4 sources are looked up in every root-file-system-like volume: ext4 partitions, joined image pieces such as l4t.00/l4t.01, and --archive files (.deb, tar, tbz2). 'layout' says how sure we are about WHERE the file sits: documented = named by an upstream document, guess = a plausible path that has not been checked on a real image (the hash check rejects wrong guesses where a hash exists).",
+  "profiles": {
+   "aula": [
+    "bl31",
+@@ -227,7 +227,25 @@
+   },
+   {
+    "id": "gpu_nv_acr_ucode_prod",
+-   "gpu": "nv_acr_ucode_prod.bin"
++   "gpu": "nv_acr_ucode_prod.bin",
++   "sources": [
++    {
++     "type": "ext4",
++     "paths": [
++      "lib/firmware/gm20b/acr_ucode.bin",
++      "lib/firmware/tegra21x/acr_ucode.bin"
++     ],
++     "sha256": "f948c259ca1c9fc8aad3013fe67372243be025b2790016f0ad9e60f7f4534841"
++    },
++    {
++     "type": "fs",
++     "paths": [
++      "lib/firmware/gm20b/acr_ucode.bin",
++      "lib/firmware/tegra21x/acr_ucode.bin"
++     ],
++     "sha256": "f948c259ca1c9fc8aad3013fe67372243be025b2790016f0ad9e60f7f4534841"
++    }
++   ]
+   },
+   {
+    "id": "gpu_pmu_bl",
+@@ -322,6 +340,40 @@
+    ]
+   }
+  ],
++ "downloads": [
++  {
++   "id": "nvidia_l4t_bsp",
++   "what": "NVIDIA Jetson Linux (L4T) 32.7.6 driver package for Tegra X1 - official NVIDIA download, read while it arrives, never saved whole (no published checksum: files are checked against the manifest hashes where there are any)",
++   "type": "url",
++   "url": "https://developer.nvidia.com/downloads/embedded/l4t/r32_release_v7.6/t210/jetson-210_linux_r32.7.6_aarch64.tbz2",
++   "provides": [
++    "gpu_NETB_img",
++    "gpu_fecs",
++    "gpu_gpccs",
++    "gpu_nv_acr_ucode_prod",
++    "gpu_pmu_bl",
++    "gpu_gpmu_ucode_image",
++    "gpu_gpmu_ucode_desc",
++    "gpu_pmu_sig",
++    "gpu_fecs_sig",
++    "xusb_t210",
++    "xusb_t210b01"
++   ]
++  },
++  {
++   "id": "hekate_release",
++   "what": "hekate release package (CTCaer, GitHub): contains bootloader/sys/l4t/sc7entry.bin and sc7exit.bin",
++   "type": "github_latest",
++   "api": "https://api.github.com/repos/CTCaer/hekate/releases/latest",
++   "asset_prefix": "hekate_ctcaer_",
++   "asset_suffix": ".zip",
++   "download_prefix": "https://github.com/CTCaer/hekate/releases/download/",
++   "provides": [
++    "sc7entry",
++    "sc7exit"
++   ]
++  }
++ ],
+  "gpu_template": {
+   "what": "NVIDIA GM20B (tegra21x) GPU firmware, L4T 32.7.6 set expected by TegraGpu",
+   "owner": "NVIDIA CORPORATION (NVIDIA Software License; Windows use not granted)",
+diff --git a/tools/fwfetch/src/archive.rs b/tools/fwfetch/src/archive.rs
+new file mode 100644
+index 0000000..b34bd60
+--- /dev/null
++++ b/tools/fwfetch/src/archive.rs
+@@ -0,0 +1,424 @@
++// SPDX-License-Identifier: GPL-2.0-only
++//! Reads the files fwfetch wants out of archives you can download WITHOUT installing anything on an SD card:
++//! a Debian package (.deb = ar + data.tar.*), a tar, or a tar compressed with gzip / bzip2 / xz (.tar.gz .tgz .tbz2 .tar.xz), or a .zip (e.g. a hekate release).
++//!
++//! NVIDIA's Jetson Linux driver package (`jetson-210_linux_r32.x_aarch64.tbz2`) keeps the Tegra firmware one level down, in
++//! `Linux_for_Tegra/nv_tegra/nvidia_drivers.tbz2`, so that member (and `.deb` members with "firmware" in their name) is entered too.
++//! Nothing is extracted to disk: only the members the manifest asks for are kept in memory, and a member's name is used for matching
++//! only, never as an output path. Every size is bounded (decompression-bomb guard). zstd is NOT supported (it is reported, not guessed).
++use crate::reader::read_fill;
++use flate2::read::{DeflateDecoder, MultiGzDecoder};
++use std::collections::BTreeMap;
++use std::io::{self, Cursor, Read, Write};
++use std::path::Path;
++
++/// Decompressed bytes examined per stream (a whole Jetson BSP is about 1.5 GB as a tar).
++const MAX_STREAM: u64 = 6 << 30;
++/// xz is decoded into memory (the decoder has no streaming interface).
++const MAX_XZ: usize = 1 << 30;
++/// A nested archive is held in memory while it is read.
++const MAX_NESTED: u64 = 512 << 20;
++/// Total size of the members that are kept.
++const MAX_KEPT: u64 = 512 << 20;
++/// Wrapper / nesting depth (gzip inside tar inside bzip2 ...).
++const MAX_LAYERS: u8 = 6;
++
++type Rd<'a> = Box<dyn Read + 'a>;
++
++/// The kept members, by normalised path (no leading `./` or `/`; `usr/lib/x` is also kept as `lib/x`).
++pub struct Archive {
++    files: BTreeMap<String, Vec<u8>>,
++    /// problems with nested archives that did not stop the scan
++    pub notes: Vec<String>,
++}
++
++impl Archive {
++    pub fn len(&self) -> usize {
++        self.files.len()
++    }
++
++    pub fn read_file(&self, path: &str, max: u64) -> Option<Vec<u8>> {
++        self.files.get(path.trim_start_matches('/')).filter(|d| d.len() as u64 <= max).cloned()
++    }
++
++    /// Names of the kept files directly inside `dir`.
++    pub fn list_names(&self, dir: &str) -> Vec<String> {
++        let prefix = format!("{}/", dir.trim_matches('/'));
++        self.files.keys().filter_map(|k| k.strip_prefix(&prefix)).filter(|rest| !rest.contains('/')).map(str::to_string).collect()
++    }
++}
++
++struct Cx<'a> {
++    wanted: &'a dyn Fn(&str) -> bool,
++    max_member: u64,
++    files: BTreeMap<String, Vec<u8>>,
++    kept: u64,
++    notes: Vec<String>,
++}
++
++impl Cx<'_> {
++    fn keep(&mut self, key: String, data: Vec<u8>) -> Result<(), String> {
++        self.kept = self.kept.saturating_add(data.len() as u64);
++        if self.kept > MAX_KEPT {
++            return Err("archive: too much wanted data (limit reached)".into());
++        }
++        if let Some(rest) = key.strip_prefix("usr/lib/") {
++            self.files.entry(format!("lib/{rest}")).or_insert_with(|| data.clone());
++        }
++        self.files.entry(key).or_insert(data);
++        Ok(())
++    }
++}
++
++/// Opens `path` read-only and keeps every member for which `wanted(normalised path)` is true (and that is at most `max_member` bytes).
++pub fn open(path: &Path, wanted: &dyn Fn(&str) -> bool, max_member: u64) -> Result<Archive, String> {
++    let f = std::fs::File::open(path).map_err(|e| e.to_string())?;
++    open_reader(Box::new(io::BufReader::with_capacity(1 << 20, f)), wanted, max_member)
++}
++
++/// Same, on any byte stream (a download that is read while it arrives).
++pub fn open_reader(r: Box<dyn Read + '_>, wanted: &dyn Fn(&str) -> bool, max_member: u64) -> Result<Archive, String> {
++    let mut cx = Cx { wanted, max_member, files: BTreeMap::new(), kept: 0, notes: Vec::new() };
++    scan(r, 0, &mut cx)?;
++    Ok(Archive { files: cx.files, notes: cx.notes })
++}
++
++fn ioe(e: io::Error) -> String {
++    format!("corrupt or unreadable archive: {e}")
++}
++
++enum Kind {
++    Deb,
++    Zip,
++    Gz,
++    Bz2,
++    Xz,
++    Zst,
++    Tar,
++    Unknown,
++}
++
++fn sniff(h: &[u8]) -> Kind {
++    if h.starts_with(b"!<arch>\n") {
++        Kind::Deb
++    } else if h.starts_with(b"PK\x03\x04") {
++        Kind::Zip
++    } else if h.starts_with(&[0x1F, 0x8B]) {
++        Kind::Gz
++    } else if h.len() >= 4 && h.starts_with(b"BZh") && (b'1'..=b'9').contains(&h[3]) {
++        Kind::Bz2
++    } else if h.starts_with(&[0xFD, b'7', b'z', b'X', b'Z', 0]) {
++        Kind::Xz
++    } else if h.starts_with(&[0x28, 0xB5, 0x2F, 0xFD]) {
++        Kind::Zst
++    } else if h.len() == 512 && h[0] != 0 && tar_sum_ok(h) {
++        Kind::Tar
++    } else {
++        Kind::Unknown
++    }
++}
++
++fn scan<'a>(mut r: Rd<'a>, layer: u8, cx: &mut Cx) -> Result<(), String> {
++    if layer > MAX_LAYERS {
++        return Err("archives nested too deeply".into());
++    }
++    let mut head = [0u8; 512];
++    let n = read_fill(&mut r, &mut head).map_err(ioe)?;
++    let head = &head[..n];
++    let kind = sniff(head);
++    // give the sniffed bytes back to whoever reads next
++    let all: Rd<'a> = Box::new(Cursor::new(head.to_vec()).chain(r));
++    match kind {
++        Kind::Deb => scan_ar(all, layer, cx),
++        Kind::Zip => scan_zip(all, cx),
++        Kind::Gz => scan(Box::new(MultiGzDecoder::new(all).take(MAX_STREAM)), layer + 1, cx),
++        Kind::Bz2 => scan(Box::new(bzip2::read::MultiBzDecoder::new(all).take(MAX_STREAM)), layer + 1, cx),
++        Kind::Xz => {
++            let mut out = Capped(Vec::new());
++            lzma_rs::xz_decompress(&mut io::BufReader::new(all), &mut out).map_err(|e| format!("xz: {e}"))?;
++            scan(Box::new(Cursor::new(out.0)), layer + 1, cx)
++        }
++        Kind::Zst => Err("zstd archive not supported".into()),
++        Kind::Tar => scan_tar(all, layer, cx),
++        Kind::Unknown => Err("not a recognised archive (expected .deb, .zip, tar, or tar.gz / .bz2 / .xz)".into()),
++    }
++}
++
++/// A Vec that refuses to grow past MAX_XZ.
++struct Capped(Vec<u8>);
++impl Write for Capped {
++    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
++        if self.0.len().saturating_add(b.len()) > MAX_XZ {
++            return Err(io::Error::other("xz stream too large"));
++        }
++        self.0.extend_from_slice(b);
++        Ok(b.len())
++    }
++    fn flush(&mut self) -> io::Result<()> {
++        Ok(())
++    }
++}
++
++fn skip<R: Read + ?Sized>(r: &mut R, mut n: u64) -> Result<(), String> {
++    let mut buf = [0u8; 65536];
++    while n > 0 {
++        let want = n.min(buf.len() as u64) as usize;
++        let got = read_fill(r, &mut buf[..want]).map_err(ioe)?;
++        if got < want {
++            return Err("truncated archive".into());
++        }
++        n -= want as u64;
++    }
++    Ok(())
++}
++
++// ---------------------------------------------------------------- ar (.deb)
++
++fn scan_ar(mut r: Rd<'_>, layer: u8, cx: &mut Cx) -> Result<(), String> {
++    let mut magic = [0u8; 8];
++    if read_fill(&mut r, &mut magic).map_err(ioe)? != 8 || &magic != b"!<arch>\n" {
++        return Err("not an ar archive".into());
++    }
++    loop {
++        let mut h = [0u8; 60];
++        let n = read_fill(&mut r, &mut h).map_err(ioe)?;
++        if n == 0 {
++            return Err("no data.tar member in this .deb".into());
++        }
++        if n < 60 || &h[58..60] != b"`\n" {
++            return Err("bad ar member header".into());
++        }
++        let name = String::from_utf8_lossy(&h[0..16]).trim().trim_end_matches('/').to_string();
++        let size: u64 = String::from_utf8_lossy(&h[48..58]).trim().parse().map_err(|_| "bad ar member size".to_string())?;
++        let pad = size & 1;
++        if name == "data.tar" || name.starts_with("data.tar.") {
++            let mut t = (&mut r).take(size);
++            return scan(Box::new(&mut t), layer + 1, cx); // the rest of the .deb is not needed
++        }
++        skip(&mut r, size.checked_add(pad).ok_or("ar size overflow")?)?;
++    }
++}
++
++// ---------------------------------------------------------------- tar
++
++/// Octal number field (NUL / space padded). Base-256 (binary) sizes are not supported.
++fn parse_octal(f: &[u8]) -> Option<u64> {
++    if f.first().is_some_and(|b| b & 0x80 != 0) {
++        return None;
++    }
++    let mut v = 0u64;
++    let mut seen = false;
++    for &b in f {
++        match b {
++            b' ' | 0 if !seen => continue,
++            b'0'..=b'7' => {
++                v = v.checked_mul(8)?.checked_add((b - b'0') as u64)?;
++                seen = true;
++            }
++            b' ' | 0 => break,
++            _ => return None,
++        }
++    }
++    Some(v)
++}
++
++fn tar_sum_ok(h: &[u8]) -> bool {
++    let Some(stored) = parse_octal(&h[148..156]) else { return false };
++    let sum: u64 = h.iter().enumerate().map(|(i, &b)| if (148..156).contains(&i) { 32 } else { b as u64 }).sum();
++    sum == stored
++}
++
++fn cstr(b: &[u8]) -> String {
++    let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
++    String::from_utf8_lossy(&b[..end]).into_owned()
++}
++
++fn ustar_name(h: &[u8]) -> String {
++    let name = cstr(&h[0..100]);
++    if &h[257..263] == b"ustar\0" {
++        let prefix = cstr(&h[345..500]);
++        if !prefix.is_empty() {
++            return format!("{prefix}/{name}");
++        }
++    }
++    name
++}
++
++/// The `path=` record of a pax extended header ("LEN key=value\n" records).
++fn pax_path(d: &[u8]) -> Option<String> {
++    let mut p = 0usize;
++    let mut found = None;
++    while p < d.len() {
++        let Some(sp) = d[p..].iter().position(|&b| b == b' ') else { break };
++        let Some(len) = std::str::from_utf8(&d[p..p + sp]).ok().and_then(|s| s.parse::<usize>().ok()) else { break };
++        if len <= sp + 1 || p + len > d.len() {
++            break;
++        }
++        let rec = &d[p + sp + 1..p + len];
++        let rec = rec.strip_suffix(b"\n").unwrap_or(rec);
++        if let Some(v) = rec.strip_prefix(b"path=") {
++            found = Some(String::from_utf8_lossy(v).into_owned());
++        }
++        p += len;
++    }
++    found
++}
++
++fn normalize(n: &str) -> String {
++    let mut s = n;
++    loop {
++        if let Some(r) = s.strip_prefix("./") {
++            s = r;
++        } else if let Some(r) = s.strip_prefix('/') {
++            s = r;
++        } else {
++            break;
++        }
++    }
++    s.trim_end_matches('/').to_string()
++}
++
++/// Archives that are worth opening when met inside another archive (everything else nested is skipped unread).
++fn nested_ok(key: &str) -> bool {
++    let base = key.rsplit('/').next().unwrap_or(key);
++    base == "nvidia_drivers.tbz2" || (base.ends_with(".deb") && base.contains("firmware"))
++}
++
++fn scan_tar(mut r: Rd<'_>, layer: u8, cx: &mut Cx) -> Result<(), String> {
++    let mut long_name: Option<String> = None;
++    let mut pax: Option<String> = None;
++    loop {
++        let mut h = [0u8; 512];
++        let n = read_fill(&mut r, &mut h).map_err(ioe)?;
++        if n == 0 {
++            break; // some tars have no end marker
++        }
++        if n < 512 {
++            return Err("truncated tar".into());
++        }
++        if h.iter().all(|&b| b == 0) {
++            break;
++        }
++        if !tar_sum_ok(&h) {
++            return Err("bad tar header (not a tar, or corrupt)".into());
++        }
++        let size = parse_octal(&h[124..136]).ok_or("unsupported tar size field")?;
++        let padded = size.checked_add(511).ok_or("tar size overflow")? & !511;
++        let ty = h[156];
++        match ty {
++            b'L' | b'x' => {
++                if size > 64 * 1024 {
++                    return Err("tar extension header too large".into());
++                }
++                let mut d = vec![0u8; padded as usize];
++                if read_fill(&mut r, &mut d).map_err(ioe)? != d.len() {
++                    return Err("truncated tar".into());
++                }
++                d.truncate(size as usize);
++                if ty == b'L' {
++                    long_name = Some(cstr(&d));
++                } else {
++                    pax = pax_path(&d);
++                }
++                continue;
++            }
++            b'g' => {
++                skip(&mut r, padded)?;
++                continue;
++            }
++            _ => {}
++        }
++        let (a, b) = (pax.take(), long_name.take());
++        let name = a.or(b).unwrap_or_else(|| ustar_name(&h));
++        if !(ty == b'0' || ty == 0 || ty == b'7') {
++            skip(&mut r, padded)?; // directories, links, devices
++            continue;
++        }
++        let key = normalize(&name);
++        let keep = (cx.wanted)(&key) && size <= cx.max_member;
++        let nested = !keep && layer < MAX_LAYERS && size <= MAX_NESTED && nested_ok(&key);
++        if keep || nested {
++            let mut d = vec![0u8; size as usize];
++            if read_fill(&mut r, &mut d).map_err(ioe)? != d.len() {
++                return Err("truncated tar".into());
++            }
++            skip(&mut r, padded - size)?;
++            if keep {
++                cx.keep(key, d)?;
++            } else if let Err(e) = scan(Box::new(Cursor::new(d)), layer + 1, cx) {
++                cx.notes.push(format!("nested {key}: {e}"));
++            }
++        } else {
++            skip(&mut r, padded)?;
++        }
++    }
++    Ok(())
++}
++
++// ---------------------------------------------------------------- zip
++
++/// A zip is read through its central directory, so the whole file is held in memory (release zips are small).
++const MAX_ZIP: u64 = 64 << 20;
++
++fn le16(b: &[u8], o: usize) -> Option<usize> {
++    Some(u16::from_le_bytes(b.get(o..o.checked_add(2)?)?.try_into().ok()?) as usize)
++}
++fn le32(b: &[u8], o: usize) -> Option<u64> {
++    Some(u32::from_le_bytes(b.get(o..o.checked_add(4)?)?.try_into().ok()?) as u64)
++}
++
++fn scan_zip(r: Rd<'_>, cx: &mut Cx) -> Result<(), String> {
++    let mut z = Vec::new();
++    r.take(MAX_ZIP + 1).read_to_end(&mut z).map_err(ioe)?;
++    if z.len() as u64 > MAX_ZIP {
++        return Err("zip too large".into());
++    }
++    let bad = || "corrupt zip".to_string();
++    let from = z.len().saturating_sub(22 + 65535);
++    let eocd = (from..z.len().saturating_sub(21)).rev().find(|&i| z[i..].starts_with(b"PK\x05\x06")).ok_or("zip has no end record (truncated?)")?;
++    let n = le16(&z, eocd + 10).ok_or_else(bad)?;
++    let cd_size = le32(&z, eocd + 12).ok_or_else(bad)?;
++    let cd_off = le32(&z, eocd + 16).ok_or_else(bad)?;
++    if cd_off == 0xFFFF_FFFF || cd_size == 0xFFFF_FFFF || n == 0xFFFF {
++        return Err("zip64 is not supported".into());
++    }
++    let mut p = usize::try_from(cd_off).map_err(|_| bad())?;
++    for _ in 0..n {
++        if z.get(p..p + 4) != Some(b"PK\x01\x02") {
++            return Err(bad());
++        }
++        let flags = le16(&z, p + 8).ok_or_else(bad)?;
++        let method = le16(&z, p + 10).ok_or_else(bad)?;
++        let crc = le32(&z, p + 16).ok_or_else(bad)?;
++        let csize = le32(&z, p + 20).ok_or_else(bad)?;
++        let usize_ = le32(&z, p + 24).ok_or_else(bad)?;
++        let (nl, el, cl) = (le16(&z, p + 28).ok_or_else(bad)?, le16(&z, p + 30).ok_or_else(bad)?, le16(&z, p + 32).ok_or_else(bad)?);
++        let lho = usize::try_from(le32(&z, p + 42).ok_or_else(bad)?).map_err(|_| bad())?;
++        let name = String::from_utf8_lossy(z.get(p + 46..p + 46 + nl).ok_or_else(bad)?).into_owned();
++        p = p.checked_add(46 + nl + el + cl).ok_or_else(bad)?;
++        let key = normalize(&name);
++        if name.ends_with('/') || !(cx.wanted)(&key) || usize_ > cx.max_member || flags & 1 != 0 {
++            continue;
++        }
++        if z.get(lho..lho + 4) != Some(b"PK\x03\x04") {
++            return Err(bad());
++        }
++        let start = lho.checked_add(30 + le16(&z, lho + 26).ok_or_else(bad)? + le16(&z, lho + 28).ok_or_else(bad)?).ok_or_else(bad)?;
++        let end = start.checked_add(usize::try_from(csize).map_err(|_| bad())?).ok_or_else(bad)?;
++        let raw = z.get(start..end).ok_or_else(bad)?;
++        let data = match method {
++            0 => raw.to_vec(),
++            8 => {
++                let mut d = Vec::new();
++                DeflateDecoder::new(raw).take(usize_ + 1).read_to_end(&mut d).map_err(ioe)?;
++                d
++            }
++            m => return Err(format!("zip member {key}: compression method {m} is not supported")),
++        };
++        if data.len() as u64 != usize_ || crc32fast::hash(&data) as u64 != crc {
++            return Err(format!("zip member {key}: size or CRC does not match"));
++        }
++        cx.keep(key, data)?;
++    }
++    Ok(())
++}
+diff --git a/tools/fwfetch/src/download.rs b/tools/fwfetch/src/download.rs
+new file mode 100644
+index 0000000..134ba9a
+--- /dev/null
++++ b/tools/fwfetch/src/download.rs
+@@ -0,0 +1,128 @@
++// SPDX-License-Identifier: GPL-2.0-only
++//! Official downloads, done by the system's own `curl` (Windows 10 1803+ ships curl.exe in System32) so that no TLS stack is built in.
++//! Meant to run ON the Switch, from the start-up task, when a file is still missing: the data is streamed straight into the
++//! archive reader and nothing but the wanted members is kept - no multi-hundred-MB file is written to the SD card.
++//!
++//! Safety: only https, only the hosts below (redirects are limited to https, too), no URL comes from a downloaded file except the
++//! GitHub release asset, which must start with the manifest's `download_prefix`. `FWFETCH_TEST_LOOPBACK=1` additionally accepts
++//! `http://127.0.0.1:PORT/` and exists only so the test-suite can run a local server.
++use crate::manifest::Download;
++use std::io::{self, Read};
++use std::process::{Child, ChildStdout, Command, Stdio};
++
++/// Hosts a manifest URL may name. (NVIDIA redirects its package link to developer.download.nvidia.com.)
++pub const HOSTS: &[&str] = &["developer.nvidia.com", "developer.download.nvidia.com", "github.com", "api.github.com"];
++
++fn loopback_ok() -> bool {
++    std::env::var_os("FWFETCH_TEST_LOOPBACK").is_some_and(|v| v == "1")
++}
++
++pub fn check_url(u: &str) -> Result<(), String> {
++    if loopback_ok() && u.starts_with("http://127.0.0.1:") && !u.contains('@') && u.bytes().all(|b| b.is_ascii_graphic()) {
++        return Ok(());
++    }
++    let rest = u.strip_prefix("https://").ok_or_else(|| format!("only https URLs are allowed: '{u}'"))?;
++    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
++    let host = &rest[..host_end];
++    if !HOSTS.contains(&host) {
++        return Err(format!("host '{host}' is not one of the allowed download hosts"));
++    }
++    if !u.bytes().all(|b| b.is_ascii_graphic()) || u.contains('\\') {
++        return Err("URL contains characters that are not allowed".into());
++    }
++    Ok(())
++}
++
++fn curl_cmd(url: &str, retry: bool) -> Command {
++    let mut c = Command::new(if cfg!(windows) { "curl.exe" } else { "curl" });
++    let proto = if url.starts_with("https://") { "=https" } else { "=http" };
++    c.args(["--fail", "--silent", "--show-error", "--location", "--max-redirs", "5", "--proto", proto, "--proto-redir", "=https"]);
++    if proto == "=http" {
++        c.args(["--proto-redir", "=http,https"]); // test server only
++    }
++    // a stalled link ends the attempt (1 KB/s for 2 minutes), the next start tries again
++    c.args(["--connect-timeout", "30", "--speed-limit", "1000", "--speed-time", "120", "-A", "fwfetch/1.2"]);
++    if retry {
++        c.args(["--retry", "3", "--retry-delay", "5"]);
++    }
++    c.arg("--").arg(url);
++    c
++}
++
++fn spawn_err(e: io::Error) -> String {
++    if e.kind() == io::ErrorKind::NotFound {
++        "curl was not found (Windows 10 1803 and later ship curl.exe in System32; otherwise install curl, or pass the files with --archive)".into()
++    } else {
++        format!("cannot start curl: {e}")
++    }
++}
++
++/// A running download whose bytes are read as they arrive.
++pub struct Stream {
++    child: Child,
++    out: Option<ChildStdout>,
++}
++
++impl Read for Stream {
++    fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
++        self.out.as_mut().map_or(Ok(0), |o| o.read(b))
++    }
++}
++
++impl Stream {
++    /// Stops curl and returns what it said on stderr (empty when it simply was not needed any more).
++    pub fn finish(mut self) -> String {
++        drop(self.out.take());
++        let _ = self.child.kill();
++        let mut msg = String::new();
++        if let Some(mut e) = self.child.stderr.take() {
++            let _ = e.by_ref().take(4096).read_to_string(&mut msg);
++        }
++        let _ = self.child.wait();
++        msg.trim().to_string()
++    }
++}
++
++pub fn open_stream(url: &str) -> Result<Stream, String> {
++    check_url(url)?;
++    let mut child = curl_cmd(url, false).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(spawn_err)?;
++    let out = child.stdout.take();
++    Ok(Stream { child, out })
++}
++
++/// A small response (release JSON), at most `max` bytes.
++pub fn fetch_small(url: &str, max: u64) -> Result<Vec<u8>, String> {
++    check_url(url)?;
++    let o = curl_cmd(url, true).stdin(Stdio::null()).output().map_err(spawn_err)?;
++    if !o.status.success() {
++        return Err(format!("download failed: {}", String::from_utf8_lossy(&o.stderr).trim()));
++    }
++    if o.stdout.len() as u64 > max {
++        return Err("response too large".into());
++    }
++    Ok(o.stdout)
++}
++
++/// The URL to stream for this download.
++pub fn resolve(d: &Download) -> Result<String, String> {
++    match d.kind.as_str() {
++        "url" => d.url.clone().ok_or_else(|| "no url".to_string()),
++        "github_latest" => {
++            let (Some(api), Some(prefix), Some(a), Some(z)) = (&d.api, &d.download_prefix, &d.asset_prefix, &d.asset_suffix) else {
++                return Err("incomplete download entry".into());
++            };
++            let body = fetch_small(api, 4 << 20)?;
++            let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| format!("release information is not JSON: {e}"))?;
++            let assets = v.get("assets").and_then(|a| a.as_array()).ok_or("release information has no assets")?;
++            for it in assets {
++                let name = it.get("name").and_then(|n| n.as_str()).unwrap_or("");
++                let url = it.get("browser_download_url").and_then(|n| n.as_str()).unwrap_or("");
++                if name.starts_with(a.as_str()) && name.ends_with(z.as_str()) && url.starts_with(prefix.as_str()) && check_url(url).is_ok() {
++                    return Ok(url.to_string());
++                }
++            }
++            Err("no matching release asset".into())
++        }
++        k => Err(format!("unknown download type {k}")),
++    }
++}
+diff --git a/tools/fwfetch/src/ext4.rs b/tools/fwfetch/src/ext4.rs
+index 8dc0285..7b91694 100644
+--- a/tools/fwfetch/src/ext4.rs
++++ b/tools/fwfetch/src/ext4.rs
+@@ -3,7 +3,6 @@
+ //! Every offset taken from the (untrusted) image is bounds- and overflow-checked; failures are errors, not panics.
+ use crate::reader::Aligned;
+ use std::collections::{BTreeMap, HashMap};
+-use std::path::Path;
+ use std::rc::Rc;
+ 
+ type Res<T> = Result<T, String>;
+@@ -36,8 +35,8 @@ pub struct Ext4 {
+ 
+ impl Ext4 {
+     /// Err(why) if there is no ext superblock at `base` or the volume uses features we cannot read.
+-    pub fn try_open(path: &Path, base: u64) -> Res<Ext4> {
+-        let mut d = Aligned::open(path).map_err(|e| e.to_string())?;
++    /// `d` is an already opened source (a raw disk, or several joined image parts).
++    pub fn try_open_with(mut d: Aligned, base: u64) -> Res<Ext4> {
+         let sb_off = base.checked_add(1024).ok_or("bad offset")?;
+         let sb = d.read_vec(sb_off, 1024).map_err(|_| "short read".to_string())?;
+         if u16le(&sb, 56)? != 0xEF53 {
+diff --git a/tools/fwfetch/src/image.rs b/tools/fwfetch/src/image.rs
+new file mode 100644
+index 0000000..ca293f0
+--- /dev/null
++++ b/tools/fwfetch/src/image.rs
+@@ -0,0 +1,33 @@
++// SPDX-License-Identifier: GPL-2.0-only
++//! Split disk / file-system images: `l4t.00`, `l4t.01`, ... are one image cut into pieces (FAT32 cannot hold a file over 4 GiB).
++use std::fs;
++use std::path::{Path, PathBuf};
++
++/// Most pieces joined (4 GiB each would already be 1 TiB).
++const MAX_PARTS: usize = 256;
++
++/// `first` plus the pieces that follow it (`name.NN` -> `name.NN+1` ... in the same folder, same digit count).
++/// A file whose name does not end in `.` + at least two digits is a single image.
++pub fn parts_of(first: &Path) -> Vec<PathBuf> {
++    let single = || vec![first.to_path_buf()];
++    let Some(name) = first.file_name().and_then(|n| n.to_str()) else { return single() };
++    let Some((stem, num)) = name.rsplit_once('.') else { return single() };
++    if stem.is_empty() || num.len() < 2 || !num.bytes().all(|b| b.is_ascii_digit()) {
++        return single();
++    }
++    let Ok(mut n) = num.parse::<u64>() else { return single() };
++    let width = num.len();
++    let dir = first.parent().map(Path::to_path_buf).unwrap_or_default();
++    let mut v = single();
++    while v.len() < MAX_PARTS {
++        n += 1;
++        let cand = dir.join(format!("{stem}.{n:0width$}"));
++        // regular files only (a symlink is not followed)
++        if fs::symlink_metadata(&cand).map(|m| m.is_file()).unwrap_or(false) {
++            v.push(cand);
++        } else {
++            break;
++        }
++    }
++    v
++}
+diff --git a/tools/fwfetch/src/main.rs b/tools/fwfetch/src/main.rs
+index daa003b..a997058 100644
+--- a/tools/fwfetch/src/main.rs
++++ b/tools/fwfetch/src/main.rs
+@@ -2,8 +2,11 @@
+ #![forbid(unsafe_code)]
+ //! fwfetch - collect, from YOUR OWN Switch SD card, the files this project may not redistribute
+ //! (NVIDIA / Broadcom / Switchroot builds). Read-only on every source; stages outside any git work tree.
++mod archive;
++mod download;
+ mod ext4;
+ mod ihex;
++mod image;
+ mod initramfs;
+ mod manifest;
+ mod part;
+@@ -16,12 +19,21 @@ use std::path::PathBuf;
+ use std::process::ExitCode;
+ 
+ const HELP: &str = "\
+-fwfetch 1.1 - read firmware you may not redistribute from YOUR OWN Switch SD card (read-only), verify, stage.
++fwfetch 1.2 - read firmware you may not redistribute from YOUR OWN files (SD card, downloads; read-only), verify, stage.
++(No SD card with an installed Switchroot is needed: see --image and --archive.)
+ 
+ USAGE: fwfetch [OPTIONS]
+   --profile <aula|lite|erista|all>   what to collect (default: aula)
+   --search-root <DIR>                folder to search (FAT32 'switchroot' parent, rootfs copy, kernel tree); repeatable
+   --disk <FILE|\\\\.\\PhysicalDriveN>    raw disk / partition image to scan for an ext4 volume (read-only); repeatable
++  --image <FILE>                     same as --disk, meant for files. A numbered piece (l4t.00) is joined with l4t.01, l4t.02, ... so the
++                                     downloaded Switchroot root-file-system image is read directly - nothing has to be flashed to an SD card
++  --archive <FILE>                   a .deb, a tar, or a tar.gz / .tbz2 / .tar.xz to read the files from (read-only); repeatable.
++                                     e.g. NVIDIA's jetson-210_linux_r32.7.6_aarch64.tbz2 (GPU + XUSB firmware). zstd is not supported
++  --download                         for files still missing after the local search: download them from the OFFICIAL sources listed in the
++                                     manifest (NVIDIA Jetson Linux package for GPU / XUSB firmware, the hekate release for sc7entry/sc7exit)
++                                     with the system's curl, streamed and never saved whole. Meant for the Switch itself at Windows start-up.
++                                     Wi-Fi / Bluetooth firmware and bl31.bin have no such source (Wi-Fi also needs that firmware to get online)
+   --auto                             Windows: also every ready drive letter, every volume WITHOUT a drive letter (the Switch's FAT32
+                                      'switchroot' partition often has none), and (administrator) every physical disk
+   --out-dir <DIR>                    staging directory (default %LOCALAPPDATA%\\W4T\\fw-cache). Refused inside a git work tree
+@@ -44,6 +56,8 @@ fn parse() -> Result<Option<run::Opts>, String> {
+         out_dir: None,
+         search_roots: vec![],
+         disks: vec![],
++        archives: vec![],
++        download: false,
+         auto: false,
+         deploy: None,
+         deploy_gpu: None,
+@@ -78,6 +92,9 @@ fn parse() -> Result<Option<run::Opts>, String> {
+             "--out-dir" => o.out_dir = Some(winvol::resolve_dir(&val("--out-dir")?, None)?),
+             "--search-root" => o.search_roots.push(PathBuf::from(val("--search-root")?)),
+             "--disk" => o.disks.push(PathBuf::from(val("--disk")?)),
++            "--image" => o.disks.push(PathBuf::from(val("--image")?)),
++            "--download" => o.download = true,
++            "--archive" => o.archives.push(PathBuf::from(val("--archive")?)),
+             "--deploy" => o.deploy = Some(winvol::resolve_dir(&val("--deploy")?, None)?),
+             "--deploy-gpu" => o.deploy_gpu = Some(winvol::resolve_dir(&val("--deploy-gpu")?, Some("TegraGpu"))?),
+             "--deploy-drivers" => o.deploy_drivers = Some(winvol::resolve_dir(&val("--deploy-drivers")?, Some(""))?),
+diff --git a/tools/fwfetch/src/manifest.rs b/tools/fwfetch/src/manifest.rs
+index 56f0a70..69fbf0a 100644
+--- a/tools/fwfetch/src/manifest.rs
++++ b/tools/fwfetch/src/manifest.rs
+@@ -32,6 +32,9 @@ pub struct Source {
+     pub scan: Vec<String>,
+     pub member: Option<String>,
+     pub search_dir: Option<String>,
++    /// SHA-256 that THIS source must match (and that counts as verification when it does). For a file that is stored under a
++    /// different name elsewhere (e.g. L4T's gm20b/acr_ucode.bin): it is taken only if its bytes are exactly the documented ones.
++    pub sha256: Option<String>,
+ }
+ 
+ #[derive(Deserialize, Clone, Default)]
+@@ -48,6 +51,26 @@ pub struct FileEntry {
+     pub sources: Vec<Source>,
+ }
+ 
++/// An official download that can supply some of the files when they are not found locally (`--download`).
++/// `url` is fetched as it is; `github_latest` asks the GitHub release API for the newest release and takes the asset whose
++/// name starts with `asset_prefix` and ends with `asset_suffix`. Only https URLs on the hosts in `download::HOSTS` are accepted.
++#[derive(Deserialize, Clone, Default)]
++pub struct Download {
++    pub id: String,
++    #[serde(default)]
++    pub what: String,
++    #[serde(rename = "type")]
++    pub kind: String,
++    pub url: Option<String>,
++    pub api: Option<String>,
++    pub asset_prefix: Option<String>,
++    pub asset_suffix: Option<String>,
++    pub download_prefix: Option<String>,
++    /// ids of the files this download can supply
++    #[serde(default)]
++    pub provides: Vec<String>,
++}
++
+ #[derive(Deserialize)]
+ pub struct GpuTemplate {
+     pub what: String,
+@@ -59,6 +82,8 @@ pub struct Manifest {
+     pub profiles: BTreeMap<String, Vec<String>>,
+     pub files: Vec<FileEntry>,
+     pub gpu_template: GpuTemplate,
++    #[serde(default)]
++    pub downloads: Vec<Download>,
+ }
+ 
+ /// One concrete thing to collect (GPU shorthand already expanded).
+@@ -95,7 +120,7 @@ fn check_hash(id: &str, e: &Expect) -> Result<(), String> {
+     Ok(())
+ }
+ 
+-pub type Loaded = (BTreeMap<String, Vec<String>>, BTreeMap<String, Entry>);
++pub type Loaded = (BTreeMap<String, Vec<String>>, BTreeMap<String, Entry>, Vec<Download>);
+ 
+ pub fn load(text: &str) -> Result<Loaded, String> {
+     let m: Manifest = serde_json::from_str(text).map_err(|e| format!("manifest: {e}"))?;
+@@ -118,10 +143,14 @@ pub fn load(text: &str) -> Result<Loaded, String> {
+                 drivers: Vec::new(),
+                 gpu_name: Some(g.clone()),
+                 stage_rel: format!("gpu/{g}"),
+-                sources: vec![
++                // the template places first; a GPU entry may add its own sources (hash-gated aliases) after them
++                sources: [
+                     Source { kind: "ext4".into(), paths: paths.clone(), ..Default::default() },
+                     Source { kind: "fs".into(), paths, ..Default::default() },
+-                ],
++                ]
++                .into_iter()
++                .chain(f.sources.iter().cloned())
++                .collect(),
+             }
+         } else {
+             let first = f.deploy.windows_switch.first().ok_or_else(|| format!("manifest: '{}' has no deploy path", f.id))?;
+@@ -151,6 +180,9 @@ pub fn load(text: &str) -> Result<Loaded, String> {
+                     return Err(format!("manifest: unsafe source path '{p}' in '{}'", entry.id));
+                 }
+             }
++            if s.sha256.is_some() {
++                check_hash(&entry.id, &Expect { size: None, sha256: s.sha256.clone() })?;
++            }
+         }
+         if out.insert(entry.id.clone(), entry).is_some() {
+             return Err(format!("manifest: duplicate id '{}'", f.id));
+@@ -163,5 +195,33 @@ pub fn load(text: &str) -> Result<Loaded, String> {
+             }
+         }
+     }
+-    Ok((m.profiles, out))
++    let mut seen = std::collections::BTreeSet::new();
++    for d in &m.downloads {
++        if !seen.insert(d.id.clone()) {
++            return Err(format!("manifest: duplicate download id '{}'", d.id));
++        }
++        match d.kind.as_str() {
++            "url" => {
++                let u = d.url.as_deref().ok_or_else(|| format!("manifest: download '{}' has no url", d.id))?;
++                crate::download::check_url(u).map_err(|e| format!("manifest: download '{}': {e}", d.id))?;
++            }
++            "github_latest" => {
++                for (name, v) in [("api", &d.api), ("download_prefix", &d.download_prefix), ("asset_prefix", &d.asset_prefix), ("asset_suffix", &d.asset_suffix)] {
++                    if v.is_none() {
++                        return Err(format!("manifest: download '{}' has no {name}", d.id));
++                    }
++                }
++                for u in [d.api.as_deref().unwrap_or(""), d.download_prefix.as_deref().unwrap_or("")] {
++                    crate::download::check_url(u).map_err(|e| format!("manifest: download '{}': {e}", d.id))?;
++                }
++            }
++            other => return Err(format!("manifest: unknown download type '{other}' in '{}'", d.id)),
++        }
++        for id in &d.provides {
++            if !out.contains_key(id) {
++                return Err(format!("manifest: download '{}' provides unknown id '{id}'", d.id));
++            }
++        }
++    }
++    Ok((m.profiles, out, m.downloads))
+ }
+diff --git a/tools/fwfetch/src/reader.rs b/tools/fwfetch/src/reader.rs
+index 789ed49..333069f 100644
+--- a/tools/fwfetch/src/reader.rs
++++ b/tools/fwfetch/src/reader.rs
+@@ -1,31 +1,71 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ //! Read-only, sector-aligned random access. Raw disks (\\.\PhysicalDriveN) only accept reads whose offset and
+ //! length are multiples of the sector size, so every read is served from a 64 KiB aligned chunk cache.
+-//! The file is opened with `File::open` (read access only): nothing in this program can write to a source.
++//! The files are opened with `File::open` (read access only): nothing in this program can write to a source.
++//!
++//! One `Aligned` can also present several files as ONE contiguous image (`open_parts`): that is how a root file system
++//! that was split into `l4t.00`, `l4t.01`, ... (to fit FAT32's 4 GiB limit) is read without flashing it to a partition.
+ use std::fs::File;
+ use std::io::{self, Read, Seek, SeekFrom};
+-use std::path::Path;
++use std::path::{Path, PathBuf};
+ 
+ const CHUNK: u64 = 64 * 1024;
+ 
+-pub struct Aligned {
++struct Seg {
+     file: File,
++    /// offset of this file inside the joined image
++    start: u64,
++    /// length of this file (u64::MAX for a single raw device, whose metadata length is not reliable)
++    len: u64,
++}
++
++pub struct Aligned {
++    segs: Vec<Seg>,
+     cache_start: u64,
+     cache: Vec<u8>,
+     valid: bool,
+ }
+ 
+ impl Aligned {
++    fn with_segs(segs: Vec<Seg>) -> Self {
++        Self { segs, cache_start: 0, cache: Vec::new(), valid: false }
++    }
++
+     pub fn open(p: &Path) -> io::Result<Self> {
+-        Ok(Self { file: File::open(p)?, cache_start: 0, cache: Vec::new(), valid: false })
++        Ok(Self::with_segs(vec![Seg { file: File::open(p)?, start: 0, len: u64::MAX }]))
++    }
++
++    /// The files, in the given order, as one contiguous read-only image.
++    pub fn open_parts(paths: &[PathBuf]) -> io::Result<Self> {
++        if paths.is_empty() {
++            return Err(io::Error::new(io::ErrorKind::InvalidInput, "no image parts"));
++        }
++        if paths.len() == 1 {
++            return Self::open(&paths[0]);
++        }
++        let mut segs = Vec::with_capacity(paths.len());
++        let mut start = 0u64;
++        for p in paths {
++            let file = File::open(p)?;
++            let len = file.metadata()?.len();
++            segs.push(Seg { file, start, len });
++            start = start.checked_add(len).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "image parts too large"))?;
++        }
++        Ok(Self::with_segs(segs))
+     }
+ 
+     fn fill(&mut self, start: u64) -> io::Result<()> {
+-        self.file.seek(SeekFrom::Start(start))?;
+         let mut buf = vec![0u8; CHUNK as usize];
+         let mut got = 0usize;
+         while got < buf.len() {
+-            match self.file.read(&mut buf[got..]) {
++            let pos = start + got as u64;
++            // the part that holds `pos` (a chunk may straddle two parts)
++            let Some(seg) = self.segs.iter_mut().find(|s| pos >= s.start && pos - s.start < s.len) else { break };
++            let local = pos - seg.start;
++            seg.file.seek(SeekFrom::Start(local))?;
++            let room = usize::try_from(seg.len - local).unwrap_or(usize::MAX);
++            let want = (buf.len() - got).min(room);
++            match seg.file.read(&mut buf[got..got + want]) {
+                 Ok(0) => break,
+                 Ok(n) => got += n,
+                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+@@ -68,7 +108,7 @@ impl Aligned {
+ }
+ 
+ /// Reads until `buf` is full or EOF; returns the number of bytes read.
+-pub fn read_fill<R: Read>(r: &mut R, buf: &mut [u8]) -> io::Result<usize> {
++pub fn read_fill<R: Read + ?Sized>(r: &mut R, buf: &mut [u8]) -> io::Result<usize> {
+     let mut got = 0;
+     while got < buf.len() {
+         match r.read(&mut buf[got..]) {
+diff --git a/tools/fwfetch/src/run.rs b/tools/fwfetch/src/run.rs
+index 9080e59..ca0a5a0 100644
+--- a/tools/fwfetch/src/run.rs
++++ b/tools/fwfetch/src/run.rs
+@@ -1,10 +1,12 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ //! Orchestration: find candidates for each manifest entry, accept only those that match the published size/hash,
+ //! stage them OUTSIDE the repository, pin them in fw-lock.json, optionally deploy.
++use crate::archive::{self, Archive};
++use crate::download;
+ use crate::ext4::Ext4;
+ use crate::manifest::{self, Entry, Expect};
+ use crate::reader::Aligned;
+-use crate::{ihex, initramfs, part, util, winvol};
++use crate::{ihex, image, initramfs, part, util, winvol};
+ use serde::{Deserialize, Serialize};
+ use std::collections::{BTreeMap, BTreeSet};
+ use std::path::{Path, PathBuf};
+@@ -16,6 +18,10 @@ pub struct Opts {
+     pub out_dir: Option<PathBuf>,
+     pub search_roots: Vec<PathBuf>,
+     pub disks: Vec<PathBuf>,
++    /// .deb / tar / tar.gz / .tbz2 / .tar.xz files that are read like a root file system
++    pub archives: Vec<PathBuf>,
++    /// fetch what is still missing from the official downloads of the manifest
++    pub download: bool,
+     pub auto: bool,
+     pub deploy: Option<PathBuf>,
+     pub deploy_gpu: Option<PathBuf>,
+@@ -53,18 +59,41 @@ struct LockEntry {
+     drivers: Vec<String>,
+ }
+ 
++/// Something that looks like a root file system: an ext4 volume, or the wanted members of an archive.
++enum Fs {
++    Ext4(Box<Ext4>),
++    Archive(Archive),
++}
++
++impl Fs {
++    fn read_file(&mut self, p: &str, max: u64) -> Result<Option<Vec<u8>>, String> {
++        match self {
++            Fs::Ext4(e) => e.read_file(p, max),
++            Fs::Archive(a) => Ok(a.read_file(p, max)),
++        }
++    }
++    fn list_names(&mut self, dir: &str) -> Result<Vec<String>, String> {
++        match self {
++            Fs::Ext4(e) => e.list_names(dir),
++            Fs::Archive(a) => Ok(a.list_names(dir)),
++        }
++    }
++}
++
+ struct Volume {
+     label: String,
+-    fs: Ext4,
++    fs: Fs,
+ }
+ 
+ struct Offer<'a> {
+     expect: Option<&'a Expect>,
+     got: Option<(Vec<u8>, String)>,
++    /// the accepted bytes matched a SHA-256 (the entry's, or the one the accepting source carries)
++    verified: bool,
+ }
+ impl Offer<'_> {
+-    /// true once something has been accepted
+-    fn offer(&mut self, bytes: Vec<u8>, origin: String, log: &Log) -> bool {
++    /// true once something has been accepted. `src_hash` is the SHA-256 the offering source itself requires (aliases).
++    fn offer(&mut self, bytes: Vec<u8>, origin: String, log: &Log, src_hash: Option<&str>) -> bool {
+         if self.got.is_some() {
+             return true;
+         }
+@@ -75,37 +104,116 @@ impl Offer<'_> {
+                     && e.sha256.as_deref().is_none_or(|h| h == util::sha256_hex(&bytes))
+             }
+         };
+-        if ok {
+-            self.got = Some((bytes, origin));
+-            true
+-        } else {
++        if !ok {
+             log.say(&format!("  reject {origin}: size/hash differs from the published value"));
+-            false
++            return false;
+         }
++        if let Some(h) = src_hash {
++            if util::sha256_hex(&bytes) != h {
++                log.say(&format!("  reject {origin}: this name is accepted only with the documented SHA-256 ({}...)", &h[..12]));
++                return false;
++            }
++            self.verified = true;
++        }
++        self.got = Some((bytes, origin));
++        true
+     }
+ }
+ 
+-fn add_volumes(path: &Path, vols: &mut Vec<Volume>, log: &Log) {
+-    let mut d = match Aligned::open(path) {
++fn add_image(path: &Path, vols: &mut Vec<Volume>, log: &Log) {
++    // a numbered piece (l4t.00) is joined with the pieces after it, so a split root-fs image reads as one
++    let parts = image::parts_of(path);
++    let open = || Aligned::open_parts(&parts);
++    let mut d = match open() {
+         Ok(d) => d,
+         Err(e) => {
+             log.say(&format!("  (cannot open {} read-only: {e})", path.display()));
+             return;
+         }
+     };
++    let what = if parts.len() > 1 { format!("{} (+{} more piece(s))", path.display(), parts.len() - 1) } else { path.display().to_string() };
+     let mut found = 0;
+-    if let Ok(fs) = Ext4::try_open(path, 0) {
+-        vols.push(Volume { label: format!("{} (whole)", path.display()), fs });
++    if let Some(fs) = open().ok().and_then(|a| Ext4::try_open_with(a, 0).ok()) {
++        vols.push(Volume { label: format!("{what} (whole)"), fs: Fs::Ext4(Box::new(fs)) });
+         found += 1;
+     } else {
+         for p in part::read(&mut d) {
+-            if let Ok(fs) = Ext4::try_open(path, p.offset) {
+-                vols.push(Volume { label: format!("{} partition {}", path.display(), p.index), fs });
++            if let Some(fs) = open().ok().and_then(|a| Ext4::try_open_with(a, p.offset).ok()) {
++                vols.push(Volume { label: format!("{what} partition {}", p.index), fs: Fs::Ext4(Box::new(fs)) });
+                 found += 1;
+             }
+         }
+     }
+-    log.say(&format!("  {} : {found} ext4 volume(s)", path.display()));
++    log.say(&format!("  {what} : {found} ext4 volume(s)"));
++}
++
++/// Every path an `ext4` source of the chosen entries could ask for (so an archive keeps only those members in memory).
++fn wanted_paths(ids: &[String], entries: &BTreeMap<String, Entry>) -> (BTreeSet<String>, Vec<String>) {
++    let (mut files, mut dirs) = (BTreeSet::new(), Vec::new());
++    for e in ids.iter().filter_map(|i| entries.get(i)) {
++        for s in e.sources.iter().filter(|s| s.kind == "ext4" || s.kind == "fs") {
++            files.extend(s.paths.iter().filter(|p| !p.contains('*')).cloned());
++            if let Some(d) = &s.search_dir {
++                dirs.push(format!("{}/", d.trim_matches('/')));
++            }
++        }
++    }
++    (files, dirs)
++}
++
++fn add_archive(path: &Path, files: &BTreeSet<String>, dirs: &[String], vols: &mut Vec<Volume>, log: &Log) {
++    log.say(&format!("  reading archive {} (a large one can take a minute)", path.display()));
++    let wanted = |k: &str| files.contains(k) || dirs.iter().any(|d| k.strip_prefix(d.as_str()).is_some_and(|r| !r.contains('/')));
++    match archive::open(path, &wanted, MAX_FILE) {
++        Ok(a) => {
++            for n in &a.notes {
++                log.say(&format!("  note: {n}"));
++            }
++            log.say(&format!("  {} : {} wanted file(s) found", path.display(), a.len()));
++            vols.push(Volume { label: format!("archive {}", path.display()), fs: Fs::Archive(a) });
++        }
++        Err(e) => log.warn(&format!("cannot use archive {}: {e}", path.display())),
++    }
++}
++
++/// Downloads one official source and keeps the wanted members in memory, as a volume. Never fatal: a problem is reported and the
++/// next start tries again.
++fn add_download(d: &manifest::Download, files: &BTreeSet<String>, dirs: &[String], vols: &mut Vec<Volume>, log: &Log) {
++    let url = match download::resolve(d) {
++        Ok(u) => u,
++        Err(e) => {
++            log.warn(&format!("download '{}': {e}", d.id));
++            return;
++        }
++    };
++    log.say(&format!("  downloading {} ({}): {url}  (a large package can take many minutes)", d.id, d.what));
++    let st = match download::open_stream(&url) {
++        Ok(s) => s,
++        Err(e) => {
++            log.warn(&format!("download '{}': {e}", d.id));
++            return;
++        }
++    };
++    let cell = std::rc::Rc::new(std::cell::RefCell::new(Some(st)));
++    struct Shared(std::rc::Rc<std::cell::RefCell<Option<download::Stream>>>);
++    impl std::io::Read for Shared {
++        fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
++            self.0.borrow_mut().as_mut().map_or(Ok(0), |s| s.read(b))
++        }
++    }
++    let wanted = |k: &str| files.contains(k) || dirs.iter().any(|d| k.strip_prefix(d.as_str()).is_some_and(|r| !r.contains('/')));
++    let res = archive::open_reader(Box::new(std::io::BufReader::with_capacity(1 << 20, Shared(cell.clone()))), &wanted, MAX_FILE);
++    let said = cell.borrow_mut().take().map(download::Stream::finish).unwrap_or_default();
++    match res {
++        Ok(a) => {
++            for n in &a.notes {
++                log.say(&format!("  note: {n}"));
++            }
++            log.say(&format!("  download '{}': {} wanted file(s) found", d.id, a.len()));
++            vols.push(Volume { label: format!("download {} ({url})", d.id), fs: Fs::Archive(a) });
++        }
++        Err(e) => log.warn(&format!("download '{}' failed: {e}{}", d.id, if said.is_empty() { String::new() } else { format!(" [{said}]") })),
++    }
+ }
+ 
+ fn skip_ext(p: &Path) -> bool {
+@@ -113,16 +221,32 @@ fn skip_ext(p: &Path) -> bool {
+     matches!(e.as_str(), "7z" | "zip" | "bmp" | "ini" | "dtb" | "dtimg" | "scr" | "txt" | "md")
+ }
+ 
+-fn collect(entry: &Entry, roots: &[PathBuf], vols: &mut [Volume], log: &Log, off: &mut Offer) {
++fn collect(entry: &Entry, roots: &[PathBuf], vols: &mut [Volume], log: &Log, off: &mut Offer, strict: bool) {
+     let has_sha = entry.expect.as_ref().is_some_and(|e| e.sha256.is_some());
+     for src in &entry.sources {
++        // --require-known-hash: only sources that can be checked against a SHA-256
++        if strict && !has_sha && src.sha256.is_none() {
++            continue;
++        }
++        let sh = src.sha256.as_deref();
+         match src.kind.as_str() {
+             "fs" => {
++                for v in vols.iter() {
++                    if let Fs::Archive(a) = &v.fs {
++                        for p in src.paths.iter().filter(|p| !p.contains('*')) {
++                            if let Some(b) = a.read_file(p, MAX_FILE) {
++                                if off.offer(b, format!("{} :: {p}", v.label), log, sh) {
++                                    return;
++                                }
++                            }
++                        }
++                    }
++                }
+                 for root in roots {
+                     for p in &src.paths {
+                         for h in util::glob_files(root, p) {
+                             if let Some(b) = util::read_limited(&h, MAX_FILE) {
+-                                if off.offer(b, format!("file {}", h.display()), log) {
++                                if off.offer(b, format!("file {}", h.display()), log, sh) {
+                                     return;
+                                 }
+                             }
+@@ -141,7 +265,7 @@ fn collect(entry: &Entry, roots: &[PathBuf], vols: &mut [Volume], log: &Log, off
+                             }
+                             match initramfs::try_extract(&h, std::slice::from_ref(member), 16 * 1024 * 1024) {
+                                 Ok(b) => {
+-                                    if off.offer(b, format!("initramfs {} :: {member}", h.display()), log) {
++                                    if off.offer(b, format!("initramfs {} :: {member}", h.display()), log, sh) {
+                                         return;
+                                     }
+                                 }
+@@ -163,7 +287,7 @@ fn collect(entry: &Entry, roots: &[PathBuf], vols: &mut [Volume], log: &Log, off
+                         tried.insert(p.rsplit('/').next().unwrap_or("").to_string());
+                         match v.fs.read_file(p, MAX_FILE) {
+                             Ok(Some(b)) => {
+-                                if off.offer(b, format!("ext4 {} :: /{p}", v.label), log) {
++                                if off.offer(b, format!("ext4 {} :: /{p}", v.label), log, sh) {
+                                     return;
+                                 }
+                             }
+@@ -178,7 +302,7 @@ fn collect(entry: &Entry, roots: &[PathBuf], vols: &mut [Volume], log: &Log, off
+                                 continue;
+                             }
+                             if let Ok(Some(b)) = v.fs.read_file(&format!("{sd}/{n}"), MAX_FILE) {
+-                                if off.offer(b, format!("ext4 {} :: /{sd}/{n} (found by hash)", v.label), log) {
++                                if off.offer(b, format!("ext4 {} :: /{sd}/{n} (found by hash)", v.label), log, sh) {
+                                     return;
+                                 }
+                             }
+@@ -194,7 +318,7 @@ fn collect(entry: &Entry, roots: &[PathBuf], vols: &mut [Volume], log: &Log, off
+                             let n = h.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                             match String::from_utf8(raw).map_err(|_| "not text".to_string()).and_then(|t| ihex::to_bin(&t)) {
+                                 Ok(b) => {
+-                                    if off.offer(b, format!("ihex {}", h.display()), log) {
++                                    if off.offer(b, format!("ihex {}", h.display()), log, sh) {
+                                         return;
+                                     }
+                                 }
+@@ -233,7 +357,7 @@ pub fn run(o: Opts) -> Result<i32, String> {
+             .map_err(|_| "manifest is not UTF-8")?,
+         None => manifest::BUILTIN.to_string(),
+     };
+-    let (profiles, entries) = manifest::load(&text)?;
++    let (profiles, entries, downloads) = manifest::load(&text)?;
+     let ids: Vec<String> = if o.profile == "all" {
+         entries.keys().cloned().collect()
+     } else {
+@@ -274,15 +398,36 @@ pub fn run(o: Opts) -> Result<i32, String> {
+     }
+ 
+     let mut vols: Vec<Volume> = Vec::new();
++    let mut seen_images: BTreeSet<PathBuf> = BTreeSet::new();
+     for d in &o.disks {
+-        add_volumes(d, &mut vols, &log);
++        seen_images.insert(std::fs::canonicalize(d).unwrap_or_else(|_| d.clone()));
++        add_image(d, &mut vols, &log);
++    }
++    // The Switchroot download keeps its root file system as switchroot/install/l4t.00, .01, ... (cut into pieces for FAT32):
++    // read it where it lies, no flashing to a partition needed. (File names from memory of the Switchroot packages: not verified.)
++    for root in &roots {
++        for h in util::glob_files(root, "switchroot/install/l4t.00") {
++            if seen_images.insert(std::fs::canonicalize(&h).unwrap_or_else(|_| h.clone())) {
++                add_image(&h, &mut vols, &log);
++            }
++        }
++    }
++    if !o.archives.is_empty() {
++        let (files, dirs) = wanted_paths(&ids, &entries);
++        for a in &o.archives {
++            if a.is_file() {
++                add_archive(a, &files, &dirs, &mut vols, &log);
++            } else {
++                log.warn(&format!("archive not found: {}", a.display()));
++            }
++        }
+     }
+     if o.auto && cfg!(windows) {
+         let mut denied = false;
+         for n in 0..32 {
+             let p = PathBuf::from(format!(r"\\.\PhysicalDrive{n}"));
+             match std::fs::File::open(&p) {
+-                Ok(_) => add_volumes(&p, &mut vols, &log),
++                Ok(_) => add_image(&p, &mut vols, &log),
+                 Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                     denied = true;
+                     break;
+@@ -307,7 +452,7 @@ pub fn run(o: Opts) -> Result<i32, String> {
+     }
+ 
+     log.say(&format!(
+-        "fwfetch profile={}  roots={}  ext4 volumes={}  staging={}",
++        "fwfetch profile={}  roots={}  volumes/archives={}  staging={}",
+         o.profile,
+         roots.len(),
+         vols.len(),
+@@ -316,16 +461,32 @@ pub fn run(o: Opts) -> Result<i32, String> {
+ 
+     let mut missing = 0usize;
+     let mut staged_now: BTreeSet<String> = BTreeSet::new();
++    let mut tried_downloads: BTreeSet<String> = BTreeSet::new();
+     for id in &ids {
+         let Some(e) = entries.get(id) else { continue };
+         let has_hash = e.expect.as_ref().is_some_and(|x| x.sha256.is_some());
+-        if o.require_known_hash && !has_hash {
++        if o.require_known_hash && !has_hash && !e.sources.iter().any(|s| s.sha256.is_some()) {
+             log.say(&format!("[skip ] {id} : no published hash and --require-known-hash"));
+             missing += 1;
+             continue;
+         }
+-        let mut off = Offer { expect: e.expect.as_ref(), got: None };
+-        collect(e, &roots, &mut vols, &log, &mut off);
++        let mut off = Offer { expect: e.expect.as_ref(), got: None, verified: false };
++        collect(e, &roots, &mut vols, &log, &mut off, o.require_known_hash);
++        if off.got.is_none() && o.download {
++            let mut fetched_now = false;
++            for d in downloads.iter().filter(|d| d.provides.contains(id)) {
++                if !tried_downloads.insert(d.id.clone()) {
++                    continue;
++                }
++                let (files, dirs) = wanted_paths(&ids, &entries);
++                add_download(d, &files, &dirs, &mut vols, &log);
++                fetched_now = true;
++            }
++            if fetched_now {
++                collect(e, &roots, &mut vols, &log, &mut off, o.require_known_hash);
++            }
++        }
++        let verified = has_hash || off.verified;
+         let Some((mut bytes, origin)) = off.got else {
+             log.say(&format!("[MISS ] {id} : not found ({})", e.what));
+             missing += 1;
+@@ -341,7 +502,7 @@ pub fn run(o: Opts) -> Result<i32, String> {
+         }
+         util::write_atomic(&dest, &bytes)?;
+         let sha = util::sha256_hex(&bytes);
+-        if !has_hash && !e.random_mac {
++        if !verified && !e.random_mac {
+             if let Some(old) = lock.get(id) {
+                 if old.sha256 != sha {
+                     log.warn(&format!(
+@@ -352,15 +513,15 @@ pub fn run(o: Opts) -> Result<i32, String> {
+                 }
+             }
+         }
+-        let status = if has_hash { "OK (hash matches published value)" } else { "UNVERIFIED (accepted on first use)" };
++        let status = if verified { "OK (hash matches published value)" } else { "UNVERIFIED (accepted on first use)" };
+         log.say(&format!(
+             "[{}] {id} : {} bytes  {status}\n        from {origin}",
+-            if has_hash { "OK   " } else { "WARN " },
++            if verified { "OK   " } else { "WARN " },
+             bytes.len()
+         ));
+         lock.insert(
+             id.clone(),
+-            LockEntry { sha256: sha, size: bytes.len() as u64, origin, staged: e.stage_rel.clone(), verified: has_hash, utc: util::utc_now(), drivers: e.drivers.clone() },
++            LockEntry { sha256: sha, size: bytes.len() as u64, origin, staged: e.stage_rel.clone(), verified, utc: util::utc_now(), drivers: e.drivers.clone() },
+         );
+         staged_now.insert(id.clone());
+     }
+diff --git a/tools/fwfetch/startup/FwFetchStartup.ps1 b/tools/fwfetch/startup/FwFetchStartup.ps1
+index 5c6c4c0..90d348c 100644
+--- a/tools/fwfetch/startup/FwFetchStartup.ps1
++++ b/tools/fwfetch/startup/FwFetchStartup.ps1
+@@ -15,7 +15,13 @@
+ 
+   fwfetch exit code 0 = everything found, 2 = something missing (tried again at the next start: the card may not be
+   readable yet, or the file is not on it), 1 = error. This script exits 0 only when the final check is clean.
+-  Never writes to the SD card. Never uses the network.
++  Never writes to the SD card.
++
++  Network (default; -NoDownload turns it off): files that are STILL missing after the local search are fetched ON THIS DEVICE, at
++  start-up, from the official sources in the manifest (NVIDIA's Jetson Linux package for the GPU / XUSB firmware, the hekate
++  release for sc7entry/sc7exit) with curl.exe - streamed, never stored whole. Needs internet at that moment; a failed attempt is
++  simply repeated at a later start, but at most every -DownloadIntervalHours hours (the NVIDIA package is about 1 GB). Wi-Fi / Bluetooth
++  firmware and bl31.bin have no such source, and Wi-Fi cannot fetch its own firmware: use USB-LAN / USB tethering the first time.
+ 
+   Drive letters: nothing here assumes Windows is on C:. -GpuDir / -DriverDir take 'auto' (= this Windows' System32\drivers), a path
+   with %SystemRoot% / {SystemRoot}, or a plain path; a path saved by an older install whose '<letter>:\...\System32\drivers' letter is no
+@@ -27,7 +33,9 @@ param(
+   [string]$CacheDir = (Join-Path $env:ProgramData 'W4T\fw-cache'),
+   [string]$GpuDir = '',            # 'auto' = <SystemRoot>\System32\drivers\TegraGpu of THIS Windows (erista / lite). Windows on a Switch is rarely on C: (it lives on the SD card), so do not type a drive letter
+   [string]$DriverDir = '',         # 'auto' = <SystemRoot>\System32\drivers of THIS Windows: Wi-Fi / Bluetooth firmware is put into <DriverDir>\SwitchWOA and \switchwifi (needs fwfetch --deploy-drivers)
+-  [switch]$Force                   # ignore the done marker and always run fwfetch
++  [switch]$Force,                  # ignore the done marker and always run fwfetch
++  [switch]$NoDownload,             # never download (SD card / local files only)
++  [int]$DownloadIntervalHours = 6  # a failed download is not repeated sooner than this
+ )
+ $ErrorActionPreference = 'Stop'
+ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+@@ -145,6 +153,13 @@ $code = 0
+ if ($needFetch) {
+   if (Test-Path $marker) { Remove-Item $marker -Force }
+   $a = @('--profile', $Profile, '--auto', '--out-dir', $CacheDir)
++  $stamp = Join-Path $CacheDir 'download.stamp'
++  $dlOk = -not $NoDownload
++  if ($dlOk -and -not $Force -and (Test-Path $stamp)) {
++    $age = (New-TimeSpan -Start (Get-Item $stamp).LastWriteTime -End (Get-Date)).TotalHours
++    if ($age -ge 0 -and $age -lt $DownloadIntervalHours) { $dlOk = $false; Log ('download skipped: last attempt {0:N1} h ago' -f $age) }
++  }
++  if ($dlOk) { $a += '--download'; Set-Content -Path $stamp -Value (Get-Date -Format u) -Encoding ascii }
+   if ($GpuDir) { New-Item -ItemType Directory -Force $GpuDir | Out-Null; $a += @('--deploy-gpu', $GpuDir) }
+   if ($DriverDir) { New-Item -ItemType Directory -Force $DriverDir | Out-Null; $a += @('--deploy-drivers', $DriverDir) }
+   Log "start: fwfetch $($a -join ' ')"
+diff --git a/tools/fwfetch/startup/Install-FwFetchStartup.ps1 b/tools/fwfetch/startup/Install-FwFetchStartup.ps1
+index f735d42..7f05a6f 100644
+--- a/tools/fwfetch/startup/Install-FwFetchStartup.ps1
++++ b/tools/fwfetch/startup/Install-FwFetchStartup.ps1
+@@ -22,6 +22,7 @@ param(
+   [string]$GpuDir = '',
+   [string]$DriverDir = '',   # 'auto' = this Windows' System32\drivers (Wi-Fi / Bluetooth firmware for the SwitchWOA drivers)
+   [string]$Exe = (Join-Path $PSScriptRoot 'fwfetch.exe'),
++  [switch]$NoDownload,       # the task never downloads (SD card / local files only); default: missing files are fetched on the Switch at start-up
+   [switch]$Remove
+ )
+ $ErrorActionPreference = 'Stop'
+@@ -65,6 +66,7 @@ $drvArg = ConvertTo-TaskDir $DriverDir ''
+ $cmd = '& (Join-Path $env:ProgramData ''W4T\fwfetch\FwFetchStartup.ps1'') -Profile ' + $Profile   # single quotes: $env:ProgramData must NOT be expanded now
+ if ($gpuArg) { $cmd += " -GpuDir $gpuArg" }
+ if ($drvArg) { $cmd += " -DriverDir $drvArg" }
++if ($NoDownload) { $cmd += ' -NoDownload' }
+ $cmd += '; exit $LASTEXITCODE'
+ $arg = '-NoProfile -ExecutionPolicy Bypass -Command "' + $cmd.Replace('"', '\"') + '"'
+ $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arg
+@@ -72,7 +74,7 @@ $trigger = New-ScheduledTaskTrigger -AtStartup
+ $trigger.Delay = 'PT1M'    # give the SD / storage stack time to come up
+ $daily = New-ScheduledTaskTrigger -Daily -At 3:30am   # also re-checks (and repairs) files damaged while Windows stays up
+ $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
++$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 90)   # a slow link may need a while for the ~1 GB NVIDIA package -MultipleInstances IgnoreNew
+ Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($trigger, $daily) -Principal $principal -Settings $settings -Force | Out-Null
+-Write-Host "registered '$taskName' (profile $Profile). It runs 1 minute after every start (and daily at 03:30): it checks every firmware file against its pinned SHA-256, puts damaged or missing ones back (from the cache, else from the SD) and keeps trying until everything is found; log: $env:ProgramData\W4T\logs\fwfetch-startup.log"
++Write-Host "registered '$taskName' (profile $Profile). It runs 1 minute after every start (and daily at 03:30): it checks every firmware file against its pinned SHA-256, puts damaged or missing ones back (from the cache, else from the SD) and keeps trying until everything is found (files still missing are downloaded on this device from the official NVIDIA / hekate sources unless -NoDownload); log: $env:ProgramData\W4T\logs\fwfetch-startup.log"
+ Write-Host "run it now: Start-ScheduledTask -TaskName '$taskName'"
+diff --git a/tools/fwfetch/tests/run_tests.py b/tools/fwfetch/tests/run_tests.py
+index 820aff3..6b3be52 100644
+--- a/tools/fwfetch/tests/run_tests.py
++++ b/tools/fwfetch/tests/run_tests.py
+@@ -7,7 +7,7 @@ What this proves: the reader/extractor logic on images this script builds itself
+ do not crash the binary.
+ What it does NOT prove: that a real Switchroot image has these paths / this compression (see README-ja.md).
+ """
+-import gzip, hashlib, json, os, random, re, shutil, struct, subprocess, sys, tempfile
++import bz2, gzip, hashlib, io, json, lzma, os, random, re, shutil, struct, subprocess, sys, tarfile, tempfile
+ 
+ HERE = os.path.dirname(os.path.abspath(__file__))
+ TOOL = os.path.dirname(HERE)
+@@ -57,9 +57,31 @@ def ihex(data, base=0):
+ 
+ def run(args, cwd=None, manifest=None, env=None):
+     extra = ["--manifest", manifest] if manifest else []
+-    p = subprocess.run([BIN] + extra + args, capture_output=True, text=True, cwd=cwd, env=env)
++    try:
++        p = subprocess.run([BIN] + extra + args, capture_output=True, text=True, cwd=cwd, env=env, timeout=300)
++    except subprocess.TimeoutExpired:
++        return 124, "TIMEOUT (hang)"
+     return p.returncode, p.stdout + p.stderr
+ 
++# ---- archive builders (stdlib only: tar + gzip/bzip2/xz, and a hand-made ar for .deb) ----
++def tar_bytes(members, comp="", fmt=tarfile.USTAR_FORMAT):
++    bio = io.BytesIO()
++    with tarfile.open(fileobj=bio, mode="w:" + comp, format=fmt) as t:
++        for n, b in members:
++            ti = tarfile.TarInfo(n); ti.size = len(b); ti.mode = 0o644
++            t.addfile(ti, io.BytesIO(b))
++    return bio.getvalue()
++
++def ar_bytes(members):
++    out = b"!<arch>\n"
++    for n, b in members:
++        out += ("%-16s%-12d%-6d%-6d%-8s%-10d`\n" % (n + "/", 0, 0, 0, "100644", len(b))).encode() + b + (b"\n" if len(b) % 2 else b"")
++    return out
++
++def deb_bytes(files, comp):
++    return ar_bytes([("debian-binary", b"2.0\n"), ("control.tar.gz", tar_bytes([("./control", b"Package: x\n")], "gz")),
++                     ("data.tar." + comp, tar_bytes(files, comp))])
++
+ def mkdisk(path, part_img, scheme):
+     size = os.path.getsize(part_img)
+     with open(path, "wb") as d:
+@@ -294,6 +316,172 @@ try:
+     check("erista: sc7entry/sc7exit staged byte-identical", rd("bootloader/sys/l4t/sc7entry.bin") == SC7E and rd("bootloader/sys/l4t/sc7exit.bin") == SC7X, log[-700:])
+     check("erista: T210 XUSB firmware staged", rd("tegra21x_xusb_firmware") == XU21, log[-700:])
+     check("erista profile now wants bl31 too", "bl31" in log)
++
++    # ============ 12. No installed Switchroot needed: the root file system image as it is downloaded (l4t.00, l4t.01, ...) ============
++    raw = open(part, "rb").read(); cuts = [5000037, 7000003]
++    pieces = [raw[:cuts[0]], raw[cuts[0]:cuts[0] + cuts[1]], raw[cuts[0] + cuts[1]:]]   # odd sizes: reads straddle two pieces
++    spl = os.path.join(tmp, "split"); os.makedirs(spl)
++    for i, pc in enumerate(pieces): open(os.path.join(spl, "l4t.%02d" % i), "wb").write(pc)
++    out12 = os.path.join(tmp, "out12"); gdir12 = os.path.join(tmp, "gpu12")
++    rc, log = run(["--profile", "lite", "--search-root", sd, "--image", os.path.join(spl, "l4t.00"), "--out-dir", out12, "--deploy-gpu", gdir12], manifest=mp)
++    check("split image l4t.00/01/02 is joined and read (lite profile, exit 0)", rc == 0 and "+2 more piece(s)" in log, log[-900:])
++    check("GPU files read from the joined pieces are byte-identical", all(os.path.exists(os.path.join(gdir12, n)) and open(os.path.join(gdir12, n), "rb").read() == b for n, b in GPU.items()))
++    check("Wi-Fi/BT firmware read from the joined pieces", open(os.path.join(out12, "agent/bt/BCM4356A3.hcd"), "rb").read() == HCD and open(os.path.join(out12, "agent/wifi/brcmfmac4356A3-pcie.bin"), "rb").read() == BCM)
++    sdx = os.path.join(tmp, "sdx"); shutil.copytree(sd, sdx); os.makedirs(os.path.join(sdx, "switchroot", "install"))
++    for i, pc in enumerate(pieces): open(os.path.join(sdx, "switchroot", "install", "l4t.%02d" % i), "wb").write(pc)
++    out12b = os.path.join(tmp, "out12b")
++    rc, log = run(["--profile", "aula", "--search-root", sdx, "--out-dir", out12b], manifest=mp)
++    check("switchroot/install/l4t.00 is found by itself under a search root (no --image, nothing flashed)", rc == 0 and "more piece(s)" in log, log[-900:])
++    os.remove(os.path.join(spl, "l4t.01"))   # a missing piece: the image is cut short
++    rc, log = run(["--profile", "lite", "--search-root", sd, "--image", os.path.join(spl, "l4t.00"), "--out-dir", os.path.join(tmp, "out12c")], manifest=mp)
++    check("split image with a missing piece: reported, no crash", rc in (0, 1, 2) and "panicked" not in log, log[-400:])
++
++    # ============ 13. Archives that need no SD card at all: NVIDIA's driver package (nested tbz2), .deb (xz / gz), plain tar ============
++    ACR_L4T = blob(3000)                                    # stands for L4T's gm20b/acr_ucode.bin
++    gpu_l4t = {n: b for n, b in GPU.items() if n != "nv_acr_ucode_prod.bin"}
++    fw_members = [("lib/firmware/tegra21x/" + n, b) for n, b in gpu_l4t.items()] + [
++        ("lib/firmware/gm20b/acr_ucode.bin", ACR_L4T), ("lib/firmware/tegra21x_xusb_firmware", XU21), ("lib/firmware/other.bin", blob(500))]
++    inner = tar_bytes(fw_members, "bz2")                    # = nv_tegra/nvidia_drivers.tbz2
++    bsp = tar_bytes([("Linux_for_Tegra/bootloader/x.bin", blob(700)), ("Linux_for_Tegra/rootfs/big.bin", blob(3_000_000)),
++                     ("Linux_for_Tegra/nv_tegra/nvidia_drivers.tbz2", inner), ("Linux_for_Tegra/nv_tegra/other.tbz2", tar_bytes([("lib/firmware/tegra21x/fecs.bin", b"WRONG")], "bz2"))], "bz2")
++    arc = os.path.join(tmp, "arc"); os.makedirs(arc)
++    open(os.path.join(arc, "jetson-210_linux_r32.7.6_aarch64.tbz2"), "wb").write(bsp)
++    open(os.path.join(arc, "fw-xz.deb"), "wb").write(deb_bytes([("./" + n, b) for n, b in fw_members], "xz"))
++    open(os.path.join(arc, "fw-gz.deb"), "wb").write(deb_bytes([("./" + n, b) for n, b in fw_members], "gz"))
++    open(os.path.join(arc, "fw.tar"), "wb").write(tar_bytes(fw_members))
++    # roots that carry what an archive does not: hekate's sc7 files, bl31, the board file, the Wi-Fi/BT ihex (kernel tree)
++    er2 = os.path.join(tmp, "erista-root2"); os.makedirs(os.path.join(er2, "bootloader/sys/l4t")); os.makedirs(os.path.join(er2, "switchroot/ubuntu"))
++    os.makedirs(os.path.join(er2, "lib/firmware/brcm")); os.makedirs(os.path.join(er2, "firmware/brcm"))
++    open(os.path.join(er2, "bootloader/sys/l4t/sc7entry.bin"), "wb").write(SC7E); open(os.path.join(er2, "bootloader/sys/l4t/sc7exit.bin"), "wb").write(SC7X)
++    open(os.path.join(er2, "switchroot/ubuntu/bl31.bin"), "wb").write(BL31); open(os.path.join(er2, "lib/firmware/brcm/brcmfmac4356A3-pcie.txt"), "wb").write(TXT)
++    open(os.path.join(er2, "firmware/brcm/brcmfmac4356A3-pcie.bin.ihex"), "w").write(ihex(BCM)); open(os.path.join(er2, "firmware/brcm/BCM4356A3.hcd.ihex"), "w").write(ihex(HCD))
++    m2 = json.load(open(mp))     # the synthetic manifest, with the ACR alias pinned to the synthetic L4T acr_ucode.bin
++    for f in m2["files"]:
++        if f["id"] == "gpu_nv_acr_ucode_prod":
++            for src in f["sources"]: src["sha256"] = sha(ACR_L4T)
++    mp2 = os.path.join(tmp, "manifest2.json"); json.dump(m2, open(mp2, "w"), indent=1)
++    def same(root, rel, want):
++        q = os.path.join(root, *rel.split("/")); return os.path.exists(q) and open(q, "rb").read() == want
++
++    for label, name, tag in [("NVIDIA driver package (tbz2 inside tbz2)", "jetson-210_linux_r32.7.6_aarch64.tbz2", "a"), (".deb with data.tar.xz", "fw-xz.deb", "b"),
++                             (".deb with data.tar.gz", "fw-gz.deb", "c"), ("plain tar", "fw.tar", "d")]:
++        o13 = os.path.join(tmp, "out13" + tag)
++        rc, log = run(["--profile", "erista", "--search-root", er2, "--archive", os.path.join(arc, name), "--out-dir", o13], manifest=mp2)
++        check("erista profile completes from " + label, rc == 0, log[-1100:])
++        check("  " + label + ": all 8 GPU files + L4T XUSB firmware byte-identical",
++              all(same(o13, "gpu/" + n, b) for n, b in gpu_l4t.items()) and same(o13, "tegra21x_xusb_firmware", XU21), log[-600:])
++        check("  " + label + ": acr_ucode.bin staged as nv_acr_ucode_prod.bin and marked verified (documented hash)",
++              same(o13, "gpu/nv_acr_ucode_prod.bin", ACR_L4T) and json.load(open(os.path.join(o13, "fw-lock.json")))["gpu_nv_acr_ucode_prod"]["verified"] is True)
++    check("only wanted members are used: the decoy fecs.bin in a non-driver nested tbz2 is ignored", same(os.path.join(tmp, "out13a"), "gpu/fecs.bin", GPU["fecs.bin"]))
++
++    rc, log = run(["--profile", "erista", "--search-root", er2, "--archive", os.path.join(arc, "fw.tar"), "--out-dir", os.path.join(tmp, "out13e")])   # REAL manifest: documented hash differs from the synthetic ACR
++    check("acr_ucode.bin with other bytes is NOT accepted under the Windows name (real documented hash)",
++          "[MISS ] gpu_nv_acr_ucode_prod" in log and "documented SHA-256" in log and not os.path.exists(os.path.join(tmp, "out13e", "gpu", "nv_acr_ucode_prod.bin")), log[-700:])
++    o13f = os.path.join(tmp, "out13f")
++    rc, log = run(["--profile", "erista", "--search-root", er2, "--archive", os.path.join(arc, "fw.tar"), "--out-dir", o13f, "--require-known-hash"], manifest=mp2)
++    check("--require-known-hash still takes the hash-gated alias, and skips the unhashed GPU files",
++          same(o13f, "gpu/nv_acr_ucode_prod.bin", ACR_L4T) and not os.path.exists(os.path.join(o13f, "gpu", "fecs.bin")) and "no published hash" in log, log[-700:])
++    loose = os.path.join(tmp, "loose/lib/firmware/gm20b"); os.makedirs(loose); open(os.path.join(loose, "acr_ucode.bin"), "wb").write(ACR_L4T)
++    o13g = os.path.join(tmp, "out13g")
++    rc, log = run(["--profile", "lite", "--search-root", os.path.join(tmp, "loose"), "--out-dir", o13g], manifest=mp2)
++    check("the alias also works for a plain folder (fs source)", same(o13g, "gpu/nv_acr_ucode_prod.bin", ACR_L4T), log[-500:])
++
++    # name tricks: GNU long names, pax paths, the ustar prefix field - all must resolve to the same wanted path
++    deepname = "./" * 60 + "lib/firmware/tegra21x/fecs.bin"
++    for fmt, nm in [(tarfile.GNU_FORMAT, "gnu"), (tarfile.PAX_FORMAT, "pax")]:
++        tp = os.path.join(arc, "long-" + nm + ".tar"); open(tp, "wb").write(tar_bytes([(deepname, GPU["fecs.bin"])], "", fmt))
++        o13h = os.path.join(tmp, "out13h-" + nm)
++        rc, log = run(["--profile", "erista", "--archive", tp, "--out-dir", o13h], manifest=mp2)
++        check("tar member with a " + nm + " long name is found", same(o13h, "gpu/fecs.bin", GPU["fecs.bin"]), log[-400:])
++
++    # zstd and non-archives are reported, never guessed
++    open(os.path.join(arc, "z.deb"), "wb").write(ar_bytes([("debian-binary", b"2.0\n"), ("data.tar.zst", b"\x28\xb5\x2f\xfd" + b"z" * 5000)]))
++    rc, log = run(["--profile", "erista", "--archive", os.path.join(arc, "z.deb"), "--out-dir", os.path.join(tmp, "out13i")], manifest=mp2)
++    check(".deb with zstd data is reported as unsupported (no crash)", "zstd archive not supported" in log and rc in (1, 2), log[-400:])
++    open(os.path.join(arc, "notes.txt"), "wb").write(b"hello" * 500)
++    rc, log = run(["--profile", "erista", "--archive", os.path.join(arc, "notes.txt"), "--out-dir", os.path.join(tmp, "out13j")], manifest=mp2)
++    check("a file that is not an archive is reported (no crash)", "not a recognised archive" in log and rc in (1, 2), log[-400:])
++    rc, log = run(["--profile", "erista", "--archive", os.path.join(arc, "missing.deb"), "--out-dir", os.path.join(tmp, "out13k")], manifest=mp2)
++    check("a missing archive is reported (no crash)", "archive not found" in log and rc in (1, 2), log[-300:])
++    gt2 = os.path.join(tmp, "gittree2"); os.makedirs(gt2); subprocess.run(["git", "init", "-q", gt2], check=True)
++    rc, log = run(["--profile", "erista", "--archive", os.path.join(arc, "fw.tar"), "--out-dir", os.path.join(gt2, "fw")], manifest=mp2)
++    check("--archive does not weaken the git-work-tree refusal", rc == 1 and "Refusing" in log, log[-300:])
++
++    # robustness: corrupted / truncated archives must never crash or hang the binary
++    fz2 = random.Random(7); bad13 = []
++    for nm in ["jetson-210_linux_r32.7.6_aarch64.tbz2", "fw-xz.deb", "fw-gz.deb", "fw.tar"]:
++        orig = open(os.path.join(arc, nm), "rb").read()
++        for i in range(40):
++            b = bytearray(orig)
++            for _ in range(fz2.choice([1, 4, 32])):
++                pos = fz2.choice([fz2.randrange(0, min(len(b), 4096)), fz2.randrange(0, len(b))]); b[pos] = fz2.getrandbits(8)
++            if i % 8 == 0: b = b[:fz2.randrange(1, len(b))]
++            fp = os.path.join(tmp, "fuzz-arc"); open(fp, "wb").write(b)
++            rc, log = run(["--profile", "erista", "--archive", fp, "--out-dir", os.path.join(tmp, "outza"), "--quiet"], manifest=mp2)
++            if rc not in (0, 1, 2) or "panicked" in log: bad13.append((nm, i, rc, log[-120:]))
++    check("160 corrupted/truncated archives (.tbz2 / .deb xz / .deb gz / tar): no crash, no hang", not bad13, str(bad13[:3]))
++
++    # ============ 14. On-device download (--download): a local HTTP server stands in for NVIDIA / GitHub ============
++    import threading, http.server, zipfile
++    zbuf = io.BytesIO()
++    with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
++        zf.writestr("bootloader/sys/l4t/sc7entry.bin", SC7E); zf.writestr("bootloader/sys/l4t/sc7exit.bin", SC7X)
++        zf.writestr("bootloader/sys/l4t/bpmpfw.bin", blob(300)); zf.writestr("bootloader/readme.txt", "x" * 2000)
++    ZIPB = zbuf.getvalue()
++    BSPB = open(os.path.join(arc, "jetson-210_linux_r32.7.6_aarch64.tbz2"), "rb").read()
++    srv_state = {"port": 0, "hits": []}
++    class H(http.server.BaseHTTPRequestHandler):
++        def log_message(self, *a): pass
++        def do_GET(self):
++            srv_state["hits"].append(self.path)
++            base = "http://127.0.0.1:%d/" % srv_state["port"]
++            if self.path == "/bsp.tbz2": body = BSPB
++            elif self.path == "/dl/hekate_ctcaer_9.9.9.zip": body = ZIPB
++            elif self.path == "/api/latest":
++                body = json.dumps({"assets": [{"name": "hekate_ctcaer_9.9.9_Nyx_1.zip", "browser_download_url": "http://evil.example/x.zip"},
++                                              {"name": "hekate_ctcaer_9.9.9.zip", "browser_download_url": base + "dl/hekate_ctcaer_9.9.9.zip"}]}).encode()
++            elif self.path == "/redir": self.send_response(302); self.send_header("Location", base + "bsp.tbz2"); self.end_headers(); return
++            else: self.send_response(404); self.end_headers(); return
++            self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
++    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H); srv_state["port"] = httpd.server_address[1]
++    threading.Thread(target=httpd.serve_forever, daemon=True).start()
++    base = "http://127.0.0.1:%d/" % srv_state["port"]
++    m3 = json.load(open(mp2))
++    gpu_ids = [f["id"] for f in m3["files"] if f["id"].startswith("gpu_")]
++    m3["downloads"] = [
++        {"id": "bsp", "what": "test bsp", "type": "url", "url": base + "redir", "provides": gpu_ids + ["xusb_t210"]},
++        {"id": "hekate", "what": "test hekate", "type": "github_latest", "api": base + "api/latest", "asset_prefix": "hekate_ctcaer_",
++         "asset_suffix": ".zip", "download_prefix": base + "dl/", "provides": ["sc7entry", "sc7exit"]}]
++    mp3 = os.path.join(tmp, "manifest3.json"); json.dump(m3, open(mp3, "w"), indent=1)
++    envd = dict(os.environ, FWFETCH_TEST_LOOPBACK="1")
++    empty = os.path.join(tmp, "empty-root"); os.makedirs(empty)
++    o14 = os.path.join(tmp, "out14")
++    rc, log = run(["--profile", "erista", "--search-root", empty, "--download", "--out-dir", o14], manifest=mp3, env=envd)
++    check("--download: GPU firmware comes from the (redirected) package stream", same(o14, "gpu/fecs.bin", GPU["fecs.bin"]) and same(o14, "gpu/nv_acr_ucode_prod.bin", ACR_L4T), log[-700:])
++    check("--download: XUSB firmware comes from the package", same(o14, "tegra21x_xusb_firmware", XU21), log[-400:])
++    check("--download: sc7entry / sc7exit come from the release zip (asset chosen by name, foreign URL ignored)",
++          same(o14, "bootloader/sys/l4t/sc7entry.bin", SC7E) and same(o14, "bootloader/sys/l4t/sc7exit.bin", SC7X), log[-500:])
++    check("--download: files without an official source are reported missing (exit 2)", rc == 2 and "bl31" in log, log[-300:])
++    n_before = len(srv_state["hits"])
++    o14b = os.path.join(tmp, "out14b")
++    rc, log = run(["--profile", "erista", "--search-root", er2, "--archive", os.path.join(arc, "fw.tar"), "--download", "--out-dir", o14b], manifest=mp3, env=envd)
++    check("--download: nothing is downloaded when the files are found locally", len(srv_state["hits"]) == n_before, str(srv_state["hits"][n_before:]))
++    n_before = len(srv_state["hits"])
++    o14c = os.path.join(tmp, "out14c")
++    rc, log = run(["--profile", "erista", "--search-root", empty, "--out-dir", o14c], manifest=mp3, env=envd)
++    check("without --download nothing is fetched", len(srv_state["hits"]) == n_before and not os.path.exists(os.path.join(o14c, "gpu", "fecs.bin")), log[-300:])
++    rc, log = run(["--profile", "erista", "--search-root", empty, "--download", "--out-dir", os.path.join(tmp, "out14d")], manifest=mp3)
++    check("loopback http is refused without the test switch", rc == 1 and "https" in log, log[-300:])
++    m4 = json.load(open(mp3)); m4["downloads"][0]["url"] = base + "missing404"
++    mp4 = os.path.join(tmp, "manifest4.json"); json.dump(m4, open(mp4, "w"))
++    rc, log = run(["--profile", "erista", "--search-root", empty, "--download", "--out-dir", os.path.join(tmp, "out14e")], manifest=mp4, env=envd)
++    check("a failing download is a warning, the run continues (hekate part still works)", rc == 2 and "warning" in log and "panicked" not in log, log[-400:])
++    for bad in ["http://developer.nvidia.com/x", "https://evil.example/x", "https://github.com.evil.example/x", "https://user@github.com/x"]:
++        mb = json.load(open(mp3)); mb["downloads"][0]["url"] = bad
++        mpb = os.path.join(tmp, "manifest-bad.json"); json.dump(mb, open(mpb, "w"))
++        rc, log = run(["--profile", "erista", "--search-root", empty, "--download", "--out-dir", os.path.join(tmp, "out14f")], manifest=mpb, env=envd)
++        check("manifest URL refused: " + bad, rc == 1 and "manifest" in log, log[-200:])
++    httpd.shutdown()
+ finally:
+     shutil.rmtree(tmp, ignore_errors=True)
+ 

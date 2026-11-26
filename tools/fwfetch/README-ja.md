@@ -1,7 +1,18 @@
 # fwfetch — 再配布できないファイルを「自分の実機」から取り出す（Rust 版）
 
 NVIDIA(NVIDIA Software License)・Broadcom・Switchroot ビルドのファイルは、このリポジトリにも配布物にも入れない。
-Switchroot 系のやり方に倣い、**利用者自身の SD カード(Switchroot を入れたもの)から、読み取り専用で探して照合し、リポジトリの外に置く**。
+Switchroot 系のやり方に倣い、**利用者自身が持っているファイルから、読み取り専用で探して照合し、リポジトリの外に置く**。
+
+> **Switchroot(L4T Ubuntu / LineageOS)をこの Switch に入れる必要はなく、入れないこと。** 共存させると Windows と Linux のどちらかが壊れて使えなくなることが
+> 確認されている。取得元は、Switchroot の配布物を**ダウンロードしただけのファイル**でよい。
+>
+> - `bl31.bin`（`switchroot/ubuntu/` など）と、`switchroot/install/l4t.00`・`l4t.01`・… を**同じフォルダ**に置き、そのフォルダを `--search-root` に渡す。
+> - `l4t.NN` は Linux のルートファイルシステム(ext4)を分割したもの。fwfetch は `00` から連番で**つなげて 1 つの ext4 として読み取り専用で読む**（書かない・入れない）。
+>   欠番があればそこまで。ダウンロードが一部だけでも、あるぶんの中にあるファイルは取れる。
+> - その場で必要なファイル（Wi-Fi / BT / GPU / XUSB）が見つかれば、同じ実行で `--deploy*` まで済む。
+> - Switch の Windows 上で毎回使うなら、そのフォルダを Windows のディスクに置いて
+>   `.\Install-FwFetchStartup.ps1 -Profile lite -GpuDir auto -DriverDir auto -SearchRoot "$env:ProgramData\W4T\fw-source"`（`%ProgramData%` 配下は文字を書かずに保存する）。
+> - 取得元の中身（どの配布物のどこにどのファイルがあるか）は私は実物で確認していない。見つからないものは `MISS` と表示される。
 
 2026-11-18 に PowerShell + C# 版（`legacy/`）を **Rust** で作り直した。SD カードの中身は信用できない入力なので、
 メモリ安全な言語で書き、`unsafe` を禁止している（`#![forbid(unsafe_code)]`）。実行ファイル 1 つで動き、マニフェストは埋め込み済み。

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 [package]
 name = "fwfetch"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2024"
 rust-version = "1.85"
 license = "GPL-2.0-only"
@@ -14,6 +14,10 @@ flate2 = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 getrandom = "0.3"
+# archives (.deb / tar.xz / tbz2): lzma-rs and bzip2 (libbz2-rs-sys, the pure-Rust port of libbzip2) need no C compiler (zstd is deliberately not supported). bzip2-rs 0.1 was tried and fails on multi-block streams
+lzma-rs = "0.3"
+bzip2 = "0.6"
+crc32fast = "1"
 
 [profile.release]
 opt-level = "s"
