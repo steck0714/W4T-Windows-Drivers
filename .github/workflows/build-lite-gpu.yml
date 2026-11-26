@@ -4,7 +4,7 @@
 #   driver (windows) clang-cl/lld-link against the WDK; builds TegraGpuCore.lib always,
 #                    and the signed KMDF probe ALWAYS (.sys + .inf + .cat, no firmware inside).
 # NVIDIA firmware is NOT in the repo. It is loaded from OUTSIDE, automatically, at the start of the driver job by
-# .github/actions/fwfetch-import: your private zip (a copy of the tree fwfetch searches on your Switchroot SD, e.g.
+# .github/actions/fwfetch-import: your private zip (a copy of the tree fwfetch searches (the downloaded Switchroot files; Switchroot is NOT installed on the Switch), e.g.
 # lib/firmware/tegra21x/*.bin - or just the 9 files at the zip root) behind the secret FW_BUNDLE_URL (older name:
 # NVIDIA_FW_URL), or the workflow input firmware_url. fwfetch stages the 9 files on the runner:
 #   NETB_img.bin fecs.bin gpccs.bin nv_acr_ucode_prod.bin pmu_bl.bin
@@ -37,6 +37,9 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
+      - name: Stamp a growing DriverVer into every INF (so each build UPDATES an installed driver; not committed)
+        shell: pwsh
+        run: python tools/ci/stamp_driver_ver.py --root drivers
       - name: LLVM
         shell: pwsh
         run: |

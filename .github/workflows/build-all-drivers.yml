@@ -187,6 +187,9 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v4
+      - name: Stamp a growing DriverVer into every INF (so each build UPDATES an installed driver; not committed)
+        shell: pwsh
+        run: python tools/ci/stamp_driver_ver.py --root drivers
 
       - name: mesa-switch-woa (HDH-001 only; pinned by tools/ci/mesa-switch-woa.rev; SwitchFan GPU bridge headers)
         if: matrix.model == 'HDH-001'
