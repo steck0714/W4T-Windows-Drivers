@@ -24,3 +24,9 @@
 `boot.cmd` `boot64.cmd` `setup.cmd` `setup64.cmd` `findagent64.cmd`(書き直し)、`w32.cmd` `w64.cmd` `copylogs.cmd` `setupwatch.cmd` `vk-triangle.cmd`、
 `tune.ps1` `remove_win10.ps1` `ssh_setup.ps1` `uwp.ps1` `gpu*.ps1` `vk-triangle-preview.ps1`、`build_w32.sh`(`findagent.cmd` を入れる 1 行と、Setup の `CmdLine`)、`build_w64.sh` `patch_desktop.sh` `setup_mode.sh`(サービスの `ImagePath` と Setup の `CmdLine` を `C:` 固定から `%SystemDrive%` / `%SystemRoot%` に変更。Windows が F: などでも最初の起動から動く)。
 `kit/agent/` の同名ファイルと内容を揃えてある(`findagent.cmd` = `findagent64.cmd`)。上流に戻すときは `windows-switch-main.zip` の同名ファイルで置き換える。
+
+## 追記(2026-11-26)
+
+- 上の「置かなかったもの(バイナリ・画像)」6 点は、のちに `upstream-src/` へ置かれた。消さずに残す方針とし、`kept-binaries.json` に SHA-256 を固定して `tools/check_aula_audit.py` が照合する。
+- `drivers/<ドライバ名>/` へ移した 7 ファイルの無改変コピーも `upstream-src/` に残してよい(`tools/aula_layout.py --check` は上流の SHA-256 と一致するときだけ許す)。
+- `desktop/` の一部は W4T が `%SystemDrive%` 対応などで変更しており、上流 main(ebff45d)と同一ではない。

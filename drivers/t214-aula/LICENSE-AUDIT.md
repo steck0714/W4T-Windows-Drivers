@@ -173,3 +173,14 @@
 5. **`drivers/build_gpu.sh` と `tgd3d-local.patch`** は MIT / GPL-2.0 が混在する mesa-switch-woa のファイルを扱う。取り込んだ後のファイルごとの SPDX を消さないこと。
 6. 3 つの INF は ruje0504-2 の GPL-2.0 ドライバ由来(文字列のみ変更)。元の著作者の表示は `CREDITS.md` に維持。
 7. **未確認**: パッチの追加行が hekate / Switchroot Linux / winx の**コードのコピー**かどうか。コメントは『手順に従った』『ポートした』とあり、一部(winx の WifiPcie.h など)は明示的に GPL-2.0 のコードの移植。いずれも GPL-2.0 なので、**パッチを GPL-2.0 で配ることは整合する**が、BSD 側へ移すことはできない。
+
+## 3. 上流の画像・バイナリ(置いてあるが配布物には含めない)
+
+`kept-binaries.json` に SHA-256 を固定した 6 点。上流 main にあったものをそのまま置いている。ライセンス表示はファイル内に無く、上流の宣言(GPL-2.0)に従うものとして扱うが、画像の権利までは確認していない。
+
+- `desktop/swagentsvc.exe` — 上流のビルド済み swagentsvc.exe(manifest/windows-switch-0.8.0.json の v0.8.0 と同一のもの)
+- `desktop/icon_windows.bmp` — 上流のアイコン画像
+- `docs/images/gpu-desktop-taskmanager.jpg` — 上流 docs のスクリーンショット
+- `docs/screenshots/arm64-desktop.jpg` — 上流 docs のスクリーンショット
+- `docs/screenshots/win11-arm64-desktop.jpg` — 上流 docs のスクリーンショット
+- `docs/screenshots/arm32-desktop.jpg` — 上流 docs のスクリーンショット

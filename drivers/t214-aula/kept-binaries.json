@@ -1,0 +1,29 @@
+{
+ "about": "upstream-src/ に置いたままにする上流の画像・バイナリ。tools/check_aula_audit.py は、ここに書いた SHA-256 と一致するものだけを許す(鍵・証明書の秘密部分 .pfx/.key/.pem は常に不可)。配布物(リリース zip)には含めない。",
+ "files": {
+  "desktop/swagentsvc.exe": {
+   "sha256": "50a685aa24cf3570eac15808ef828b09bb4af9ad8e9a4f25a574481a089734d9",
+   "note": "上流のビルド済み swagentsvc.exe(manifest/windows-switch-0.8.0.json の v0.8.0 と同一のもの)"
+  },
+  "desktop/icon_windows.bmp": {
+   "sha256": "95c3f01c9bb65d355c4cf1720041f9bf39c6220baf49c0942bbc11704d4b919d",
+   "note": "上流のアイコン画像"
+  },
+  "docs/images/gpu-desktop-taskmanager.jpg": {
+   "sha256": "8bb1a58ace33b6d192a812404b63805d70526849f120b3abe8e63e1420827c3c",
+   "note": "上流 docs のスクリーンショット"
+  },
+  "docs/screenshots/arm64-desktop.jpg": {
+   "sha256": "806d49ad3a4abe4e36838a3c51bc86690aeb3bb023fb659cb9c77bc2fe195ce7",
+   "note": "上流 docs のスクリーンショット"
+  },
+  "docs/screenshots/win11-arm64-desktop.jpg": {
+   "sha256": "3dabfc9a3f8ee974353405e8798bcf5e2bb4b54c3ca52f89d451728c8b7a2026",
+   "note": "上流 docs のスクリーンショット"
+  },
+  "docs/screenshots/arm32-desktop.jpg": {
+   "sha256": "8174f3801a9244d6756955818460ccda83c5b52a5491f0c8fcc246bbfec461fa",
+   "note": "上流 docs のスクリーンショット"
+  }
+ }
+}

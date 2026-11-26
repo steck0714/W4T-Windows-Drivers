@@ -51,8 +51,10 @@ def main(argv=None):
         # an entry changed on purpose by this repo records w4t_modified_sha256 (see its w4t_modified_note) instead
         if hashlib.sha256(d).hexdigest() != e.get("w4t_modified_sha256", e["upstream_sha256"]):
             bad.append((e["path"], "restored bytes differ from the recorded SHA-256 (upstream, or w4t_modified_sha256)")); continue
-        if os.path.exists(os.path.join(BASE, "upstream-src", *e["upstream"].split("/"))):
-            bad.append((e["path"], "also still present at upstream-src/" + e["upstream"])); continue
+        keep = os.path.join(BASE, "upstream-src", *e["upstream"].split("/"))
+        # an untouched copy of the upstream file may stay in upstream-src/ (harmless; --materialize overwrites it with the restored bytes)
+        if os.path.exists(keep) and hashlib.sha256(open(keep, "rb").read()).hexdigest() != e["upstream_sha256"]:
+            bad.append((e["path"], "upstream-src/" + e["upstream"] + " exists but is not the untouched upstream file")); continue
         restored[e["upstream"]] = d
     if a.check:
         for p, why in bad: print("LAYOUT:", p, "-", why)
