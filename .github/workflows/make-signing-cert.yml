@@ -1,0 +1,48 @@
+# Makes the TEST signing certificate ONCE, so every later build is signed with the SAME certificate: the .cer installed on the
+# Switch stays valid, and Update-SwitchDrivers.ps1 needs no certificate step. UNTESTED workflow: written without running it.
+# Run it by hand (Actions > make-signing-cert > Run workflow). Then either
+#   (a) the repository secret GH_SECRETS_TOKEN (a fine-grained token with "Secrets: read and write" on this repo) exists: the
+#       secrets SWOA_PFX_BASE64 / SWOA_PFX_PASSWORD are set automatically, or
+#   (b) download the artifact (kept 1 day, visible only to people with access to this repo) and paste the two values into
+#       Settings > Secrets and variables > Actions yourself, then delete the artifact.
+# The .pfx (private key) is never committed. Without these secrets every build still works: it signs with a new certificate per run,
+# and Update-SwitchDrivers.ps1 trusts that run's .cer automatically.
+name: make-signing-cert
+on:
+  workflow_dispatch:
+    inputs:
+      years: { description: "Validity in years", required: false, default: "10", type: string }
+permissions:
+  contents: read
+jobs:
+  make:
+    runs-on: windows-2022
+    steps:
+      - name: Create the certificate
+        shell: pwsh
+        run: |
+          $pw = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
+          "::add-mask::$pw"
+          $c = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=SwitchWOA Test Driver Signing' -CertStoreLocation Cert:\CurrentUser\My -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -NotAfter (Get-Date).AddYears([int]'${{ inputs.years }}')
+          New-Item -ItemType Directory -Force out | Out-Null
+          Export-PfxCertificate -Cert $c -FilePath out\swoa.pfx -Password (ConvertTo-SecureString $pw -AsPlainText -Force) | Out-Null
+          Export-Certificate -Cert $c -FilePath out\SwitchWOA-Test.cer | Out-Null
+          [IO.File]::WriteAllText("$PWD\out\SWOA_PFX_BASE64.txt", [Convert]::ToBase64String([IO.File]::ReadAllBytes("$PWD\out\swoa.pfx")))
+          [IO.File]::WriteAllText("$PWD\out\SWOA_PFX_PASSWORD.txt", $pw)
+          Remove-Item out\swoa.pfx
+          "PFX_PW=$pw" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+          "thumbprint $($c.Thumbprint), valid until $($c.NotAfter)" | Add-Content $env:GITHUB_STEP_SUMMARY
+      - name: Set the repository secrets (only when GH_SECRETS_TOKEN exists)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GH_SECRETS_TOKEN }}
+        run: |
+          if (-not $env:GH_TOKEN) { 'GH_SECRETS_TOKEN not set: download the artifact and add the two secrets by hand.' | Add-Content $env:GITHUB_STEP_SUMMARY; exit 0 }
+          Get-Content out\SWOA_PFX_BASE64.txt -Raw | gh secret set SWOA_PFX_BASE64 --repo $env:GITHUB_REPOSITORY
+          Get-Content out\SWOA_PFX_PASSWORD.txt -Raw | gh secret set SWOA_PFX_PASSWORD --repo $env:GITHUB_REPOSITORY
+          'The secrets SWOA_PFX_BASE64 and SWOA_PFX_PASSWORD were set. Delete the artifact.' | Add-Content $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signing-cert-KEEP-PRIVATE
+          path: out
+          retention-days: 1
