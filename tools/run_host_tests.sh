@@ -23,6 +23,7 @@ python3 -I tools/check_l4t_reference.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); ec
 python3 -I tools/check_abi_sync.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/check_abi_sync.py"; } || { fail=$((fail+1)); echo "FAIL tools/check_abi_sync.py"; tail -8 "$tmp/o"; }
 python3 -I tools/check_acpi_resources.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/check_acpi_resources.py"; } || { fail=$((fail+1)); echo "FAIL tools/check_acpi_resources.py"; tail -5 "$tmp/o"; }
 python3 -I tools/check_no_proprietary.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/check_no_proprietary.py"; } || { fail=$((fail+1)); echo "FAIL tools/check_no_proprietary.py"; tail -8 "$tmp/o"; }
+python3 -I tools/check_build_inputs.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/check_build_inputs.py"; } || { fail=$((fail+1)); echo "FAIL tools/check_build_inputs.py"; tail -8 "$tmp/o"; }
 python3 -I tools/check_aula_audit.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/check_aula_audit.py"; } || { fail=$((fail+1)); echo "FAIL tools/check_aula_audit.py"; tail -8 "$tmp/o"; }
 python3 -I tools/aula_layout.py --check >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/aula_layout.py --check"; } || { fail=$((fail+1)); echo "FAIL tools/aula_layout.py --check"; tail -8 "$tmp/o"; }
 python3 -I tools/check_credits.py >"$tmp/o" 2>&1 && { pass=$((pass+1)); echo "PASS tools/check_credits.py"; } || { fail=$((fail+1)); echo "FAIL tools/check_credits.py"; tail -8 "$tmp/o"; }

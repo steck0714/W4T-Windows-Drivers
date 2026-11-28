@@ -29,6 +29,7 @@ static struct {
     NTSTATUS open,close,io,wait,completion;
     ULONG_PTR bytes;
     ULONG address,temp,opens,closes,requests,waits,stalls,sleeps;
+    ULONG addr_not_ready_polls,temp_not_ready_polls;
 } model;
 static NTSTATUS NTAPI Open(PHANDLE handle,ACCESS_MASK access,POBJECT_ATTRIBUTES attrs,
     PIO_STATUS_BLOCK iosb,PLARGE_INTEGER size,ULONG attr,ULONG share,ULONG disposition,
@@ -51,17 +52,25 @@ static NTSTATUS NTAPI Ioctl(HANDLE file,HANDLE event,PIO_APC_ROUTINE apc,PVOID c
     struct tg_gpu_pmic_request *op=in;
     CHECK(file==(HANDLE)123 && !event && !apc && !context && code==TG_GPU_IOCTL_PMIC);
     CHECK(in==out && in_bytes==sizeof(*op) && out_bytes==sizeof(*op));++model.requests;
-    if(op->reg==TG_GPU_PMIC_QUERY_ADDRESS)op->value=model.address;
-    else if(op->reg==TG_GPU_PMIC_QUERY_TEMP)op->value=model.temp;
+    NTSTATUS rc=model.io;
+    if(op->reg==TG_GPU_PMIC_QUERY_ADDRESS){
+        if(model.addr_not_ready_polls){--model.addr_not_ready_polls;rc=STATUS_DEVICE_NOT_READY;}
+        else op->value=model.address;
+    } else if(op->reg==TG_GPU_PMIC_QUERY_TEMP){
+        if(model.temp_not_ready_polls){--model.temp_not_ready_polls;rc=STATUS_DEVICE_NOT_READY;}
+        else op->value=model.temp;
+    }
     else if(op->reg==TG_GPU_PMIC_QUERY_PLLP)op->value=0x12345678;
     else {CHECK(op->address==0x33 && op->reg==0x23);if(!op->write)op->value=80;}
-    iosb->Status=model.completion;iosb->Information=model.bytes;return model.io;
+    iosb->Status=model.completion;iosb->Information=model.bytes;return rc;
 }
 static NTSTATUS NTAPI Wait(HANDLE h,BOOLEAN alertable,PLARGE_INTEGER timeout)
 {CHECK(h==(HANDLE)123 && !alertable && !timeout);++model.waits;return model.wait;}
 static VOID NTAPI Stall(ULONG us){CHECK(us==999);++model.stalls;}
 static NTSTATUS NTAPI Sleep(KPROCESSOR_MODE mode,BOOLEAN alertable,PLARGE_INTEGER interval)
-{CHECK(mode==KernelMode && !alertable && interval->QuadPart==-10000);++model.sleeps;return STATUS_SUCCESS;}
+{CHECK(mode==KernelMode && !alertable &&
+          (interval->QuadPart==-10000 || interval->QuadPart==-500000));
+    ++model.sleeps;return STATUS_SUCCESS;}
 NTSTATUS (NTAPI * const __imp_ZwCreateFile)(PHANDLE,ACCESS_MASK,POBJECT_ATTRIBUTES,PIO_STATUS_BLOCK,
     PLARGE_INTEGER,ULONG,ULONG,ULONG,ULONG,PVOID,ULONG)=Open;
 NTSTATUS (NTAPI * const __imp_ZwClose)(HANDLE)=Close;
@@ -134,6 +143,24 @@ void start(void)
     CHECK(TgGpuPlatformPreflight(&platform,&address)==STATUS_IO_TIMEOUT);
     model.io=STATUS_SUCCESS;model.bytes-=1;
     CHECK(TgGpuPlatformPreflight(&platform,&address)==STATUS_DEVICE_PROTOCOL_ERROR);
+    CHECK(TgGpuClosePlatform(&platform)==STATUS_SUCCESS);
+
+    /* SwitchFan D0Entry / restart window (mesa-switch-woa 244d138): NOT_READY is retried on a 50 ms passive delay
+     * without latching IoStatus, capped at 12 retries, and a real >=80 C rejection is never retried. */
+    Setup();CHECK(TgGpuOpenPlatform(&platform,&resources)==STATUS_SUCCESS);
+    {
+        ULONG before=model.sleeps;
+        model.addr_not_ready_polls=2;model.temp_not_ready_polls=3;address=0;
+        CHECK(TgGpuPlatformPreflight(&platform,&address)==STATUS_SUCCESS &&
+              address==0x33 && platform.IoStatus==STATUS_SUCCESS && model.sleeps==before+5);
+        before=model.sleeps;model.temp_not_ready_polls=20;
+        CHECK(TgGpuPlatformPreflight(&platform,&address)==STATUS_DEVICE_NOT_READY &&
+              platform.IoStatus==STATUS_DEVICE_NOT_READY && model.sleeps==before+12);
+        model.temp_not_ready_polls=0;platform.IoStatus=STATUS_SUCCESS;
+        before=model.sleeps;model.temp=80;
+        CHECK(TgGpuPlatformPreflight(&platform,&address)==STATUS_DEVICE_NOT_READY && model.sleeps==before);
+        model.temp=42;platform.IoStatus=STATUS_SUCCESS;
+    }
     CHECK(TgGpuClosePlatform(&platform)==STATUS_SUCCESS);
     CHECK(WriteFile(GetStdHandle((ULONG)-11),pass,sizeof(pass)-1,&written,NULL));ExitProcess(0);
 }

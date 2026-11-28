@@ -1,0 +1,49 @@
+{
+  "hardware": "Switch Lite HDH-001, Tegra210B01. Windows 11 ARM64 build 22621, Handheld power policy.",
+  "runtime_source": "e5892b05f81478c4ae4acad2ade01180829b641c",
+  "previous_runtime_source": "c5ae935b59c6229db4be23c561d31088503f40e4",
+  "previous_version": "1.0.0.7",
+  "selected_version": "1.0.0.8",
+  "package_architecture": "ARM64",
+  "unsigned_sys_sha256": "ad5556824d58b6aeb967b6caac0e643feb316b0be8bff527582007f2dac5a951",
+  "candidate_package_sha256": {
+    "tegra210i2c.inf": "ab830849bbc0a7ab6361c9ff6b8716edba36bb6056497dd8d6178593bf58c54b",
+    "tegra210i2c.cat": "dde9e590fa5d6f80aaa2f11f1348ecd5e50b445d06f1a42fdbcf1ad5b997fa8b",
+    "tegra210i2c.sys": "4329c6f7f1e9975d9f1a841140b5e4929aa135172863e10519951252fa88516a"
+  },
+  "change": "Handle multi-master INT_ARB_LOST on Tegra210B01 PWR_I2C (0x7000d000, shared with CL-DVFS DFLL hardware master) via FIFO reset without issuing 9-SCL BusClear pulses, bounded linear backoff (50..200 us, up to 4 retries), and full RepeatStart sequence replay from Index 0; record I2C_D000_ArbLostRetries.",
+  "deployment_note": "On Windows 11 22621, do not set CONFIGFLAG_REINSTALL (0x20) on ACPI\\SWOA0201 while child SPB drivers are bound; umpnpmgr issues an online Query-remove ~40s after desktop start. Replace System32\\drivers\\tegra210i2c.sys via FILE_SHARE_DELETE rename + WriteThrough copy for next boot.",
+  "verified_boot": {
+    "boot_record": 101268,
+    "boot_utc": "2026-11-26T10:56:37.1785201Z",
+    "active_sys_sha256": "4329c6f7f1e9975d9f1a841140b5e4929aa135172863e10519951252fa88516a",
+    "buses": [
+      { "id": "ACPI\\SWOA0201\\1", "status": "OK", "code": 0 },
+      { "id": "ACPI\\SWOA0201\\3", "status": "OK", "code": 0 },
+      { "id": "ACPI\\SWOA0201\\5", "status": "OK", "code": 0 }
+    ],
+    "trace": {
+      "I2C_0000_DriverVersion": 7,
+      "I2C_C000_D0EntryDone": 1,
+      "I2C_C000_SelfTest_TMP451_Local": 288,
+      "I2C_C000_SelfTest_TMP451_Remote": 301,
+      "I2C_C000_SelfTest_BQ24193_Rev": 303,
+      "I2C_C500_D0EntryDone": 1,
+      "I2C_D000_D0EntryDone": 1,
+      "I2C_D000_Hidrev": 74023,
+      "I2C_D000_SelfTest_MAX77620_OnOffStat": 258,
+      "I2C_D000_Errors": 0,
+      "I2C_D000_Nacks": 0,
+      "I2C_D000_Timeouts": 0,
+      "I2C_D000_ArbLostRetries": 0
+    },
+    "concurrent_tdr_and_dvfs": {
+      "organic_wddm_tdr_cycles": 2,
+      "gpu_dvfs_mode": 1,
+      "cpu_dfll_active": true,
+      "i2c5_errors": 0,
+      "i2c5_nacks": 0,
+      "i2c5_timeouts": 0
+    }
+  }
+}

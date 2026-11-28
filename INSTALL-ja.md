@@ -7,7 +7,7 @@
 ## 2. 中身
 - 新規 42 / 修正 17 ファイル: `drivers/t214-hoag/SwitchFan/`(ruje0504-2/Windows-for-Switch-Drivers c5ae935、DriverVersion 33)、
   `.github/workflows/`、`CREDITS.md`、`.gitignore`、`tools/ci/`、`drivers/t214-hoag/TegraGpu/tools/build.py`、`drivers/t214-hoag/docs/hdh001/build-drivers.sh`
-- `external/mesa-switch-woa/tegra-x1-wddm/`: SwitchFan が必要とする mesa-switch-woa(ruje0504-2、コミット c77f8a61fd4b627b218fee1db34b654b4e7233a2)のヘッダと、そのライセンス(GPL-2.0-only / MIT)。
+- `external/mesa-switch-woa/tegra-x1-wddm/`: SwitchFan が必要とする mesa-switch-woa(ruje0504-2、コミット 1dbc9e57370bf4fb2e51f2d39e99280ed8a223f0)のヘッダと、そのライセンス(GPL-2.0-only / MIT)。
   再配布する場合は、この `LICENSE.md`・`NOTICE`・`LICENSES/` を一緒に置いてください。
   - ビルドに必要な分だけの抜き出しです(ヘッダ6本)。mesa-switch-woa の全体ではありません。
 

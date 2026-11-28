@@ -51,16 +51,38 @@ NTSTATUS TgGpuPlatformRequest(TG_GPU_PLATFORM *p,struct tg_gpu_pmic_request *op)
     if(NT_SUCCESS(status) && iosb.Information!=sizeof(*op))status=STATUS_DEVICE_PROTOCOL_ERROR;
     return failure(p,status);
 }
+#define TG_PLATFORM_READY_RETRIES 12u
+#define TG_PLATFORM_READY_RETRY_US 50000u       /* 12 * 50 ms = 600 ms wake window */
+static void delay(void *context,UINT32 us);
+
+/* SwitchFan answers STATUS_DEVICE_NOT_READY for a short while after resume or TDR restart. That is retried here
+ * and is not latched into IoStatus; only the final failure is (ruje0504-2/mesa-switch-woa 244d138). */
+static NTSTATUS preflight_query_ready(TG_GPU_PLATFORM *p,ULONG reg,ULONG *value)
+{
+    NTSTATUS status;
+    for(UINT attempt=0;;++attempt) {
+        struct tg_gpu_pmic_request request={0,reg,0,0};
+        NTSTATUS saved=p->IoStatus;
+        status=TgGpuPlatformRequest(p,&request);
+        if(NT_SUCCESS(status)){*value=request.value;return STATUS_SUCCESS;}
+        if(status!=STATUS_DEVICE_NOT_READY || attempt>=TG_PLATFORM_READY_RETRIES || !p->Bridge)break;
+        p->IoStatus=saved;
+        delay(p,TG_PLATFORM_READY_RETRY_US);
+    }
+    return status;
+}
 NTSTATUS TgGpuPlatformPreflight(TG_GPU_PLATFORM *p,UCHAR *address)
 {
-    struct tg_gpu_pmic_request request={0,TG_GPU_PMIC_QUERY_ADDRESS,0,0};NTSTATUS status;
+    ULONG value=0;NTSTATUS status;
+    PAGED_CODE();
     if(!address)return STATUS_INVALID_PARAMETER;
-    status=TgGpuPlatformRequest(p,&request);if(!NT_SUCCESS(status))return status;
-    if(!request.value || request.value>0x7f)return failure(p,STATUS_DEVICE_PROTOCOL_ERROR);
-    UCHAR candidate=(UCHAR)request.value;
-    request=(struct tg_gpu_pmic_request){0,TG_GPU_PMIC_QUERY_TEMP,0,0};
-    status=TgGpuPlatformRequest(p,&request);if(!NT_SUCCESS(status))return status;
-    if(request.value>=80)return failure(p,STATUS_DEVICE_NOT_READY);
+    status=preflight_query_ready(p,TG_GPU_PMIC_QUERY_ADDRESS,&value);
+    if(!NT_SUCCESS(status))return status;
+    if(!value || value>0x7f)return failure(p,STATUS_DEVICE_PROTOCOL_ERROR);
+    UCHAR candidate=(UCHAR)value;
+    status=preflight_query_ready(p,TG_GPU_PMIC_QUERY_TEMP,&value);
+    if(!NT_SUCCESS(status))return status;
+    if(value>=80)return failure(p,STATUS_DEVICE_NOT_READY);
     *address=candidate;return STATUS_SUCCESS;
 }
 static PULONG location(TG_GPU_PLATFORM *p,UINT32 address,BOOLEAN write)

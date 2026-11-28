@@ -12,7 +12,7 @@ size/flag drift gives a KMD that misreads UMD requests. The headers carry _Stati
 so compiling them also checks the layout."""
 import argparse, hashlib, pathlib, subprocess, sys, tempfile
 
-UPSTREAM = "ruje0504-2/mesa-switch-woa c77f8a6"
+UPSTREAM = "ruje0504-2/mesa-switch-woa 1dbc9e5"
 HERE = pathlib.Path(__file__).resolve().parent.parent
 KMD = HERE / "drivers/t210-icosa/drivers/TegraGpu/windows"
 UMD = HERE / "drivers/t210-icosa/drivers/TegraGpu/tools/nvkmd_windows"

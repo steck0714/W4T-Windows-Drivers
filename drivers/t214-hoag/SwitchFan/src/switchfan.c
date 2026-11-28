@@ -1,5 +1,5 @@
 /* W4T-CREDIT-BEGIN
- * Origin : ruje0504-2/Windows-for-Switch-Drivers (drivers/SwitchFan, commit c5ae935), Lite (t214/Hoag) line;
+ * Origin : ruje0504-2/Windows-for-Switch-Drivers (drivers/SwitchFan, commit de636f5), Lite (t214/Hoag) line;
  *          shared implementations come from hayato41200/Windows-for-Switch-Drivers
  *          (see drivers/t214-hoag/README.md).
  * Authors: hayato41200, ruje0504-2 (and their contributors). The upstream file has no author or
@@ -87,6 +87,7 @@ typedef struct _SWFAN_DEVICE {
 #endif
     LARGE_INTEGER SensorId;
     WDFIOTARGET Sensor;
+    WDFWAITLOCK SensorLock;
     WDFTIMER Timer;
 #ifdef SWITCH_LITE_GPU
     WDFTIMER EmcTimer;
@@ -212,8 +213,19 @@ static NTSTATUS SwFanConfigureSensor(WDFIOTARGET Target)
 
 #define SWFAN_HAVE_PMIC_LOCK 1
 #define SWFAN_HAVE_CPU_LOCK 1
-/* Lock order: CpuLock -> BacklightLock (snapshot only) or PmicLock.
+#define SWFAN_HAVE_SENSOR_SAMPLE 1
+/* Lock order: SensorLock -> CpuLock -> BacklightLock (snapshot only) or PmicLock.
  * PmicLock alone serializes transfers, not a complete V/F transition. */
+static VOID SwFanSensorLock(PSWFAN_DEVICE Dev)
+{
+    if (Dev->SensorLock != NULL) WdfWaitLockAcquire(Dev->SensorLock, NULL);
+}
+
+static VOID SwFanSensorUnlock(PSWFAN_DEVICE Dev)
+{
+    if (Dev->SensorLock != NULL) WdfWaitLockRelease(Dev->SensorLock);
+}
+
 static VOID SwFanCpuLock(PSWFAN_DEVICE Dev)
 { WdfWaitLockAcquire(Dev->CpuLock, NULL); }
 static VOID SwFanCpuUnlock(PSWFAN_DEVICE Dev)
@@ -227,6 +239,48 @@ static VOID SwFanPmicLock(PSWFAN_DEVICE Dev)
 static VOID SwFanPmicUnlock(PSWFAN_DEVICE Dev)
 {
     if (Dev->PmicLock != NULL) WdfWaitLockRelease(Dev->PmicLock);
+}
+
+static NTSTATUS SwFanSampleTemp(PSWFAN_DEVICE Dev, PULONG OutTemp)
+{
+    UCHAR Local = 0, Remote = 0;
+    ULONG Temp;
+    NTSTATUS Status;
+
+    if (Dev->Stopping || Dev->Sensor == NULL) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+    SwFanSensorLock(Dev);
+    if (Dev->Stopping || Dev->Sensor == NULL) {
+        SwFanSensorUnlock(Dev);
+        return STATUS_DEVICE_NOT_READY;
+    }
+    Status = SwFanReadReg(Dev->Sensor, TMP451_REMOTE, &Remote);
+    if (NT_SUCCESS(Status)) {
+        Status = SwFanReadReg(Dev->Sensor, TMP451_LOCAL, &Local);
+    }
+    SwFanSensorUnlock(Dev);
+    if (!NT_SUCCESS(Status)) {
+        return Status;
+    }
+    Temp = (Remote > Local) ? Remote : Local;
+    SwFanCpuLock(Dev);
+    if (!Dev->Stopping) {
+        Dev->LastTemp = Temp;
+        Dev->TempValid = TRUE;
+#ifdef SWITCH_LITE_GPU
+        Dev->SocTempC = Remote;
+        Dev->BoardTempC = Local;
+        Dev->TempSampleTime = KeQueryInterruptTime();
+#endif
+    } else {
+        Status = STATUS_DEVICE_NOT_READY;
+    }
+    SwFanCpuUnlock(Dev);
+    if (NT_SUCCESS(Status) && OutTemp != NULL) {
+        *OutTemp = Temp;
+    }
+    return Status;
 }
 
 static VOID SwFanSetDuty(PSWFAN_DEVICE Dev, ULONG Duty);
@@ -298,10 +352,12 @@ VOID SwFanEvtTimer(WDFTIMER Timer)
                     NT_SUCCESS(ClockStatus) && SwCpuKhz(Dev) == Dev->BootCpuKhz;
     SwFanCpuUnlock(Dev);
     SwFanTrace(L"ScreenOffCooling", ScreenOff);
+    SwFanSensorLock(Dev);
     Status = SwFanReadReg(Dev->Sensor, TMP451_REMOTE, &Remote);
     if (NT_SUCCESS(Status)) {
         Status = SwFanReadReg(Dev->Sensor, TMP451_LOCAL, &Local);
     }
+    SwFanSensorUnlock(Dev);
     if (NT_SUCCESS(Status)) {
         ULONG Temp = (Remote > Local) ? Remote : Local;
         SwFanCpuLock(Dev);
@@ -1006,10 +1062,17 @@ NTSTATUS SwFanEvtRestart(WDFDEVICE Device)
     KeAcquireSpinLock(&Dev->TimerLock, &irql);
     Dev->Stopping = FALSE;
     Dev->TimerStopping = FALSE;
-    WdfTimerStart(Dev->Timer, WDF_REL_TIMEOUT_IN_MS(500));
+    KeReleaseSpinLock(&Dev->TimerLock, irql);
+    if (Dev->IsLite) {
+        (VOID)SwFanSampleTemp(Dev, NULL);
+    }
+    KeAcquireSpinLock(&Dev->TimerLock, &irql);
+    if (!Dev->Stopping && !Dev->TimerStopping) {
+        WdfTimerStart(Dev->Timer, WDF_REL_TIMEOUT_IN_MS(500));
 #ifdef SWITCH_LITE_GPU
-    if (Dev->EmcTimer) WdfTimerStart(Dev->EmcTimer,WDF_REL_TIMEOUT_IN_MS(500));
+        if (Dev->EmcTimer) WdfTimerStart(Dev->EmcTimer,WDF_REL_TIMEOUT_IN_MS(500));
 #endif
+    }
     KeReleaseSpinLock(&Dev->TimerLock, irql);
     return STATUS_SUCCESS;
 }
@@ -1081,6 +1144,10 @@ NTSTATUS SwFanEvtDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT DeviceInit)
     }
     WDF_OBJECT_ATTRIBUTES_INIT(&Attributes);
     Attributes.ParentObject = Device;
+    Status = WdfWaitLockCreate(&Attributes, &SwFanGetDevice(Device)->SensorLock);
+    if (!NT_SUCCESS(Status)) {
+        return Status;
+    }
     Status = WdfWaitLockCreate(&Attributes, &SwFanGetDevice(Device)->CpuLock);
     if (!NT_SUCCESS(Status)) {
         return Status;

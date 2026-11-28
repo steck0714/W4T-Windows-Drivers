@@ -46,6 +46,8 @@ URL に置き、リポジトリのシークレット `FW_BUNDLE_URL` に入れ�
 ```
 build/HAC-001/
   drivers/<キット名>/*.sys *.inf *.cat   # 1 つの証明書でテスト署名したもの
+  drivers/TegraGpu/<キット名>/*.sys *.inf *.cat *.dll  # GPU（probe / render / SwitchFan ブリッジ）。GPU ジョブの出力。
+                                          # TegraGpuCore.lib と SHA256SUMS.txt も同じ場所。GPU ジョブが失敗した回は前回分が残る
   SwitchWOA-Test.cer                      # 公開証明書だけ（秘密鍵は絶対に置かない）
   MANIFEST.json  SHA256SUMS.txt           # 全ファイルの SHA-256、INF の DriverVer と HWID
   BUILD-INFO.md                           # コミット、WDK 版、ドライバ別の OK / WARN / FAIL

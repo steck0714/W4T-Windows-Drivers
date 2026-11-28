@@ -55,6 +55,9 @@
 #define HDR_READ            (1u << 19)
 #define CONFIG_LOAD_ALL     0x25u
 #define I2C_MAX_TRANSFER    4096
+#define I2C5_PHYS_BASE      0x7000D000u
+#define I2C5_ARB_MAX_RETRIES 4u
+#define I2C5_ARB_BACKOFF_US 50u
 
 #include <pshpack1.h>
 typedef struct _PNP_SERIAL_BUS_DESCRIPTOR {
@@ -91,7 +94,7 @@ typedef struct _TEGRA_I2C_DEVICE {
     HANDLE SdGateHandle;
     ULONG PhysLow;              /* low 32 bits of the MMIO base, for logging */
     ULONG Hidrev;               /* Used only for the optional I2C5 CPU regulator probe. */
-    volatile LONG Errors, Nacks, Timeouts, LastError, LastAddress;
+    volatile LONG Errors, Nacks, Timeouts, ArbLostRetries, LastError, LastAddress;
 } TEGRA_I2C_DEVICE, *PTEGRA_I2C_DEVICE;
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(TEGRA_I2C_DEVICE, TegraI2cGetDevice)
 
@@ -136,6 +139,7 @@ static VOID TegraI2cTraceErrors(PTEGRA_I2C_DEVICE Dev)
     TegraI2cTrace(Dev, L"Errors", (ULONG)Dev->Errors);
     TegraI2cTrace(Dev, L"Nacks", (ULONG)Dev->Nacks);
     TegraI2cTrace(Dev, L"Timeouts", (ULONG)Dev->Timeouts);
+    TegraI2cTrace(Dev, L"ArbLostRetries", (ULONG)Dev->ArbLostRetries);
     TegraI2cTrace(Dev, L"LastErrorStatus", (ULONG)Dev->LastError);
     TegraI2cTrace(Dev, L"LastErrorAddr", (ULONG)Dev->LastAddress);
 }
@@ -205,12 +209,20 @@ static VOID TegraI2cBusClear(PTEGRA_I2C_DEVICE Dev)
     WrReg(Dev, I2C_INT_STATUS, 0xFFFFFFFF);
 }
 
-/* One I2C message as one packet. Buffer is a kernel buffer of Length bytes. */
+/* One I2C message as one packet. Buffer is a kernel buffer of Length bytes.
+ * On I2C5 (0x7000d000), the hardware CL-DVFS DFLL master shares PWR_I2C for
+ * autonomous CPU rail updates. Pure INT_ARB_LOST there means DFLL won the bus:
+ * flush local FIFOs and let the caller back off and replay from message 0
+ * instead of injecting 9 SCL BusClear clocks onto DFLL's live transfer. */
 static NTSTATUS TegraI2cTransfer(PTEGRA_I2C_DEVICE Dev, USHORT Address, BOOLEAN Read, PUCHAR Buffer,
-                                 ULONG Length, BOOLEAN RepeatStart)
+                                 ULONG Length, BOOLEAN RepeatStart, BOOLEAN AllowArbRetry,
+                                 BOOLEAN *ArbLostRetry)
 {
     ULONG Done = 0, Waited = 0, Timeout = 20000 + Length * 200, Status, Word, Index;
 
+    if (ArbLostRetry != NULL) {
+        *ArbLostRetry = FALSE;
+    }
     if (Length == 0 || Length > I2C_MAX_TRANSFER) {
         return STATUS_INVALID_PARAMETER;
     }
@@ -271,6 +283,21 @@ static NTSTATUS TegraI2cTransfer(PTEGRA_I2C_DEVICE Dev, USHORT Address, BOOLEAN 
     }
 
 Error:
+    if (Dev->PhysLow == I2C5_PHYS_BASE && (Status & INT_ERR_MASK) == INT_ARB_LOST) {
+        if (!TegraI2cResetFifos(Dev)) {
+            goto RecoverBusTimeout;
+        }
+        if (AllowArbRetry && ArbLostRetry != NULL) {
+            InterlockedIncrement(&Dev->ArbLostRetries);
+            *ArbLostRetry = TRUE;
+            return STATUS_IO_DEVICE_ERROR;
+        }
+        InterlockedIncrement(&Dev->Errors);
+        InterlockedExchange(&Dev->LastError, (LONG)Status);
+        InterlockedExchange(&Dev->LastAddress, Address);
+        TegraI2cTraceErrors(Dev);
+        return STATUS_IO_DEVICE_ERROR;
+    }
     InterlockedIncrement(&Dev->Errors);
     InterlockedExchange(&Dev->LastError, (LONG)Status);
     InterlockedExchange(&Dev->LastAddress, Address);
@@ -319,53 +346,72 @@ static NTSTATUS TegraI2cMdlCopy(PMDL Mdl, PUCHAR Flat, SIZE_T Length, BOOLEAN To
     return (Offset == Length) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL;
 }
 
-/* Run SPB transfers [0, Count) of Request; repeated start between them. */
+/* Run SPB transfers [0, Count) of Request; repeated start between them.
+ * If any packet in a multi-transfer sequence loses I2C5 arbitration to DFLL,
+ * replay the full sequence from packet 0 so register pointers are restored. */
 static VOID TegraI2cRunRequest(WDFDEVICE Controller, SPBTARGET Target, SPBREQUEST Request, ULONG Count)
 {
     PTEGRA_I2C_DEVICE Dev = TegraI2cGetDevice(Controller);
     PTEGRA_I2C_TARGET Tgt = TegraI2cGetTarget(Target);
     NTSTATUS Status = STATUS_SUCCESS;
     SIZE_T Total = 0;
-    ULONG Index;
+    ULONG Attempt, Index;
     Status = TegraI2c5Acquire(Dev->SdGate);
     if (!NT_SUCCESS(Status)) {
         SpbRequestComplete(Request, Status);
         return;
     }
-    for (Index = 0; Index < Count && NT_SUCCESS(Status); ++Index) {
-        SPB_TRANSFER_DESCRIPTOR Desc;
-        PMDL Mdl = NULL;
-        PUCHAR Bounce;
-        BOOLEAN Read;
+    for (Attempt = 0; Attempt <= I2C5_ARB_MAX_RETRIES; ++Attempt) {
+        BOOLEAN ArbRetry = FALSE;
+        Total = 0;
+        Status = STATUS_SUCCESS;
+        for (Index = 0; Index < Count && NT_SUCCESS(Status); ++Index) {
+            SPB_TRANSFER_DESCRIPTOR Desc;
+            PMDL Mdl = NULL;
+            PUCHAR Bounce;
+            BOOLEAN Read;
 
-        SPB_TRANSFER_DESCRIPTOR_INIT(&Desc);
-        SpbRequestGetTransferParameters(Request, Index, &Desc, &Mdl);
-        Read = (Desc.Direction == SpbTransferDirectionFromDevice);
-        if (Desc.TransferLength == 0 || Desc.TransferLength > I2C_MAX_TRANSFER || Mdl == NULL) {
-            Status = STATUS_INVALID_PARAMETER;
+            SPB_TRANSFER_DESCRIPTOR_INIT(&Desc);
+            SpbRequestGetTransferParameters(Request, Index, &Desc, &Mdl);
+            Read = (Desc.Direction == SpbTransferDirectionFromDevice);
+            if (Desc.TransferLength == 0 || Desc.TransferLength > I2C_MAX_TRANSFER || Mdl == NULL) {
+                Status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+            if (Desc.DelayInUs != 0) {
+                KeStallExecutionProcessor(Desc.DelayInUs > 1000 ? 1000 : Desc.DelayInUs);
+            }
+            Bounce = (PUCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, Desc.TransferLength, 'c2iT');
+            if (Bounce == NULL) {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                break;
+            }
+            if (!Read) {
+                Status = TegraI2cMdlCopy(Mdl, Bounce, Desc.TransferLength, TRUE);
+            }
+            if (NT_SUCCESS(Status)) {
+                Status = TegraI2cTransfer(Dev, Tgt->Address, Read, Bounce, (ULONG)Desc.TransferLength,
+                                          (BOOLEAN)(Index + 1 < Count),
+                                          (BOOLEAN)(Attempt < I2C5_ARB_MAX_RETRIES), &ArbRetry);
+            }
+            if (NT_SUCCESS(Status) && Read) {
+                Status = TegraI2cMdlCopy(Mdl, Bounce, Desc.TransferLength, FALSE);
+            }
+            if (NT_SUCCESS(Status)) {
+                Total += Desc.TransferLength;
+            }
+            ExFreePoolWithTag(Bounce, 'c2iT');
+            if (ArbRetry) {
+                break;
+            }
+        }
+        if (!ArbRetry) {
+            if (Attempt > 0 && NT_SUCCESS(Status)) {
+                TegraI2cTrace(Dev, L"ArbLostRetries", (ULONG)Dev->ArbLostRetries);
+            }
             break;
         }
-        if (Desc.DelayInUs != 0) {
-            KeStallExecutionProcessor(Desc.DelayInUs > 1000 ? 1000 : Desc.DelayInUs);
-        }
-        Bounce = (PUCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, Desc.TransferLength, 'c2iT');
-        if (Bounce == NULL) {
-            Status = STATUS_INSUFFICIENT_RESOURCES;
-            break;
-        }
-        if (!Read) {
-            Status = TegraI2cMdlCopy(Mdl, Bounce, Desc.TransferLength, TRUE);
-        }
-        if (NT_SUCCESS(Status)) {
-            Status = TegraI2cTransfer(Dev, Tgt->Address, Read, Bounce, (ULONG)Desc.TransferLength, (BOOLEAN)(Index + 1 < Count));
-        }
-        if (NT_SUCCESS(Status) && Read) {
-            Status = TegraI2cMdlCopy(Mdl, Bounce, Desc.TransferLength, FALSE);
-        }
-        if (NT_SUCCESS(Status)) {
-            Total += Desc.TransferLength;
-        }
-        ExFreePoolWithTag(Bounce, 'c2iT');
+        KeStallExecutionProcessor(I2C5_ARB_BACKOFF_US * (Attempt + 1u));
     }
     TegraI2c5Release(Dev->SdGate);
     WdfRequestSetInformation((WDFREQUEST)Request, Total);
@@ -506,9 +552,25 @@ NTSTATUS TegraI2cEvtReleaseHardware(WDFDEVICE Device, WDFCMRESLIST Translated)
 static VOID TegraI2cSelfTest(PTEGRA_I2C_DEVICE Dev, USHORT Address, UCHAR Register, PCWSTR Name)
 {
     UCHAR Value = 0;
-    NTSTATUS Status = TegraI2cTransfer(Dev, Address, FALSE, &Register, 1, TRUE);
-    if (NT_SUCCESS(Status)) {
-        Status = TegraI2cTransfer(Dev, Address, TRUE, &Value, 1, FALSE);
+    ULONG Attempt;
+    NTSTATUS Status = STATUS_IO_DEVICE_ERROR;
+
+    for (Attempt = 0; Attempt <= I2C5_ARB_MAX_RETRIES; ++Attempt) {
+        BOOLEAN ArbRetry = FALSE;
+        UCHAR RegByte = Register;
+        Status = TegraI2cTransfer(Dev, Address, FALSE, &RegByte, 1, TRUE,
+                                  (BOOLEAN)(Attempt < I2C5_ARB_MAX_RETRIES), &ArbRetry);
+        if (NT_SUCCESS(Status)) {
+            Status = TegraI2cTransfer(Dev, Address, TRUE, &Value, 1, FALSE,
+                                      (BOOLEAN)(Attempt < I2C5_ARB_MAX_RETRIES), &ArbRetry);
+        }
+        if (!ArbRetry) {
+            if (Attempt > 0 && NT_SUCCESS(Status)) {
+                TegraI2cTrace(Dev, L"ArbLostRetries", (ULONG)Dev->ArbLostRetries);
+            }
+            break;
+        }
+        KeStallExecutionProcessor(I2C5_ARB_BACKOFF_US * (Attempt + 1u));
     }
     TegraI2cTrace(Dev, Name, NT_SUCCESS(Status) ? (0x100u | Value) : (ULONG)Status);
 }

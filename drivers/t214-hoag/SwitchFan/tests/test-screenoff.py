@@ -7,8 +7,10 @@ import subprocess
 import tempfile
 
 source = (Path(__file__).resolve().parents[1] / 'src/switchfan.c').read_text()
-names = ['SwFanSetDuty', 'SwFanDutyForTemp', 'SwFanEvtTimer',
-         'SwFanEvtD0Entry', 'SwFanEvtD0Exit', 'SwFanApplyBacklight', 'SwFanDisplayStateCallback']
+names = ['SwFanSensorLock', 'SwFanSensorUnlock', 'SwFanSampleTemp',
+         'SwFanSetDuty', 'SwFanDutyForTemp', 'SwFanEvtTimer',
+         'SwFanEvtD0Entry', 'SwFanEvtD0Exit', 'SwFanEvtRestart',
+         'SwFanApplyBacklight', 'SwFanDisplayStateCallback']
 
 def function(name):
     match = re.search(r'^(?:static )?(?:VOID|ULONG|NTSTATUS) ' + name + r'\([^;]*?\)\n\{', source, re.M)
@@ -43,6 +45,8 @@ typedef enum {PowerActionNone,PowerActionSleep,PowerActionHibernate,
 #define TRUE true
 #define FALSE false
 #define STATUS_SUCCESS 0
+#define STATUS_DEVICE_NOT_READY -4
+#define VOID void
 #define NT_SUCCESS(s) ((s)>=0)
 #define UNREFERENCED_PARAMETER(x) ((void)(x))
 #define PWM_DUTY_MAX 236u
@@ -56,7 +60,7 @@ typedef enum {PowerActionNone,PowerActionSleep,PowerActionHibernate,
 #define WDF_REL_TIMEOUT_IN_MS(n) (n)
 typedef struct {
  UCHAR *Pwm,*Car,*BacklightPwm; ULONG FanOffset,Duty,DisplayState,LastTemp,BootCpuKhz,Brightness;
- void *Sensor,*Timer,*BacklightLock,*FanLock,*Device;
+ void *Sensor,*SensorLock,*Timer,*BacklightLock,*FanLock,*Device;
  BOOLEAN IsLite,Stopping,TimerStopping,BacklightReady,CpuConfigured,CpuApplied,TempValid,CpuOverclockEnabled;
  unsigned TimerLock;
  ULONG FanProfile,FanTargetPwm,FanProfileFlags;
@@ -72,23 +76,26 @@ static POWER_ACTION action; static char order[64];static unsigned next;
 static bool cpu_locked;
 static void SwFanCpuLock(PSWFAN_DEVICE d){(void)d;assert(!cpu_locked);cpu_locked=true;}
 static void SwFanCpuUnlock(PSWFAN_DEVICE d){(void)d;assert(cpu_locked);cpu_locked=false;}
-static bool backlight_locked,fan_locked,timer_locked;static unsigned registry_writes;
-static int backlight_id,fan_id;
+static bool backlight_locked,fan_locked,timer_locked,sensor_locked,config_fail;static unsigned registry_writes,last_timer_ms;
+static int backlight_id,fan_id,sensor_id;
 static uint64_t KeQueryInterruptTime(void){return 20000000;}
 static void KeAcquireSpinLock(unsigned *l,KIRQL *i){(void)l;*i=0;assert(!timer_locked);timer_locked=true;}
 static void KeReleaseSpinLock(unsigned *l,KIRQL i){(void)l;(void)i;assert(timer_locked);timer_locked=false;}
 static void event(char c){assert(next<sizeof(order));order[next++]=c;}
 static void SwFanTrace(const wchar_t *n,ULONG v){assert(!backlight_locked);registry_writes++;if(!wcscmp(n,L"SleepFanOff"))sleep_off=v;}
 static void WdfWaitLockAcquire(void *l,void *t){
- (void)t;bool *held=l==&backlight_id?&backlight_locked:&fan_locked;
+ (void)t;
+ if(l==&sensor_id){assert(!sensor_locked&&!cpu_locked&&!backlight_locked&&!fan_locked&&!timer_locked);sensor_locked=true;return;}
+ bool *held=l==&backlight_id?&backlight_locked:&fan_locked;
  assert(l==&backlight_id||l==&fan_id);assert(!*held);*held=true;
 }
 static void WdfWaitLockRelease(void *l){
+ if(l==&sensor_id){assert(sensor_locked);sensor_locked=false;return;}
  bool *held=l==&backlight_id?&backlight_locked:&fan_locked;
  assert(l==&backlight_id||l==&fan_id);assert(*held);*held=false;
 }
 static NTSTATUS SwFanReadReg(void *s,UCHAR reg,UCHAR *v){
- (void)s;assert(reg==0||reg==1);if(sensor_fail)return -1;*v=(UCHAR)temp;return 0;
+ (void)s;assert(sensor_locked&&(reg==0||reg==1));if(sensor_fail)return -1;*v=(UCHAR)temp;return 0;
 }
 static NTSTATUS SwCpuApply(PSWFAN_DEVICE d,BOOLEAN oc){
  assert(!oc);event('c');if(clock_fail)return -1;d->CpuApplied=false;return 0;
@@ -101,18 +108,21 @@ static void write_pwm(PULONG p,ULONG v){*p=v;event(v==(PWM_CSR_EN|PWM_ABSOLUTE_O
 #define WRITE_REGISTER_ULONG(p,v) write_pwm((p),(v))
 #define READ_REGISTER_ULONG(p) (*(p))
 static LONG InterlockedIncrement(volatile LONG *p){return ++*p;}
-static void WdfTimerStart(void *t,unsigned ms){(void)t;assert(ms==2000);}
+static void WdfTimerStart(void *t,unsigned ms){(void)t;assert(ms==2000||ms==500);last_timer_ms=ms;}
+static NTSTATUS SwFanConfigureSensor(void *s){(void)s;return config_fail?-1:0;}
+static void SwFanStartBacklight(void *d){(void)d;}
+static void SwCpuPrepare(void *d){(void)d;}
 static POWER_ACTION WdfDeviceGetSystemPowerAction(void *d){(void)d;return action;}
 '''
 tests = r'''
 static ULONG pwm;
 static void init(PSWFAN_DEVICE d){
- memset(d,0,sizeof(*d));d->Pwm=(UCHAR*)&pwm;d->Device=d;
+ memset(d,0,sizeof(*d));d->Pwm=(UCHAR*)&pwm;d->Device=d;d->Sensor=&sensor_id;d->SensorLock=&sensor_id;
  d->BacklightLock=&backlight_id;d->FanLock=&fan_id;d->FanProfile=SwFanProfileHandheld;
- assert(!backlight_locked&&!fan_locked&&!timer_locked&&!cpu_locked);
+ assert(!backlight_locked&&!fan_locked&&!timer_locked&&!cpu_locked&&!sensor_locked);
  d->IsLite=d->BacklightReady=d->CpuConfigured=d->CpuOverclockEnabled=true;d->CpuApplied=true;
  d->Config.CpuKhz=LITE_CPU_KHZ;d->BootCpuKhz=998400;d->DisplayState=1;d->Duty=51;
- temp=32;sensor_fail=clock_fail=false;action=PowerActionNone;sleep_off=0;next=0;
+ temp=32;sensor_fail=clock_fail=config_fail=false;action=PowerActionNone;sleep_off=0;next=0;last_timer_ms=0;
 }
 int main(void){
  SWFAN_DEVICE d;
@@ -177,6 +187,18 @@ int main(void){
  d.LastTemp=35;d.TempValid=false;SwFanEvtD0Exit(&d,3);assert(d.Duty==76);
  d.TempValid=true;SwFanEvtD0Exit(&d,WdfPowerDeviceD3Final);assert(d.Duty==76);
  d.Duty=0;sleep_off=1;SwFanEvtD0Entry(&d,3);assert(d.Duty==76&&!d.TempValid&&!sleep_off);
+ /* SwFanEvtRestart clears Stopping and immediately populates TempValid via
+    SwFanSampleTemp before the 500 ms timer fires; transient read errors do
+    not fail Restart, while sensor config failure engages failsafe cooling. */
+ d.Stopping=d.TimerStopping=true;temp=41;
+ assert(SwFanEvtRestart(&d)==0&&!d.Stopping&&!d.TimerStopping&&d.TempValid&&d.LastTemp==41&&last_timer_ms==500);
+ SwFanEvtD0Entry(&d,3);assert(!d.TempValid);
+ d.Stopping=true;sensor_fail=true;
+ assert(SwFanEvtRestart(&d)==0&&!d.Stopping&&!d.TempValid&&last_timer_ms==500);
+ sensor_fail=false;ULONG sampled=0;
+ assert(SwFanSampleTemp(&d,&sampled)==0&&sampled==41&&d.TempValid&&d.LastTemp==41);
+ d.Stopping=true;assert(SwFanSampleTemp(&d,&sampled)==STATUS_DEVICE_NOT_READY);
+ config_fail=true;assert(SwFanEvtRestart(&d)==-1&&d.Duty==FAILSAFE_DUTY);config_fail=false;
  init(&d);d.Stopping=true;SwFanEvtTimer(&d);assert(next==0);
  /* The power callback never writes a registry hive while holding its lock. */
  init(&d);ULONG backlight=0x80000031;d.BacklightPwm=(UCHAR*)&backlight;d.Brightness=150;

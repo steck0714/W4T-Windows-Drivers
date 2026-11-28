@@ -58,7 +58,11 @@ typedef struct { int64_t Timeout; } WDF_REQUEST_SEND_OPTIONS;
 
 static bool pmic_locked = false;
 static bool bl_locked = false;
+static bool sensor_locked = false;
 static unsigned pmic_lock_acquires = 0;
+static unsigned sensor_reads = 0;
+static bool fail_sensor_read = false;
+static UCHAR sensor_remote = 42, sensor_local = 36;
 static int requestor_mode = KernelMode;
 static bool fail_pmic_write = false;
 static UCHAR pmic_regs[256];
@@ -80,6 +84,8 @@ typedef struct {
     UCHAR *Pwm;
     LITE_PERFORMANCE Config;
     void *Pmic;
+    void *Sensor;
+    WDFWAITLOCK SensorLock;
     WDFWAITLOCK PmicLock;
     WDFWAITLOCK BacklightLock;
     LARGE_INTEGER PmicIds[2];
@@ -111,6 +117,9 @@ struct mock_request {
 
 #define SWFAN_HAVE_PMIC_LOCK 1
 #define SWFAN_HAVE_CPU_LOCK 1
+#define SWFAN_HAVE_SENSOR_SAMPLE 1
+#define TMP451_LOCAL  0
+#define TMP451_REMOTE 1
 static VOID SwFanCpuLock(PSWFAN_DEVICE Dev)
 {
     (void)Dev;
@@ -141,6 +150,9 @@ static void WdfWaitLockAcquire(WDFWAITLOCK l, void *t)
     } else if (l == (WDFWAITLOCK)2) {
         assert(!bl_locked);
         bl_locked = true;
+    } else if (l == (WDFWAITLOCK)3) {
+        assert(!sensor_locked && !cpu_locked && !pmic_locked && !bl_locked);
+        sensor_locked = true;
     }
 }
 static void WdfWaitLockRelease(WDFWAITLOCK l)
@@ -151,8 +163,15 @@ static void WdfWaitLockRelease(WDFWAITLOCK l)
     } else if (l == (WDFWAITLOCK)2) {
         assert(bl_locked);
         bl_locked = false;
+    } else if (l == (WDFWAITLOCK)3) {
+        assert(sensor_locked);
+        sensor_locked = false;
     }
 }
+static VOID SwFanSensorLock(PSWFAN_DEVICE Dev)
+{ if (Dev->SensorLock != NULL) WdfWaitLockAcquire(Dev->SensorLock, NULL); }
+static VOID SwFanSensorUnlock(PSWFAN_DEVICE Dev)
+{ if (Dev->SensorLock != NULL) WdfWaitLockRelease(Dev->SensorLock); }
 static VOID SwFanPmicLock(PSWFAN_DEVICE Dev)
 { if (Dev->PmicLock != NULL) WdfWaitLockAcquire(Dev->PmicLock, NULL); }
 static VOID SwFanPmicUnlock(PSWFAN_DEVICE Dev)
@@ -180,11 +199,46 @@ static NTSTATUS WdfRequestRetrieveOutputBuffer(WDFREQUEST r, size_t min_len, PVO
     if (len) *len = mr->out_len;
     return STATUS_SUCCESS;
 }
+static ULONGLONG interrupt_time = 10000000;
+static ULONGLONG KeQueryInterruptTime(void) { return interrupt_time; }
 static NTSTATUS SwFanReadReg(void *t, UCHAR reg, UCHAR *v)
 {
-    assert(t != NULL && pmic_locked);
+    if (t == (void *)2) {
+        assert(sensor_locked && !cpu_locked && !pmic_locked && !bl_locked);
+        assert(reg == TMP451_LOCAL || reg == TMP451_REMOTE);
+        ++sensor_reads;
+        if (fail_sensor_read) return STATUS_IO_TIMEOUT;
+        *v = (reg == TMP451_REMOTE) ? sensor_remote : sensor_local;
+        return STATUS_SUCCESS;
+    }
+    assert(t == (void *)1 && pmic_locked);
     *v = pmic_regs[reg];
     return STATUS_SUCCESS;
+}
+static NTSTATUS SwFanSampleTemp(PSWFAN_DEVICE Dev, PULONG OutTemp)
+{
+    UCHAR Local = 0, Remote = 0;
+    ULONG Temp;
+    NTSTATUS Status;
+    if (Dev->Stopping || Dev->Sensor == NULL) return STATUS_DEVICE_NOT_READY;
+    SwFanSensorLock(Dev);
+    if (Dev->Stopping || Dev->Sensor == NULL) { SwFanSensorUnlock(Dev); return STATUS_DEVICE_NOT_READY; }
+    Status = SwFanReadReg(Dev->Sensor, TMP451_REMOTE, &Remote);
+    if (NT_SUCCESS(Status)) Status = SwFanReadReg(Dev->Sensor, TMP451_LOCAL, &Local);
+    SwFanSensorUnlock(Dev);
+    if (!NT_SUCCESS(Status)) return Status;
+    Temp = (Remote > Local) ? Remote : Local;
+    SwFanCpuLock(Dev);
+    if (!Dev->Stopping) {
+        Dev->LastTemp = Temp;
+        Dev->TempValid = TRUE;
+        Dev->SocTempC = Remote;
+        Dev->BoardTempC = Local;
+        Dev->TempSampleTime = KeQueryInterruptTime();
+    } else Status = STATUS_DEVICE_NOT_READY;
+    SwFanCpuUnlock(Dev);
+    if (NT_SUCCESS(Status) && OutTemp != NULL) *OutTemp = Temp;
+    return Status;
 }
 static NTSTATUS WdfIoTargetSendWriteSynchronously(void *t, void *r,
     WDF_MEMORY_DESCRIPTOR *m, void *o, WDF_REQUEST_SEND_OPTIONS *s, ULONG_PTR *n)
@@ -212,8 +266,6 @@ static void KeDelayExecutionThread(int m, bool a, LARGE_INTEGER *d) { (void)m; (
 static void KeRaiseIrql(unsigned i, KIRQL *o) { (void)i; *o = 0; }
 static void KeLowerIrql(KIRQL i) { (void)i; }
 static void KeStallExecutionProcessor(unsigned n) { (void)n; }
-static ULONGLONG interrupt_time = 10000000;
-static ULONGLONG KeQueryInterruptTime(void) { return interrupt_time; }
 #define KeMemoryBarrier() ((void)0)
 static LONG InterlockedExchange(volatile LONG *dst, LONG val)
 { LONG old = *dst; *dst = val; return old; }
@@ -567,6 +619,42 @@ int main(void)
     SwFanGetPowerStatus(&d,&st);
     assert(st.GpuReportedKhz==844800 && st.GpuSampleAgeMs==0);
     test_emc_gpu_vote(&d);
+
+    /* D0Entry / wake window (TempValid=FALSE): QUERY_TEMP and M1 enable sample
+     * TMP451 on demand under SensorLock -> CpuLock before PmicLock. */
+    d.Sensor = (void *)2;
+    d.SensorLock = (WDFWAITLOCK)3;
+    d.TempValid = FALSE;
+    d.LastTemp = 0;
+    sensor_remote = 44;
+    sensor_local = 37;
+    sensor_reads = 0;
+    op = (struct tg_gpu_pmic_request){ 0, TG_GPU_PMIC_QUERY_TEMP, 0, 0 };
+    assert(send_gpu_pmic(&d, &op) == STATUS_SUCCESS && op.value == 44 && d.TempValid && d.LastTemp == 44 && sensor_reads == 2);
+
+    /* On-demand sensor failure during D0Entry window rejects cleanly. */
+    d.TempValid = FALSE;
+    fail_sensor_read = true;
+    op = (struct tg_gpu_pmic_request){ 0, TG_GPU_PMIC_QUERY_TEMP, 0, 0 };
+    assert(send_gpu_pmic(&d, &op) == STATUS_DEVICE_NOT_READY && !d.TempValid);
+    op = (struct tg_gpu_pmic_request){ 0x33, 0x06, 1, 1 };
+    assert(send_gpu_pmic(&d, &op) == STATUS_DEVICE_NOT_READY && !pmic_locked && !sensor_locked);
+    fail_sensor_read = false;
+
+    /* On-demand over-temperature (>=80 C) populates TempValid but blocks M1 enable. */
+    d.TempValid = FALSE;
+    sensor_remote = 82;
+    op = (struct tg_gpu_pmic_request){ 0x33, 0x06, 1, 1 };
+    assert(send_gpu_pmic(&d, &op) == STATUS_DEVICE_NOT_READY && d.TempValid && d.LastTemp == 82);
+
+    /* Cool on-demand sample allows M1 enable immediately after D0Entry. */
+    d.TempValid = FALSE;
+    sensor_remote = 43;
+    pmic_regs[0x23] = 110;
+    pmic_regs[0x06] = 0x54;
+    op = (struct tg_gpu_pmic_request){ 0x33, 0x06, 1, 1 };
+    assert(send_gpu_pmic(&d, &op) == STATUS_SUCCESS && pmic_regs[0x06] == 0x55 && d.TempValid && d.LastTemp == 43);
+
     /* Unsupported / invalid inputs rejected cleanly. */
     assert(SwFanSetPowerMode(&d, 8) == STATUS_INVALID_PARAMETER);
     d.IsLite = FALSE;
