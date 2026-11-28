@@ -1,8 +1,8 @@
 # Build info: HDH-001
 
 - model: HDH-001
-- commit: 0a2d73c88d4d419a2fbd396362f50128f5a88c8d
-- built: 2026-11-28 03:42:05Z
+- commit: e5cfe2bae208349e621f834874cd25264b490eff
+- built: 2026-11-28 04:07:19Z
 - WDK for most drivers: 10.0.19041.0 (a driver with its own wdk entry, e.g. Wi-Fi, uses that one)
 - signed with: a new self-signed certificate made by this run
 
