@@ -440,6 +440,14 @@ static void TestSegment(void)
     ptes[0].Valid = 1; ptes[0].Segment = 1; ptes[0].PageAddress = TG_GPU_TABLE_BYTES >> PAGE_SHIFT;
     CHECK(NT_SUCCESS(TgGpuUpdatePageTable(&update,&target)));
     CHECK(target.Entries[0] == UINT64_C(0x0090020500000000));
+    /* The live PAL4 fix must not relax CPU initialization. */
+    update.DriverProtection = 0xfe;
+    CHECK(TgGpuUpdatePageTable(&update,&target) == STATUS_NOT_SUPPORTED);
+    CHECK(target.Entries[0] == UINT64_C(0x0090020500000000));
+    update.DriverProtection = 0xff;
+    CHECK(TgGpuUpdatePageTable(&update,&target) == STATUS_NOT_SUPPORTED);
+    CHECK(target.Entries[0] == UINT64_C(0x0090020500000000));
+    update.DriverProtection = 0;
     /* Reject the whole batch when a later child table crosses the pool end. */
     update.StartIndex = 1; update.NumPageTableEntries = 2; ptes[1] = ptes[0];
     ptes[1].PageAddress = (sizeof(segment_bytes)-PAGE_SIZE) >> PAGE_SHIFT;
@@ -460,13 +468,32 @@ static void TestSegment(void)
 }
 
 struct tlb_model {
-    UINT32 Control, Root, Trigger; UINT Writes;
+    UINT32 Control, Root, Trigger; UINT Writes, ReadsAfterFault;
     volatile UINT64 *ExpectedEntry; UINT64 Expected;
+    BOOLEAN FaultLatched, LatchOnSpaceRead, LatchAfterTrigger;
 };
+static bool PagingTestAbort(void *Ctx)
+{
+    const struct tlb_model *m = Ctx;
+    return m->FaultLatched != FALSE;
+}
+static bool PagingTestAcquire(void *Ctx)
+{
+    const struct tlb_model *m = Ctx;
+    return m->FaultLatched == FALSE;
+}
+static void PagingTestWrite32(void *Ctx, const struct tg_gpu_power_io *Io,
+    uint32_t Reg, uint32_t Val, bool FinalStep)
+{
+    UNREFERENCED_PARAMETER(Ctx); UNREFERENCED_PARAMETER(FinalStep);
+    Io->write32(Io->context, Reg, Val);
+}
 static uint32_t TlbRead(void *Context, uint32_t Address)
 {
     struct tlb_model *m = Context;
     CHECK(Address == 0x57100c80);
+    if (m->FaultLatched) ++m->ReadsAfterFault;
+    if (m->LatchOnSpaceRead) m->FaultLatched = TRUE;
     return m->Control;
 }
 static void TlbWrite(void *Context, uint32_t Address, uint32_t Value)
@@ -475,7 +502,11 @@ static void TlbWrite(void *Context, uint32_t Address, uint32_t Value)
     if (m->ExpectedEntry) CHECK(*m->ExpectedEntry == m->Expected);
     ++m->Writes;
     if (Address == 0x57100cb8) m->Root = Value;
-    else { CHECK(Address == 0x57100cbc); m->Trigger = Value; }
+    else {
+        CHECK(Address == 0x57100cbc);
+        m->Trigger = Value;
+        if (m->LatchAfterTrigger) m->FaultLatched = TRUE;
+    }
 }
 static void TlbDelay(void *Context, uint32_t Us)
 { UNREFERENCED_PARAMETER(Context); CHECK(Us == 2); }
@@ -587,7 +618,7 @@ static void TestPagingBuffer(void)
     TG_GPU_ROOT_TABLE root = {0};
     DXGKARG_SETROOTPAGETABLE set = {.Address={1,0,TG_GPU_TABLE_BYTES},.NumEntries=1};
     TG_GPU_PAGING_BUILD build = {&segment,TG_GPU_TABLE_BYTES,&root,
-        scratch,TG_GPU_TABLE_ENTRIES,TRUE,TRUE};
+        scratch,TG_GPU_TABLE_ENTRIES,TRUE,TRUE,NULL};
     DXGK_PTE ptes[3] = {0};
     DXGKARG_BUILDPAGINGBUFFER args = {0}, flush = {0};
     UINT64 *entries = (UINT64 *)segment_bytes;
@@ -698,6 +729,23 @@ static void TestPagingBuffer(void)
         CHECK(completed==bytes && entries[10]==(((UINT64)kinds[i]<<36)|UINT64_C(0x100900015)));
     }
 
+    /* PAL4: level 1, GPU_PHYSICAL, NULL allocation, DriverProtection 0xfe.
+     * It must produce the same table pointer as the pitch-only request. */
+    args.pDmaBuffer=commands;args.DmaSize=sizeof(commands);
+    args.UpdatePageTable.PageTableLevel=1;
+    args.UpdatePageTable.hAllocation=NULL;
+    args.UpdatePageTable.DriverProtection=0xfe;
+    ptes[0]=(DXGK_PTE){.Valid=1,.Segment=1,.PageAddress=TG_GPU_TABLE_BYTES>>PAGE_SHIFT};
+    CHECK(TgGpuBuildPagingBuffer(&args,&build)==STATUS_SUCCESS);
+    bytes=(UCHAR *)args.pDmaBuffer-commands;
+    CHECK(TgGpuExecutePagingBuffer(&segment,commands,bytes,TRUE,&io,&power,&completed,NULL)==STATUS_SUCCESS);
+    CHECK(completed==bytes && entries[10]==UINT64_C(0x0090020500000000));
+    args.pDmaBuffer=commands;args.DmaSize=sizeof(commands);
+    args.UpdatePageTable.DriverProtection=0xff;
+    CHECK(TgGpuBuildPagingBuffer(&args,&build)==STATUS_NOT_SUPPORTED && args.pDmaBuffer==commands);
+    CHECK(entries[10]==UINT64_C(0x0090020500000000));
+    args.UpdatePageTable.PageTableLevel=0;
+
     /* Mandatory immediate initialization accepts a different CPU alias only
      * when every page resolves to the owned contiguous table span.
      */
@@ -705,8 +753,12 @@ static void TestPagingBuffer(void)
     args.UpdatePageTable.UpdateMode=DXGK_PAGETABLEUPDATE_CPU_VIRTUAL;
     args.UpdatePageTable.PageTableAddress.CpuVirtual=alias_bytes;
     args.UpdatePageTable.StartIndex=12;args.UpdatePageTable.NumPageTableEntries=1;
-    ptes[0].Valid=1;ptes[0].Segment=1;ptes[0].PageAddress=1;
-    CHECK(TgGpuBuildPagingBuffer(&args,&build)==STATUS_NOT_SUPPORTED);
+    ptes[0]=(DXGK_PTE){.Valid=1,.ReadOnly=1,.Segment=1,.PageAddress=1};
+    UINT64 previous=entries[12];
+    args.UpdatePageTable.DriverProtection=0xfe;
+    CHECK(TgGpuBuildPagingBuffer(&args,&build)==STATUS_NOT_SUPPORTED && entries[12]==previous);
+    args.UpdatePageTable.DriverProtection=0xff;
+    CHECK(TgGpuBuildPagingBuffer(&args,&build)==STATUS_NOT_SUPPORTED && entries[12]==previous);
     args.UpdatePageTable.DriverProtection=0;ptes[0].ReadOnly=0;
     CHECK(NT_SUCCESS(TgGpuBuildPagingBuffer(&args,&build)));
     CHECK(entries[12]==UINT64_C(0x100900011));
@@ -730,6 +782,50 @@ static void TestPagingBuffer(void)
     for (i=0;i<sizeof(commands);++i) CHECK(commands[i]==0xcc);
     for (i=0;i<128;++i) CHECK(entries[i]==UINT64_C(0xa5a5a5a5a5a5a5a5));
     for (;i<TG_GPU_TABLE_ENTRIES;++i) CHECK(entries[i]==0);
+
+    /* B11 / T2 regression: UPDATE + FLUSH batch under TgGpuExecutePagingBufferChecked:
+     * latching fault on FLUSH's very first SPACE read MUST write 0 PDB/TRIGGER words
+     * and report CompletedBytes equal only to the preceding UPDATE record! */
+    {
+        DXGKARG_BUILDPAGINGBUFFER b = {0}, fl = {0};
+        DXGK_PTE p = {.Valid=1, .Segment=1, .PageAddress=1};
+        b.Operation = DXGK_OPERATION_UPDATE_PAGE_TABLE;
+        b.pDmaBuffer = commands; b.DmaSize = sizeof(commands);
+        b.UpdatePageTable.PageTableLevel = 0;
+        b.UpdatePageTable.UpdateMode = DXGK_PAGETABLEUPDATE_GPU_PHYSICAL;
+        b.UpdatePageTable.PageTableAddress.GpuPhysical = (D3DGPU_PHYSICAL_ADDRESS){1,0,0};
+        b.UpdatePageTable.StartIndex = 0; b.UpdatePageTable.NumPageTableEntries = 1;
+        b.UpdatePageTable.pPageTableEntries = &p;
+        CHECK(TgGpuBuildPagingBuffer(&b, &build) == STATUS_SUCCESS);
+        const SIZE_T update_len = (UCHAR *)b.pDmaBuffer - commands;
+        fl.Operation = DXGK_OPERATION_FLUSH_TLB;
+        fl.pDmaBuffer = b.pDmaBuffer;
+        fl.DmaSize = (UINT)(sizeof(commands) - update_len);
+        fl.FlushTlb.RootPageTableAddress = set.Address;
+        CHECK(TgGpuBuildPagingBuffer(&fl, &build) == STATUS_SUCCESS);
+        const SIZE_T batch_len = (UCHAR *)fl.pDmaBuffer - commands;
+
+        model = (struct tlb_model){.Control = 0x18000, .LatchOnSpaceRead = TRUE};
+        const struct tg_gpu_commit_guard guard = {
+            PagingTestAbort, PagingTestAcquire, PagingTestWrite32, &model
+        };
+        volatile LONG last_kind = 0;
+        completed = 0;
+        CHECK(TgGpuExecutePagingBufferChecked(&segment, commands, batch_len, TRUE,
+              &io, &power, &completed, NULL, &guard, &last_kind) == STATUS_DEVICE_DATA_ERROR);
+        CHECK(completed == update_len && model.Writes == 0 &&
+              model.ReadsAfterFault == 0 && last_kind == 2);
+
+        /* B11 v5 counterexample (T2): fault latches immediately after TRIGGER
+         * write -> 2 writes (PDB+TRIGGER), ZERO post-fault FB_MMU reads, and
+         * CompletedBytes retains only the finished UPDATE prefix! */
+        model = (struct tlb_model){.Control = 0x18000, .LatchAfterTrigger = TRUE};
+        completed = 0;
+        CHECK(TgGpuExecutePagingBufferChecked(&segment, commands, batch_len, TRUE,
+              &io, &power, &completed, NULL, &guard, &last_kind) == STATUS_DEVICE_DATA_ERROR);
+        CHECK(completed == update_len && model.Writes == 2 &&
+              model.ReadsAfterFault == 0 && last_kind == 2);
+    }
 }
 
 void start(void)
@@ -737,7 +833,7 @@ void start(void)
     DXGK_PTE ptes[3] = {0};
     DXGK_BUILDPAGINGBUFFER_UPDATEPAGETABLE u = {0};
     TG_GPU_PAGE_UPDATE_TARGET target = {table, sizeof(table), scratch,
-        TG_GPU_TABLE_ENTRIES, TRUE, TRUE, Resolve, NULL};
+        TG_GPU_TABLE_ENTRIES, TRUE, TRUE, Resolve, NULL, NULL};
     DXGK_PAGE_TABLE_LEVEL_DESC desc;
     UINT64 before;
     ULONG i, written;
