@@ -4,7 +4,7 @@ Class=System
 ClassGuid={4d36e97d-e325-11ce-bfc1-08002be10318}
 Provider=%Provider%
 CatalogFile=tegraxusb.cat
-DriverVer=11/26/2026,0.1.0.48
+DriverVer=11/28/2026,0.1.0.49
 PnpLockdown=1
 
 [Manufacturer]
