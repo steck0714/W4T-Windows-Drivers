@@ -112,6 +112,8 @@ jobs:
           git -C external/mesa-switch-woa checkout -q FETCH_HEAD
           test "$(git -C external/mesa-switch-woa rev-parse HEAD)" = "$rev"
           python3 tools/check_swbatt_bridge.py --woa external/mesa-switch-woa
+          # every source / INF / #include / bridge header a driver build needs exists, against the pinned mesa-switch-woa
+          python3 tools/check_build_inputs.py --woa external/mesa-switch-woa
       - name: ABI headers vs ruje's current mesa-switch-woa (informational)
         continue-on-error: true
         run: |
@@ -531,7 +533,7 @@ jobs:
     # A model whose build job failed has no build-<model> artifact, so its folder keeps what it had. Nothing runs for tags or pull requests.
     # The commit is made with GITHUB_TOKEN, which does not start another workflow run (no loop).
     if: ${{ !cancelled() && github.ref_type == 'branch' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.commit_build)) }}
-    needs: [host, drivers, heg001, apps]
+    needs: [host, drivers, heg001, apps, gpu, gpu-lite, gpu-aula]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -551,6 +553,10 @@ jobs:
         with:
           pattern: apps-*
           path: dl
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*-GPU'
+          path: dl-gpu
       - name: Commit build/<model>
         env:
           EVENT: ${{ github.event_name }}
@@ -572,6 +578,22 @@ jobs:
               cp -r "$d/." "build/$m/apps/"
             done
           fi
+          # TegraGpu: the GPU jobs' signed kits go to build/<model>/drivers/TegraGpu/ (the folder name the driver and fwfetch use
+          # on the Switch: System32\drivers\TegraGpu). A model whose GPU job failed or was skipped keeps its previous TegraGpu folder.
+          # Only .sys .inf .cat .cer .dll .lib are copied; keys and firmware are refused (check_no_proprietary.py below).
+          for pair in Erista-GPU:HAC-001 Lite-GPU:HDH-001 Aula-GPU:HEG-001; do
+            art="${pair%%:*}"; m="${pair##*:}"; g="dl-gpu/$art"
+            [ -d "$g" ] || continue
+            dest="build/$m/drivers/TegraGpu"
+            rm -rf "$dest"; mkdir -p "$dest"
+            (cd "$g" && find . -type f \( -name '*.sys' -o -name '*.inf' -o -name '*.cat' -o -name '*.cer' -o -name '*.dll' -o -name '*.lib' \) -print0) |
+              while IFS= read -r -d '' f; do
+                f="${f#./}"; f2="${f#kit/}"            # kit/<name>/x.sys -> <name>/x.sys
+                mkdir -p "$dest/$(dirname "$f2")"; cp "$g/$f" "$dest/$f2"
+              done
+            (cd "$dest" && find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
+            echo "TegraGpu for $m: $(find "$dest" -type f | wc -l) files"
+          done
           python3 tools/check_no_proprietary.py
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
