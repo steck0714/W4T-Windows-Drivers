@@ -17,7 +17,11 @@ typedef struct _TG_GPU_PANEL {
     DXGK_DISPLAY_INFORMATION Boot;
     TG_GPU_PANEL_FLIP Pending, Displayed;
     D3DKMDT_VIDPN_PRESENT_PATH_ROTATION PathRotation;
+    volatile PVOID PostCpuAddress;
+    UINT SystemDisplayWidth, SystemDisplayHeight;
     BOOLEAN Stopping, NotifyVBlank, NotifyMpoVBlank, SourceVisible, TargetActive;
+    /* Valid from the one-child StartDevice result until successful StopDevice. */
+    BOOLEAN ChildReported;
 } TG_GPU_PANEL;
 
 struct _TG_GPU_ADAPTER;

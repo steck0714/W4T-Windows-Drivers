@@ -75,7 +75,8 @@ static NTSTATUS InitialUpdate(DXGKARG_BUILDPAGINGBUFFER *Args,
     if (Args->MultipassOffset || !alias || (alias & (PAGE_SIZE - 1)) ||
         alias > (ULONG_PTR)-1 - Target->Size)
         return STATUS_INVALID_PARAMETER;
-    if (!Build->InitialMappingUncached) return STATUS_NOT_SUPPORTED;
+    if (!Build->InitialMappingUncached)
+        return TgGpuRejectPaging(Target->Rejection, TgGpuPagingRejectCpuAlias, 1);
     /* VidMm supplies a valid nonpaged alias; verify every page, not just the
      * first address. Never assume its virtual address equals our own mapping.
      */
@@ -113,6 +114,7 @@ NTSTATUS TgGpuBuildPagingBuffer(DXGKARG_BUILDPAGINGBUFFER *Args,
         target.GpuPagesUncached = Build->GpuPagesUncached;
         target.Resolve = TgGpuResolveVidMmPage;
         target.ResolveContext = (PVOID)Build->Tables;
+        target.Rejection = Build->Rejection;
         if (!target.Size || target.Size > TG_GPU_TABLE_BYTES ||
             (target.Size & (PAGE_SIZE - 1))) return STATUS_INVALID_PARAMETER;
         if (update->UpdateMode == DXGK_PAGETABLEUPDATE_CPU_VIRTUAL) {
@@ -121,7 +123,8 @@ NTSTATUS TgGpuBuildPagingBuffer(DXGKARG_BUILDPAGINGBUFFER *Args,
             return InitialUpdate(Args, Build, &target);
         }
         if (update->UpdateMode != DXGK_PAGETABLEUPDATE_GPU_PHYSICAL)
-            return STATUS_NOT_SUPPORTED;
+            return TgGpuRejectPaging(target.Rejection, TgGpuPagingRejectUpdateMode,
+                                     update->UpdateMode);
         record.Kind = PAGING_UPDATE;
         record.Table = update->PageTableAddress.GpuPhysical;
         if (record.Table.Padding || record.Table.SegmentId != Build->Tables->SegmentId)
@@ -178,7 +181,9 @@ NTSTATUS TgGpuBuildPagingBuffer(DXGKARG_BUILDPAGINGBUFFER *Args,
         } else {
             const DXGK_BUILDPAGINGBUFFER_TRANSFERVIRTUAL *transfer = &Args->TransferVirtual;
             if (transfer->Flags.Flags || (UINT)transfer->TransferDirection > DXGK_MEMORY_TRANSFER_LOCAL_TO_LOCAL)
-                return STATUS_NOT_SUPPORTED;
+                return TgGpuRejectPaging(Build->Rejection, TgGpuPagingRejectVirtualTransfer,
+                                         ((UINT64)(UINT)transfer->TransferDirection << 32) |
+                                         transfer->Flags.Flags);
             record.Kind = PAGING_COPY;
             record.Dma = (struct tg_gpu_paging_dma){
                 .source = transfer->SourceVirtualAddress,
@@ -191,7 +196,8 @@ NTSTATUS TgGpuBuildPagingBuffer(DXGKARG_BUILDPAGINGBUFFER *Args,
             return STATUS_INVALID_PARAMETER;
         if (!Args->pDmaBuffer || Args->DmaSize < sizeof(record))
             return STATUS_GRAPHICS_INSUFFICIENT_DMA_BUFFER;
-    } else return STATUS_NOT_SUPPORTED;
+    } else return TgGpuRejectPaging(Build->Rejection, TgGpuPagingRejectBufferOperation,
+                                   Args->MultipassOffset);
     if ((ULONG_PTR)Args->pDmaBuffer & 7) return STATUS_INVALID_PARAMETER;
     *(PAGING_RECORD *)Args->pDmaBuffer = record;
     for (i = 0; i < count; ++i)
@@ -222,10 +228,12 @@ NTSTATUS TgGpuValidatePagingBuffer(const TG_GPU_TABLE_SEGMENT *Tables,const void
     if (RequiresSystemContext) *RequiresSystemContext = requires;
     return STATUS_SUCCESS;
 }
-NTSTATUS TgGpuExecutePagingBuffer(const TG_GPU_TABLE_SEGMENT *Tables,
+NTSTATUS TgGpuExecutePagingBufferChecked(const TG_GPU_TABLE_SEGMENT *Tables,
     const void *Buffer, SIZE_T Bytes, BOOLEAN AddressSpaceIdle,
     const struct tg_gpu_power_io *Io, const struct tg_gpu_power *Power,
-    SIZE_T *CompletedBytes, TG_GPU_PAGING_DMA_STEP *NextDma)
+    SIZE_T *CompletedBytes, TG_GPU_PAGING_DMA_STEP *NextDma,
+    const struct tg_gpu_commit_guard *Guard,
+    volatile LONG *DiagLastKind)
 {
     SIZE_T offset;NTSTATUS status;BOOLEAN requires;
     if (!CompletedBytes) return STATUS_INVALID_PARAMETER;
@@ -240,6 +248,11 @@ NTSTATUS TgGpuExecutePagingBuffer(const TG_GPU_TABLE_SEGMENT *Tables,
         !Power || !Power->owned || !Power->ready) return STATUS_DEVICE_NOT_READY;
     for (offset = 0; offset < Bytes; ) {
         const PAGING_RECORD *record = (const void *)((const UCHAR *)Buffer + offset);
+        /* Per-record fault/epoch gate (B11) and per-record kind breadcrumb (N3). */
+        if (Guard && Guard->abort && Guard->abort(Guard->context))
+            return STATUS_DEVICE_DATA_ERROR;
+        if (DiagLastKind)
+            InterlockedExchange(DiagLastKind, (LONG)record->Kind);
         if (record->Kind == PAGING_UPDATE) {
             PVOID cpu;
             UINT64 address;
@@ -248,10 +261,10 @@ NTSTATUS TgGpuExecutePagingBuffer(const TG_GPU_TABLE_SEGMENT *Tables,
             status = TgGpuMapTableSegment(Tables, record->Table.SegmentOffset,
                 record->TableBytes, &cpu, &address);
             if (!NT_SUCCESS(status)) return status;
-            KeMemoryBarrier();
+            TgGpuDataSyncBarrier();
             for (i = 0; i < record->Count; ++i)
                 ((volatile UINT64 *)cpu)[record->Start+i] = values[i];
-            KeMemoryBarrier();
+            TgGpuDataSyncBarrier();
         } else if (record->Kind == PAGING_FLUSH) {
             TG_GPU_ROOT_TABLE root;
             DXGK_BUILDPAGINGBUFFER_FLUSHTLB flush = {0};
@@ -260,8 +273,10 @@ NTSTATUS TgGpuExecutePagingBuffer(const TG_GPU_TABLE_SEGMENT *Tables,
             flush.RootPageTableAddress = record->Table;
             flush.StartVirtualAddress = record->FirstVa;
             flush.EndVirtualAddress = record->LastVa;
-            status = TgGpuFlushRootTable(&root, &flush, Io, Power);
+            status = TgGpuFlushRootTableChecked(&root, &flush, Io, Power, Guard);
             if (!NT_SUCCESS(status)) return status;
+            if (Guard && Guard->abort && Guard->abort(Guard->context))
+                return STATUS_DEVICE_DATA_ERROR;
         } else {
             NextDma->Operation = record->Dma;
             NextDma->RecordBytes = record->Bytes;
@@ -271,4 +286,12 @@ NTSTATUS TgGpuExecutePagingBuffer(const TG_GPU_TABLE_SEGMENT *Tables,
         *CompletedBytes = offset;
     }
     return STATUS_SUCCESS;
+}
+NTSTATUS TgGpuExecutePagingBuffer(const TG_GPU_TABLE_SEGMENT *Tables,
+    const void *Buffer, SIZE_T Bytes, BOOLEAN AddressSpaceIdle,
+    const struct tg_gpu_power_io *Io, const struct tg_gpu_power *Power,
+    SIZE_T *CompletedBytes, TG_GPU_PAGING_DMA_STEP *NextDma)
+{
+    return TgGpuExecutePagingBufferChecked(Tables, Buffer, Bytes, AddressSpaceIdle,
+        Io, Power, CompletedBytes, NextDma, NULL, NULL);
 }

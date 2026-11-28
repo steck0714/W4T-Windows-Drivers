@@ -35,6 +35,8 @@ parser.add_argument("--keep-fan", action="store_true", help="with --probe, prese
 parser.add_argument("--windows-tests", action="store_true", help="build the real-WDK paging test executable for ARM64 Windows")
 parser.add_argument("--native-test-version", type=int, metavar="N",
                     help="with --display, build gated native submission as package 0.1.0.N")
+parser.add_argument("--paging-stop-probe", action="store_true",
+                    help="capture one unsupported paging return on the stop screen in a native trial")
 parser.add_argument("--render-gpu-khz", type=int, choices=(460800, 729600), default=729600,
                     help="fixed GPU clock; 460800 is an opt-in display power control")
 parser.add_argument("--nvdec-firmware", type=Path,
@@ -44,6 +46,8 @@ parser.add_argument("--nvdec-sample", type=Path,
 args = parser.parse_args()
 if args.native_test_version is not None and (not args.display or not 1 <= args.native_test_version <= 65535):
     parser.error("--native-test-version requires --display and a version from 1 to 65535")
+if args.paging_stop_probe and args.native_test_version is None:
+    parser.error("--paging-stop-probe requires --native-test-version")
 if args.keep_fan and not args.probe:
     parser.error("--keep-fan requires --probe")
 if args.render_gpu_khz != 729600 and not args.display:
@@ -59,7 +63,7 @@ if (args.probe or build_miniport) and (not args.acr_firmware or
     any(not (args.acr_firmware / n).is_file() for n in acr_names)):
     parser.error("--probe, --render and --display require --acr-firmware with all six external NVIDIA ACR files")
 mesa_base = subprocess.run(
-    ["git", "-C", str(args.mesa), "merge-base", "--is-ancestor", MESA_REVISION, "HEAD"],
+    ["git", "--no-lazy-fetch", "-C", str(args.mesa), "merge-base", "--is-ancestor", MESA_REVISION, "HEAD"],
     check=False)
 if mesa_base.returncode != 0:
     parser.error(f"Mesa must contain the tested mesa-switch base {MESA_REVISION}")
@@ -78,6 +82,7 @@ core = [root / "core/gm20b_mmu.c", root / "core/report.c", root / "core/gpfifo.c
         root / "core/gr_submit.c", root / "core/gr_clear.c", root / "core/gr_draw.c",
         root / "platform/t214_gr_context.c", root / "platform/t214_interrupt.c", encoder]
 subprocess.run(["python3", str(root / "tests/test_debug_report.py")], check=True)
+subprocess.run(["python3", str(root / "tests/test_recovery_decode.py")], check=True)
 host = args.out / "test-gm20b-core"
 subprocess.run([args.cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
                 *[f"-I{p}" for p in mesa_includes], *map(str, core), str(root / "tests/test_core.c"),
@@ -101,6 +106,17 @@ power_test = args.out / "test-t214-power"
 subprocess.run([args.cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
                 str(power), str(root / "tests/test_power.c"), "-o", str(power_test)], check=True)
 subprocess.run([str(power_test.resolve())], check=True)
+host_nt_shim = args.out / "host-nt-shim"
+host_nt_shim.mkdir(parents=True, exist_ok=True)
+for hdr in ("ntifs.h", "initguid.h", "wdmguid.h"):
+    (host_nt_shim / hdr).write_text("/* host pthread shim */\n")
+platform_threads_test = args.out / "test-platform-threads"
+subprocess.run([args.cc, "-std=c11", "-O2", "-fshort-wchar", "-Wall", "-Wextra",
+                "-Wno-unused-function", "-Werror", "-pthread",
+                f"-I{host_nt_shim}", f"-I{root}",
+                str(root / "tests/test_platform_threads.c"),
+                "-o", str(platform_threads_test)], check=True)
+subprocess.run([str(platform_threads_test.resolve())], check=True)
 clock = root / "platform/t214_clock.c"
 clock_test = args.out / "test-t214-clock"
 subprocess.run([args.cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
@@ -275,7 +291,7 @@ for source in [*core, power, clock, *nvdec_core, root / "platform/t214_nvdec.c",
                root / "windows/work_queue.c", root / "windows/allocation.c",
                root / "windows/query.c", root / "windows/adapter.c",
                root / "windows/submit_ddi.c",root / "windows/present.c",root / "windows/command_snapshot.c",root / "windows/recovery.c",
-               root / "windows/diagnostic_events.c",
+               root / "windows/fault_isr.c",root / "windows/diagnostic_events.c",
                root / "windows/platform_io.c",root / "windows/host1x_clock.c",root / "windows/dvfs.c",root / "windows/worker.c",
                root / "windows/platform_adapter.c",root / "windows/gr_firmware_io.c",
                root / "windows/reset_backend.c",root / "windows/adapter_reset.c",
@@ -323,16 +339,21 @@ if args.windows_tests:
                     f"/out:{args.out / 'test-nvdec-adapter.exe'}", str(nvdec_adapter_test),
                     str(args.out / "nvdec_adapter.obj"), str(args.out / "device_lifetime.obj"),
                     str(args.out / "t214_nvdec.obj"), str(sdk_lib)], check=True)
+    platform_io_model = args.out / "platform_io_model.obj"
+    subprocess.run([args.clang_cl, *flags, "/DRELOCATABLE_USER_SHARED_DATA",
+                    "/clang:-funwind-tables", f"/Fo{platform_io_model}", "--",
+                    str(root / "windows/platform_io.c")], check=True)
     context_test = args.out / "test_context_windows.obj"
     inactive_video = args.out / "nvdec_inactive_fixture.obj"
     subprocess.run([args.clang_cl, *flags, "/clang:-funwind-tables", f"/Fo{inactive_video}", "--",
                     str(root / "tests/nvdec_inactive_fixture.c")], check=True)
-    subprocess.run([args.clang_cl, *flags, "/clang:-funwind-tables", f"/Fo{context_test}", "--",
+    subprocess.run([args.clang_cl, *flags, "/DRELOCATABLE_USER_SHARED_DATA",
+                    "/clang:-funwind-tables", f"/Fo{context_test}", "--",
                     str(root / "tests/test_context_windows.c")], check=True)
     subprocess.run([args.link, "/nologo", "/machine:arm64", "/subsystem:console,10.0",
                     "/entry:start", "/include:_load_config_used", "/nodefaultlib", "/release", "/opt:ref", "/timestamp:0",
                     f"/out:{args.out / 'test-context.exe'}", str(context_test),
-                    str(inactive_video), str(library), str(sdk_lib)], check=True)
+                    str(inactive_video), str(platform_io_model), str(library), str(sdk_lib)], check=True)
     timings_test = args.out / "test_panel_timings_windows.obj"
     subprocess.run([args.clang_cl, *flags, "/clang:-funwind-tables", f"/Fo{timings_test}", "--",
                     str(root / "tests/test_panel_timings_windows.c")], check=True)
@@ -344,7 +365,8 @@ if args.windows_tests:
     # so synchronous latch waits can execute in a user-mode ARM64 fixture.
     scanout_models = []
     for source in [root / "tests/test_panel_scanout_windows.c",
-                   root / "windows/panel.c", root / "windows/panel_scanout.c"]:
+                   root / "windows/panel.c", root / "windows/panel_scanout.c",
+                   root / "windows/fault_isr.c"]:
         obj = args.out / (source.stem + "_model.obj")
         subprocess.run([args.clang_cl, *flags, "/DRELOCATABLE_USER_SHARED_DATA",
                         "/clang:-funwind-tables", f"/Fo{obj}", "--", str(source)], check=True)
@@ -359,14 +381,25 @@ if args.windows_tests:
     subprocess.run([args.link,"/nologo","/machine:arm64","/subsystem:console,10.0","/entry:start",
                     "/include:_load_config_used","/nodefaultlib","/release","/opt:ref","/timestamp:0",
                     f"/out:{args.out / 'test-hardware.exe'}",str(hardware_test),str(args.out / "hardware.obj"),
-                    str(args.out / "reset_backend.obj"),str(args.out / "private_memory.obj"),str(sdk_lib)],check=True)
+                    str(args.out / "reset_backend.obj"),str(args.out / "fault_isr.obj"),
+                    str(args.out / "private_memory.obj"),str(sdk_lib)],check=True)
+    platform_io_img2 = args.out / "platform_io_img2.obj"
+    img2_renames = [f"/D{sym}=Img2_{sym}" for sym in (
+        "TgGpuSetPlatformDriverObject", "TgGpuOpenPlatform", "TgGpuClosePlatform",
+        "TgGpuPlatformRequest", "TgGpuPlatformTryRequest", "TgGpuPlatformTryVoteRequest",
+        "TgGpuReferencePlatformBridge", "TgGpuPlatformPreflight", "TgGpuPlatformAbandonRail",
+        "TgGpuPlatformRefreshIsolation", "TgGpuHandOffUnresolvedRail",
+        "TgGpuRetryUnresolvedRailRelease", "TgGpuQueryUnresolvedRail", "TgGpuPlatformIo")]
+    subprocess.run([args.clang_cl, *flags, "/DRELOCATABLE_USER_SHARED_DATA", *img2_renames,
+                    "/clang:-funwind-tables", f"/Fo{platform_io_img2}", "--",
+                    str(root / "windows/platform_io.c")], check=True)
     platform_test=args.out / "test_platform_windows.obj"
-    subprocess.run([args.clang_cl,*flags,"/clang:-funwind-tables",f"/Fo{platform_test}","--",
-                    str(root / "tests/test_platform_windows.c")],check=True)
+    subprocess.run([args.clang_cl,*flags,"/DRELOCATABLE_USER_SHARED_DATA","/clang:-funwind-tables",
+                    f"/Fo{platform_test}","--",str(root / "tests/test_platform_windows.c")],check=True)
     subprocess.run([args.link,"/nologo","/machine:arm64","/subsystem:console,10.0","/entry:start",
                     "/include:_load_config_used","/nodefaultlib","/release","/opt:ref","/timestamp:0",
                     f"/out:{args.out / 'test-platform.exe'}",str(platform_test),
-                    str(args.out / "platform_io.obj"),str(sdk_lib)],check=True)
+                    str(platform_io_model),str(platform_io_img2),str(sdk_lib)],check=True)
     clock_test=args.out / "test_host1x_clock_windows.obj"
     subprocess.run([args.clang_cl,*flags,"/clang:-funwind-tables",
                     "-Wno-unused-function","-Wno-unused-variable","-Wno-unused-but-set-global",
@@ -383,13 +416,13 @@ if args.windows_tests:
                     f"/out:{args.out / 'test-worker.exe'}",str(worker_test),
                     str(args.out / "worker.obj"),str(sdk_lib)],check=True)
     dvfs_test=args.out / "test_dvfs_windows.obj"
-    subprocess.run([args.clang_cl,*flags,f"/I{root}","/clang:-funwind-tables",f"/Fo{dvfs_test}","--",
-                    str(root / "tests/test_dvfs_windows.c")],check=True)
+    subprocess.run([args.clang_cl,*flags,"/DRELOCATABLE_USER_SHARED_DATA",f"/I{root}","/clang:-funwind-tables",
+                    f"/Fo{dvfs_test}","--",str(root / "tests/test_dvfs_windows.c")],check=True)
     subprocess.run([args.link,"/nologo","/machine:arm64","/subsystem:console,10.0","/entry:start",
                     "/include:_load_config_used","/nodefaultlib","/release","/opt:ref","/timestamp:0",
                     f"/out:{args.out / 'test-dvfs.exe'}",str(dvfs_test),
                     str(args.out / "dvfs.obj"),str(args.out / "t214_clock.obj"),
-                    str(args.out / "platform_io.obj"),str(sdk_lib)],check=True)
+                    str(platform_io_model),str(sdk_lib)],check=True)
     diagnostic_test=args.out / "test_diagnostic_windows.obj"
     subprocess.run([args.clang_cl,*flags,"/clang:-funwind-tables",f"/Fo{diagnostic_test}","--",
                     str(root / "tests/test_diagnostic_windows.c")],check=True)
@@ -426,9 +459,12 @@ if build_miniport:
     obj = args.out / "render_miniport.obj"
     km_lib = args.wdk_include.parent.parent / "Lib" / args.wdk_include.name / "km/ARM64"
     miniport_flags = ["/DTG_GPU_PANEL_WDDM=1"] if args.display else []
+    if args.paging_stop_probe:
+        miniport_flags.append("/DTG_GPU_PAGING_STOP_PROBE=1")
     test_objects = []
     if args.native_test_version is not None:
         miniport_flags.append(f"/DTG_GPU_NATIVE_TEST_VERSION={args.native_test_version}")
+        miniport_flags.append("/DTG_GPU_PAGING_DIAGNOSTICS=1")
         gate = args.out / "native_start_test.obj"
         subprocess.run([args.clang_cl,*flags,*miniport_flags,f"/Fo{gate}","--",
                         str(root / "windows/native_start_test.c")],check=True)

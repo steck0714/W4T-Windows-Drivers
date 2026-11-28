@@ -1,11 +1,80 @@
 /* SPDX-License-Identifier: MIT */
 #include "adapter.h"
 #include "allocation.h"
+#include "query.h"
 #include "reset_backend.h"
 #include "submit_ddi.h"
 #ifdef TG_GPU_NATIVE_TEST_VERSION
 #include "native_start_test.h"
 #endif
+#ifdef TG_GPU_PAGING_DIAGNOSTICS
+#include "paging_dispatch.h"
+#include "diagnostic_events.h"
+
+static volatile LONG g_PagingFailureRecorded;
+static volatile LONG g_PagingDirectoryRecorded;
+
+#ifdef TG_GPU_PAGING_STOP_PROBE
+#define TG_GPU_PAGING_PROBE_BUGCHECK 0xe0535751u
+enum { PagingProbeInactive, PagingProbeArmed, PagingProbeCaptured };
+static volatile LONG g_PagingProbeState;
+#endif
+
+static NTSTATUS APIENTRY diagnostic_paging_buffer(HANDLE adapter, DXGKARG_BUILDPAGINGBUFFER *args)
+{
+    TG_GPU_PAGING_REJECTION rejection = {0};
+    NTSTATUS status = TgGpuBuildPagingRequest(adapter, args, &rejection);
+    if (NT_SUCCESS(status) && args && args->Operation == DXGK_OPERATION_UPDATE_PAGE_TABLE &&
+        args->UpdatePageTable.PageTableLevel == 1 &&
+        args->UpdatePageTable.UpdateMode == DXGK_PAGETABLEUPDATE_GPU_PHYSICAL &&
+        args->UpdatePageTable.DriverProtection &&
+        InterlockedCompareExchange(&g_PagingDirectoryRecorded, 1, 0) == 0) {
+        const TG_GPU_PAGING_REJECTION_EVENT event = {
+            .Version = 1, .Operation = args->Operation, .Status = status,
+            .PageTableLevel = 1, .UpdateMode = DXGK_PAGETABLEUPDATE_GPU_PHYSICAL,
+            .HasAllocation = args->UpdatePageTable.hAllocation != NULL,
+            .UpdateFieldsValid = 1, .Detail = args->UpdatePageTable.DriverProtection,
+        };
+        TgGpuTracePagingDirectory(&event);
+    }
+    if (status == STATUS_NOT_SUPPORTED && args &&
+        InterlockedCompareExchange(&g_PagingFailureRecorded, 1, 0) == 0) {
+        TG_GPU_PAGING_REJECTION_EVENT event = {
+            .Version = 1, .Operation = args->Operation, .Status = status,
+            .Site = rejection.Site, .Detail = rejection.Detail,
+        };
+        if (args->Operation == DXGK_OPERATION_UPDATE_PAGE_TABLE) {
+            event.PageTableLevel = args->UpdatePageTable.PageTableLevel;
+            event.UpdateMode = args->UpdatePageTable.UpdateMode;
+            event.HasAllocation = args->UpdatePageTable.hAllocation != NULL;
+            event.UpdateFieldsValid = 1;
+        }
+        /* No per-success trace, disk write or GPU register access. Recording
+         * needs an enabled ETW session; it is not a durable on-disk log. */
+        TgGpuTracePagingRejection(&event);
+#ifdef TG_GPU_PAGING_STOP_PROBE
+        if (InterlockedCompareExchange(&g_PagingProbeState, PagingProbeCaptured,
+                                       PagingProbeArmed) != PagingProbeArmed)
+            return status;
+        /* V2 parameter 3: site[31:0], level[39:32], mode[47:40],
+         * allocation-present[48]. Parameter 4 retains the full detail. */
+        ULONG_PTR context = (ULONG)rejection.Site;
+        if (args->Operation == DXGK_OPERATION_UPDATE_PAGE_TABLE) {
+            const DXGK_BUILDPAGINGBUFFER_UPDATEPAGETABLE *u = &args->UpdatePageTable;
+            context |= ((ULONG_PTR)u->PageTableLevel & 0xffu) << 32;
+            context |= ((ULONG_PTR)u->UpdateMode & 0xffu) << 40;
+            context |= (ULONG_PTR)(u->hAllocation != NULL) << 48;
+        }
+        KeBugCheckEx(TG_GPU_PAGING_PROBE_BUGCHECK, (ULONG)args->Operation,
+                     (ULONG)status, context, rejection.Detail);
+#endif
+    }
+    return status;
+}
+#endif
+
+static DXGKDDI_STOP_DEVICE *g_BaseStopDevice;
+static DXGKDDI_STOP_DEVICE_AND_RELEASE_POST_DISPLAY_OWNERSHIP *g_BaseStopAndRelease;
 
 static VOID record_status(PCWSTR name, NTSTATUS status)
 {
@@ -14,11 +83,61 @@ static VOID record_status(PCWSTR name, NTSTATUS status)
                               name,REG_DWORD,&value,sizeof(value));
 }
 
+#ifdef TG_GPU_PANEL_WDDM
+static VOID map_post_display(TG_GPU_ADAPTER *a)
+{
+    if (!a || a->Panel.PostCpuAddress)
+        return;
+    PHYSICAL_ADDRESS pa = {.QuadPart = T214_GPU_POST_FB_BASE};
+    a->Panel.PostCpuAddress = MmMapIoSpaceEx(
+        pa, T214_GPU_POST_FB_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
+    record_status(L"PostDisplayMapStatus",
+        a->Panel.PostCpuAddress ? STATUS_SUCCESS : STATUS_INSUFFICIENT_RESOURCES);
+}
+#endif
+
+static VOID unmap_post_display(TG_GPU_ADAPTER *a)
+{
+    if (!a || !a->Panel.PostCpuAddress)
+        return;
+    PVOID mapping = (PVOID)a->Panel.PostCpuAddress;
+    a->Panel.PostCpuAddress = NULL;
+    MmUnmapIoSpace(mapping, T214_GPU_POST_FB_SIZE);
+}
+
+static NTSTATUS APIENTRY miniport_stop_device(PVOID context)
+{
+    TG_GPU_ADAPTER *a = context;
+    NTSTATUS status = g_BaseStopDevice ? g_BaseStopDevice(context) : STATUS_INVALID_PARAMETER;
+    if (NT_SUCCESS(status) && a)
+        unmap_post_display(a);
+    return status;
+}
+
+static NTSTATUS APIENTRY miniport_stop_and_release(PVOID context, D3DDDI_VIDEO_PRESENT_TARGET_ID target,
+    PDXGK_DISPLAY_INFORMATION info)
+{
+    TG_GPU_ADAPTER *a = context;
+    NTSTATUS status = g_BaseStopAndRelease ? g_BaseStopAndRelease(context, target, info) : STATUS_NOT_SUPPORTED;
+    if (NT_SUCCESS(status) && a)
+        unmap_post_display(a);
+    return status;
+}
+
 static NTSTATUS start_device(PVOID context,DXGK_START_INFO *start,
     DXGKRNL_INTERFACE *dxgk,ULONG *sources,ULONG *children)
 {
     TG_GPU_ADAPTER *a=context;
     TgGpuRecordStartup(a,TgGpuStartupEntering,STATUS_PENDING);
+#ifdef TG_GPU_PAGING_DIAGNOSTICS
+    InterlockedExchange(&g_PagingFailureRecorded, 0);
+    InterlockedExchange(&g_PagingDirectoryRecorded, 0);
+    record_status(L"PagingDiagnosticsVersion", 1);
+    record_status(L"PagingStopProbeArmed", 0);
+#ifdef TG_GPU_PAGING_STOP_PROBE
+    InterlockedExchange(&g_PagingProbeState, PagingProbeInactive);
+#endif
+#endif
     /* Startup samples only. A closed gate or failed start must not leave an
      * old successful measurement looking like this activation's result.
      */
@@ -49,6 +168,7 @@ static NTSTATUS start_device(PVOID context,DXGK_START_INFO *start,
 #endif
     status=TgGpuStartPlatformAdapter(a);
     record_status(L"HardwareStatus",status);
+    record_status(L"HardwareStage",(NTSTATUS)a->Hardware.Status.stage);
     TgGpuRecordStartup(a,TgGpuStartupHardware,status);
     if(NT_SUCCESS(status)) {
         record_status(L"BootGpuMeasuredKhz",(NTSTATUS)a->Hardware.Clock.measured_khz);
@@ -68,42 +188,33 @@ static NTSTATUS start_device(PVOID context,DXGK_START_INFO *start,
         }
         return status;
     }
+    map_post_display(a);
     *sources=*children=1;
+    a->Panel.ChildReported=TRUE;
 #endif
     if(status==STATUS_SUCCESS)TgNvdecAdapterInitialize(a);
-    if (NT_SUCCESS(status))
+    if (NT_SUCCESS(status)) {
         TgGpuRecordStartup(a,TgGpuStartupComplete,status);
+#ifdef TG_GPU_PAGING_STOP_PROBE
+        if (InterlockedCompareExchange(&g_PagingProbeState, PagingProbeArmed,
+                                       PagingProbeInactive) == PagingProbeInactive)
+            record_status(L"PagingStopProbeArmed", (NTSTATUS)TG_GPU_PAGING_PROBE_BUGCHECK);
+#endif
+    }
     return status;
 }
 
 static NTSTATUS set_power(PVOID context,ULONG uid,DEVICE_POWER_STATE state,POWER_ACTION action)
 {
-    TG_GPU_ADAPTER *a=context;
-    UNREFERENCED_PARAMETER(action);
     PAGED_CODE();
-    if (uid!=DISPLAY_ADAPTER_HW_ID || !a->EngineReady) return STATUS_SUCCESS;
-    if (state==PowerDeviceD0) {
-        return a->State==TgGpuAdapterSuspended ? TgGpuRestartAdapterHardware(a) : STATUS_SUCCESS;
-    }
-    if (a->State!=TgGpuAdapterReady && a->State!=TgGpuAdapterSuspended) return STATUS_SUCCESS;
-    if (a->State==TgGpuAdapterSuspended && a->Hardware.Isolated) return STATUS_SUCCESS;
-    NTSTATUS status=TgNvdecAdapterStop(a);
-    if(status!=STATUS_SUCCESS)return status;
-    status=TgGpuSuspendBackend(&a->Engine,&a->Queue,&a->Hardware,&a->Worker);
-    if (a->Engine.Resetting) {
-        a->State=TgGpuAdapterSuspended;
-        a->QueueReady=a->Queue.Engine==&a->Engine;
-    }
-    return status;
+    return TgGpuSetAdapterPowerState(context,uid,state,action);
 }
 
 static BOOLEAN interrupt(PVOID context,ULONG message)
 {
-    UNREFERENCED_PARAMETER(context);
-    UNREFERENCED_PARAMETER(message);
-    /* The cold backend leaves hardware sources masked. The worker reports
-     * verified completions through DxgkCbSynchronizeExecution and NotifyDpc. */
-    return FALSE;
+    TG_GPU_ADAPTER *a=context;
+    if(!a || message)return FALSE;
+    return TgGpuServiceFaultIsr(&a->Engine.FaultIsr,&a->Engine.Dxgk);
 }
 
 static NTSTATUS query_children(PVOID context,PDXGK_CHILD_DESCRIPTOR children,ULONG bytes)
@@ -197,7 +308,12 @@ static NTSTATUS APIENTRY set_vm_data(HANDLE adapter,const DXGKARG_SETVIRTUALMACH
     return STATUS_NOT_SUPPORTED;
 }
 
-static VOID unload(VOID) {TgGpuSetPlatformDriverObject(NULL);TgGpuTraceShutdown();}
+static VOID unload(VOID)
+{
+    (VOID)TgGpuRetryUnresolvedRailRelease();
+    TgGpuSetPlatformDriverObject(NULL);
+    TgGpuTraceShutdown();
+}
 
 DRIVER_INITIALIZE DriverEntry;
 NTSTATUS DriverEntry(PDRIVER_OBJECT object,PUNICODE_STRING path)
@@ -208,6 +324,9 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT object,PUNICODE_STRING path)
     DRIVER_INITIALIZATION_DATA d={0};
     d.Version=DXGKDDI_INTERFACE_VERSION;
     TgGpuRegisterAdapterDdis(&d);
+#ifdef TG_GPU_PAGING_DIAGNOSTICS
+    d.DxgkDdiBuildPagingBuffer=diagnostic_paging_buffer;
+#endif
     d.DxgkDdiCollectDiagnosticInfo=TgGpuDdiCollectDiagnosticInfo;
     d.DxgkDdiStartDevice=start_device;
     d.DxgkDdiSetPowerState=set_power;
@@ -226,11 +345,18 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT object,PUNICODE_STRING path)
     d.DxgkDdiSetStablePowerState=set_stable_power;
     d.DxgkDdiSetVirtualMachineData=set_vm_data;
 #ifdef TG_GPU_PANEL_WDDM
+    d.DxgkDdiQueryAdapterInfo=TgGpuDdiQueryDisplayAdapterInfo;
     TgGpuRegisterPanelLifecycle(&d);
     TgGpuRegisterDisplaySubmissionDdis(&d);
 #else
     d.DxgkDdiQueryCurrentFence=NULL; /* MCDM uses scheduler fence notifications. */
 #endif
+    g_BaseStopDevice=d.DxgkDdiStopDevice;
+    d.DxgkDdiStopDevice=miniport_stop_device;
+    if(d.DxgkDdiStopDeviceAndReleasePostDisplayOwnership) {
+        g_BaseStopAndRelease=d.DxgkDdiStopDeviceAndReleasePostDisplayOwnership;
+        d.DxgkDdiStopDeviceAndReleasePostDisplayOwnership=miniport_stop_and_release;
+    }
     TgNvdecRegisterEscape(&d); /* preserve the existing panel escape */
     NTSTATUS status=DxgkInitialize(object,path,&d);
     if(!NT_SUCCESS(status)){TgGpuSetPlatformDriverObject(NULL);TgGpuTraceShutdown();}
