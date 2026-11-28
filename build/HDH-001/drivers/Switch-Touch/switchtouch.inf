@@ -9,7 +9,7 @@ ClassGuid   = {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
 Provider    = %Mfg%
 CatalogFile = switchtouch.cat
 ; Supersede the retired 1.0.1.1 display-idle experiment during normal PnP updates.
-DriverVer   = 11/28/2026,1.0.1.51
+DriverVer   = 11/28/2026,1.0.1.52
 PnpLockdown = 1
 
 [DestinationDirs]

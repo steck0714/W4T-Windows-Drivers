@@ -8,7 +8,7 @@ Class       = System
 ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
 Provider    = %Mfg%
 CatalogFile = tegra210i2c.cat
-DriverVer   = 11/28/2026,1.0.0.57
+DriverVer   = 11/28/2026,1.0.0.59
 PnpLockdown = 1
 
 [DestinationDirs]
@@ -51,5 +51,5 @@ KmdfLibraryVersion = 1.15
 [Strings]
 Mfg         = "SwitchWOA"
 DiskName    = "SwitchWOA Tegra210 I2C"
-DeviceDesc  = "NVIDIA Tegra210 I2C Controller"
+DeviceDesc  = "NVIDIA Tegra210 I2C Controller .9 TDR-trial b632905162c6"
 ServiceDesc = "Tegra210 I2C Controller"
