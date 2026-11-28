@@ -1,32 +1,44 @@
 {
   "hardware": "Switch Lite HDH-001, Tegra210B01. Windows 11 ARM64 build 22621, Handheld power policy.",
-  "runtime_source": "e5892b05f81478c4ae4acad2ade01180829b641c",
-  "previous_runtime_source": "c5ae935b59c6229db4be23c561d31088503f40e4",
-  "previous_version": "1.0.0.7",
-  "selected_version": "1.0.0.8",
+  "runtime_source": "728127d9561b7e593375be9847b92049605f4738",
+  "previous_runtime_source": "e5892b05f81478c4ae4acad2ade01180829b641c",
+  "previous_version": "1.0.0.8",
+  "selected_version": "1.0.0.9",
   "package_architecture": "ARM64",
-  "unsigned_sys_sha256": "ad5556824d58b6aeb967b6caac0e643feb316b0be8bff527582007f2dac5a951",
+  "unsigned_sys_sha256": "59b807455048e2831fb8dfc2ff32b12bd95066486f43066b244e262b038140bb",
   "candidate_package_sha256": {
-    "tegra210i2c.inf": "ab830849bbc0a7ab6361c9ff6b8716edba36bb6056497dd8d6178593bf58c54b",
-    "tegra210i2c.cat": "dde9e590fa5d6f80aaa2f11f1348ecd5e50b445d06f1a42fdbcf1ad5b997fa8b",
-    "tegra210i2c.sys": "4329c6f7f1e9975d9f1a841140b5e4929aa135172863e10519951252fa88516a"
+    "tegra210i2c.inf": "c5ded826aac1a584336095059fa72cfbb0cdc9a02a53f22587d0c5a9b5d2281a",
+    "tegra210i2c.cat": "82cb4c1770b8e0cf911169efd0aa6e0a5f56a0feeb4f6a4bee5f5ee3ca50b415",
+    "tegra210i2c.sys": "b632905162c6e25c0ffbfd6fb5f807e10fd612463681bf90ac9f0c5ae95d31f9"
   },
-  "change": "Handle multi-master INT_ARB_LOST on Tegra210B01 PWR_I2C (0x7000d000, shared with CL-DVFS DFLL hardware master) via FIFO reset without issuing 9-SCL BusClear pulses, bounded linear backoff (50..200 us, up to 4 retries), and full RepeatStart sequence replay from Index 0; record I2C_D000_ArbLostRetries.",
+  "change": "Harden Tegra210B01 PWR_I2C (0x7000d000) multi-master INT_ARB_LOST FIFO reset, bounded backoff, and full RepeatStart sequence replay alongside strict MMIO barriers.",
   "deployment_note": "On Windows 11 22621, do not set CONFIGFLAG_REINSTALL (0x20) on ACPI\\SWOA0201 while child SPB drivers are bound; umpnpmgr issues an online Query-remove ~40s after desktop start. Replace System32\\drivers\\tegra210i2c.sys via FILE_SHARE_DELETE rename + WriteThrough copy for next boot.",
   "verified_boot": {
-    "boot_record": 101268,
-    "boot_utc": "2026-11-26T10:56:37.1785201Z",
-    "active_sys_sha256": "4329c6f7f1e9975d9f1a841140b5e4929aa135172863e10519951252fa88516a",
+    "boot_record": 103136,
+    "boot_utc": "2026-11-27T05:51:15.8659336Z",
+    "active_sys_sha256": "b632905162c6e25c0ffbfd6fb5f807e10fd612463681bf90ac9f0c5ae95d31f9",
     "buses": [
-      { "id": "ACPI\\SWOA0201\\1", "status": "OK", "code": 0 },
-      { "id": "ACPI\\SWOA0201\\3", "status": "OK", "code": 0 },
-      { "id": "ACPI\\SWOA0201\\5", "status": "OK", "code": 0 }
+      {
+        "id": "ACPI\\SWOA0201\\1",
+        "status": "OK",
+        "code": 0
+      },
+      {
+        "id": "ACPI\\SWOA0201\\3",
+        "status": "OK",
+        "code": 0
+      },
+      {
+        "id": "ACPI\\SWOA0201\\5",
+        "status": "OK",
+        "code": 0
+      }
     ],
     "trace": {
       "I2C_0000_DriverVersion": 7,
       "I2C_C000_D0EntryDone": 1,
-      "I2C_C000_SelfTest_TMP451_Local": 288,
-      "I2C_C000_SelfTest_TMP451_Remote": 301,
+      "I2C_C000_SelfTest_TMP451_Local": 292,
+      "I2C_C000_SelfTest_TMP451_Remote": 291,
       "I2C_C000_SelfTest_BQ24193_Rev": 303,
       "I2C_C500_D0EntryDone": 1,
       "I2C_D000_D0EntryDone": 1,
@@ -39,6 +51,7 @@
     },
     "concurrent_tdr_and_dvfs": {
       "organic_wddm_tdr_cycles": 2,
+      "hardware_stall_fault_isr_cycles": 1,
       "gpu_dvfs_mode": 1,
       "cpu_dfll_active": true,
       "i2c5_errors": 0,

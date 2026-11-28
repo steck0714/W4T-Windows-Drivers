@@ -53,6 +53,14 @@ Copy-Item "$sd/winarm/generated/winarm-target.h" "$sd/src/"
 
 For WinPE deployment, use the matching R3 BL33, generated startnet.cmd and the signed test package. Verify the final SYS and INF against their catalog using a test certificate valid at the firmware's cold-start clock. The hardware build and test steps are in the [R3 source tree](https://github.com/ruje0504-2/winx/tree/b44da7475fb281d6e4390d976f8f8e0098154d87/docs/hdh001-winarm-r3). One HDH-001 verified the 4 KiB receipt file after shutdown and a second boot. [Hardware report](https://github.com/steck0714/winx/issues/5)
 
+### Switch Lite runtime baseline
+
+On November 27, 2026, the owner selected the bounded WINARM driver **0.5.1.11** for SD boot and normal storage on HDH-001. Windows bound `oem47.inf` to the SD controller and reported Code 0 on boot records 105469 and 105542. The installed SYS had the same SHA-256 on both boots. The signed 0.5.1.10 package remains available to the owner for rollback. [Board results and package hashes](tests/physical-board-20261127.json)
+
+**Crash-dump capture remains open.** On the first boot, with GPU Code 43, the dump miniport reported `Status=0`, `Refs=1` and `Ready=1`. The owner manually restarted the Lite after one controlled `0xE2`. Windows had no Minidump on the next boot. The last stage reached by the dump stack on hardware is unknown.
+
+In dump mode, 0.5.1.11 reports an SDHC timeout after two seconds without command completion or ten seconds without data progress. After three unconfirmed writes it fails the recovery reset so that the port propagates the failure. In 11 host replay cases, a transient lost completion recovered on retry and persistent loss returned `STATUS_IO_TIMEOUT`. The public callback tests run from the repository root with `python3 drivers/Tegra210Sdhc/tests/test-crashdump.py`.
+
 ### T214 SDR104 candidate
 
 The `NV_T214_SDR104=1` bounded WINARM profile adds B01 SDMMC1 signaling

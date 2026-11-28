@@ -64,11 +64,118 @@ static NTSTATUS T214PmicMessage(PSDHC_EXTENSION s, BOOLEAN Read, ULONG *Word, UL
     if (Read) *Word = T214Read(b, 12);
     return STATUS_SUCCESS;
 }
+static NTSTATUS T214ResetI2c5ForDump(PUCHAR Car, PUCHAR I2c, BOOLEAN NeedBusClear)
+{
+    const ULONG i2c5 = 1u << 15;
+    ULONG divisor = 0x00050001u;
+    if (Car != NULL) {
+        if ((T214Read(Car, 0x14) & i2c5) && !(T214Read(Car, 0x08) & i2c5)) {
+            ULONG current = T214Read(I2c, 0x6c);
+            if (current != 0) divisor = current;
+        }
+        T214Write(Car, 0x328, i2c5);
+        KeStallExecutionProcessor(5);
+        if (!(T214Read(Car, 0x14) & i2c5)) return STATUS_DEVICE_POWER_FAILURE;
+        T214Write(Car, 0x308, i2c5);
+        KeStallExecutionProcessor(5);
+        if (!(T214Read(Car, 0x08) & i2c5)) return STATUS_DEVICE_POWER_FAILURE;
+        T214Write(Car, 0x30c, i2c5);
+        KeStallExecutionProcessor(5);
+        if (T214Read(Car, 0x08) & i2c5) return STATUS_DEVICE_POWER_FAILURE;
+    } else {
+        ULONG current = T214Read(I2c, 0x6c);
+        if (current != 0) divisor = current;
+    }
+    T214Write(I2c, 0x64, 0);
+    T214Write(I2c, 0x68, 0xffffffffu);
+    T214Write(I2c, 0x6c, divisor);
+    T214Write(I2c, 0x00, 0x2800u);
+    T214Write(I2c, 0x8c, 0x25u);
+    if (!T214WaitClear(I2c, 0x8c, 1u, 10000)) return STATUS_IO_TIMEOUT;
+    T214Write(I2c, 0x5c, T214Read(I2c, 0x5c) | 3u);
+    if (!T214WaitClear(I2c, 0x5c, 3u, 10000)) return STATUS_IO_TIMEOUT;
+    if (NeedBusClear || (T214Read(I2c, 0x1c) & 0x100u)) {
+        /* Tegra210 shadows I2C_BUS_CLEAR_CNFG (0x84) until I2C_CONFIG_LOAD (0x8c)
+         * commits I2C_BC_ENABLE. Run BusClear only when the bus is actually stuck
+         * or a PMIC message failed, never on an idle PWR_I2C bus shared with the
+         * autonomous CL-DVFS DFLL CPU-rail master. */
+        T214Write(I2c, 0x68, 0xffffffffu);
+        T214Write(I2c, 0x84, (9u << 16) | (1u << 2) | 1u);
+        T214Write(I2c, 0x8c, 0x25u);
+        if (!T214WaitClear(I2c, 0x8c, 1u, 10000)) return STATUS_IO_TIMEOUT;
+        BOOLEAN cleared = FALSE;
+        for (ULONG i = 0; i < 10000; i += 5) {
+            if (T214Read(I2c, 0x68) & 0x800u) { cleared = TRUE; break; }
+            KeStallExecutionProcessor(5);
+        }
+        T214Write(I2c, 0x68, 0xffffffffu);
+        if (!cleared) return STATUS_IO_TIMEOUT;
+        if (!(T214Read(I2c, 0x88) & 1u)) return STATUS_IO_DEVICE_ERROR;
+        T214Write(I2c, 0x00, 0x2800u);
+        T214Write(I2c, 0x8c, 0x25u);
+        if (!T214WaitClear(I2c, 0x8c, 1u, 10000)) return STATUS_IO_TIMEOUT;
+    }
+    if (!T214WaitClear(I2c, 0x1c, 0x100u, 20000)) return STATUS_IO_TIMEOUT;
+    return STATUS_SUCCESS;
+}
 static NTSTATUS T214Ldo2(PSDHC_EXTENSION s, ULONG Millivolts, BOOLEAN On)
 {
     /* The dump stack owns the controller after normal I/O has stopped.
-     * A gate held by a stopped CPU cannot be waited on during a bugcheck. */
-    NTSTATUS st = s->CrashdumpMode ? STATUS_SUCCESS : TegraI2c5Acquire(s->T214Gate);
+     * A gate held by a stopped CPU cannot be waited on during a bugcheck.
+     * Runtime Tegra210I2c normally leaves I2C5 in packet mode (0x400): switch
+     * cleanly to normal mode without CAR-resetting or injecting BusClear clocks
+     * onto PWR_I2C unless CAR gated I2C5 or the bus is genuinely stuck. */
+    if (s->CrashdumpMode) {
+        NTSTATUS st;
+        const ULONG i2c5 = 1u << 15;
+        BOOLEAN carUnavailable = s->T214Car != NULL &&
+            (!(T214Read(s->T214Car, 0x14) & i2c5) || (T214Read(s->T214Car, 0x08) & i2c5));
+        BOOLEAN stuckBusy = !carUnavailable && !T214WaitClear(s->T214I2c, 0x1c, 0x100u, 20000);
+        if (carUnavailable || stuckBusy) {
+            st = T214ResetI2c5ForDump(s->T214Car, s->T214I2c, stuckBusy);
+            if (!NT_SUCCESS(st)) return st;
+        } else {
+            T214Write(s->T214I2c, 0x64, 0);
+            T214Write(s->T214I2c, 0x68, 0xffffffffu);
+            T214Write(s->T214I2c, 0x5c, T214Read(s->T214I2c, 0x5c) | 3u);
+            if (!T214WaitClear(s->T214I2c, 0x5c, 3u, 10000)) return STATUS_IO_TIMEOUT;
+            if (T214Read(s->T214I2c, 0x00) & 0x400u) {
+                T214Write(s->T214I2c, 0x00, 0x2800u);
+                T214Write(s->T214I2c, 0x8c, 0x25u);
+                if (!T214WaitClear(s->T214I2c, 0x8c, 1u, 10000)) return STATUS_IO_TIMEOUT;
+            }
+        }
+        for (ULONG attempt = 0; attempt < 2; ++attempt) {
+            ULONG value = 0x27, check = 0x27;
+            if (!T214WaitClear(s->T214I2c, 0x1c, 0x100u, 20000)) {
+                st = STATUS_IO_TIMEOUT;
+            } else {
+                st = T214PmicMessage(s, FALSE, &value, 1);
+                if (NT_SUCCESS(st)) st = T214PmicMessage(s, TRUE, &value, 1);
+                if (NT_SUCCESS(st)) {
+                    value = On ? ((value & 0xc0u) | ((Millivolts - 800u) / 50u) | 0xc0u) : (value & 0x3fu);
+                    ULONG packet = 0x27u | ((value & 0xffu) << 8);
+                    st = T214PmicMessage(s, FALSE, &packet, 2);
+                    if (NT_SUCCESS(st)) st = T214PmicMessage(s, FALSE, &check, 1);
+                    if (NT_SUCCESS(st)) st = T214PmicMessage(s, TRUE, &check, 1);
+                    if (NT_SUCCESS(st) && (check & 0xffu) != (value & 0xffu))
+                        st = STATUS_DEVICE_POWER_FAILURE;
+                }
+            }
+            if (NT_SUCCESS(st) || attempt == 1) break;
+            KeStallExecutionProcessor(50);
+            NTSTATUS rst = T214ResetI2c5ForDump(s->T214Car, s->T214I2c, TRUE);
+            if (!NT_SUCCESS(rst)) { st = rst; break; }
+        }
+        if (NT_SUCCESS(st)) {
+            T214Write(s->T214I2c, 0x00, 0x2800u);
+            T214Write(s->T214I2c, 0x8c, 0x25u);
+            if (!T214WaitClear(s->T214I2c, 0x8c, 1u, 10000)) st = STATUS_IO_TIMEOUT;
+        }
+        T214Write(s->T214I2c, 0x64, 0);
+        return st;
+    }
+    NTSTATUS st = TegraI2c5Acquire(s->T214Gate);
     ULONG cfg, mask, value = 0x27, check = 0x27;
     if (!NT_SUCCESS(st)) return st;
     cfg = T214Read(s->T214I2c, 0); mask = T214Read(s->T214I2c, 0x64);
@@ -89,16 +196,67 @@ done:
     T214Write(s->T214I2c, 0x8c, 0x25);
     if (!T214WaitClear(s->T214I2c, 0x8c, 1, 10000)) st = STATUS_IO_TIMEOUT;
     T214Write(s->T214I2c, 0x64, mask);
-    if (!s->CrashdumpMode) TegraI2c5Release(s->T214Gate);
+    TegraI2c5Release(s->T214Gate);
     return st;
 }
 
-static VOID T214CardPower(PSDHC_EXTENSION s, BOOLEAN On)
+#define T214_PE_CNF          0x100u
+#define T214_PE_OE           0x110u
+#define T214_PE_OUT          0x120u
+#define T214_GPIO_MASKED     0x80u
+#define T214_CARD_VDD_PIN    (1u << 4)
+
+static BOOLEAN T214CardPower(PSDHC_EXTENSION s, BOOLEAN On)
 {
     /* GPIO E4 OUT masked alias: one pin only; GPIO ownership is unchanged. */
-    T214Write(s->T214Gpio, 0x1a0, (1u << 12) | (On ? (1u << 4) : 0));
-    (VOID)T214Read(s->T214Gpio, 0x120);
+    ULONG value = On ? T214_CARD_VDD_PIN : 0;
+    T214Write(s->T214Gpio, T214_PE_OUT + T214_GPIO_MASKED, (T214_CARD_VDD_PIN << 8) | value);
+    return (T214Read(s->T214Gpio, T214_PE_OUT) & T214_CARD_VDD_PIN) == value;
 }
+/* Hekate's T210B01 SDMMC1 power-off workaround. Only the six SDMMC1
+ * pins (PM0..5) are temporarily driven. Masked GPIO writes leave PM6..7
+ * untouched. The pinmux page is part of the already mapped APB_MISC range. */
+#define T214_SDMMC1_CLK_PAD  0x3000u
+#define T214_CLK_PULL_MASK   (3u << 2)
+#define T214_CLK_PULL_DOWN   (1u << 2)
+#define T214_SD_PINS         0x3fu
+#define T214_PM_CNF          0x300u
+#define T214_PM_OE           0x310u
+#define T214_PM_OUT          0x320u
+#define T214_CARD_OFF_US     239000u
+
+typedef struct {
+    ULONG ClockPull, Function, OutputEnable, Level;
+} T214_DUMP_PADS;
+
+static T214_DUMP_PADS T214ReadDumpPads(PSDHC_EXTENSION s)
+{
+    T214_DUMP_PADS pads;
+    pads.ClockPull = T214Read(s->T214Misc, T214_SDMMC1_CLK_PAD) & T214_CLK_PULL_MASK;
+    pads.Function = T214Read(s->T214Gpio, T214_PM_CNF) & T214_SD_PINS;
+    pads.OutputEnable = T214Read(s->T214Gpio, T214_PM_OE) & T214_SD_PINS;
+    pads.Level = T214Read(s->T214Gpio, T214_PM_OUT) & T214_SD_PINS;
+    return pads;
+}
+
+static BOOLEAN T214SetDumpPads(PSDHC_EXTENSION s, T214_DUMP_PADS pads, BOOLEAN discharge)
+{
+    ULONG clock = T214Read(s->T214Misc, T214_SDMMC1_CLK_PAD);
+    const ULONG mask = T214_SD_PINS << 8;
+    T214Write(s->T214Misc, T214_SDMMC1_CLK_PAD, (clock & ~T214_CLK_PULL_MASK) | pads.ClockPull);
+    /* Preload the output before taking GPIO ownership. On restore, return
+     * ownership first while SDCLK is stopped, then restore its idle latches. */
+    if (!discharge)
+        T214Write(s->T214Gpio, T214_PM_CNF + T214_GPIO_MASKED, mask | pads.Function);
+    T214Write(s->T214Gpio, T214_PM_OUT + T214_GPIO_MASKED, mask | pads.Level);
+    T214Write(s->T214Gpio, T214_PM_OE + T214_GPIO_MASKED, mask | pads.OutputEnable);
+    if (discharge)
+        T214Write(s->T214Gpio, T214_PM_CNF + T214_GPIO_MASKED, mask | pads.Function);
+    T214_DUMP_PADS actual = T214ReadDumpPads(s);
+    return actual.ClockPull == pads.ClockPull && actual.Function == pads.Function &&
+           actual.OutputEnable == pads.OutputEnable && actual.Level == pads.Level;
+}
+
 static NTSTATUS T214PadCalibrate(PSDHC_EXTENSION s)
 {
     PUCHAR b = s->BaseAddress;
@@ -135,7 +293,10 @@ static VOID T214VendorReset(PSDHC_EXTENSION s)
 }
 static NTSTATUS T214Power(PSDHC_EXTENSION s, BOOLEAN On)
 {
+    T214_DUMP_PADS savedPads;
+    BOOLEAN restorePads = FALSE, cardControlValid = TRUE;
     LiteForgetCard(s);
+    s->T214DumpFreshPower = FALSE;
     USHORT clock = SdhcReadRegisterUshort(s, SDHC_CLOCK_CONTROL);
     SdhcWriteRegisterUshort(s, SDHC_CLOCK_CONTROL, clock & ~SDHC_CC_CLOCK_ENABLE);
 #if NV_T214_DDR200
@@ -151,26 +312,95 @@ static NTSTATUS T214Power(PSDHC_EXTENSION s, BOOLEAN On)
     }
 #endif
     SdhcWriteRegisterUchar(s, SDHC_POWER_CONTROL, 0);
-    NTSTATUS st = T214Ldo2(s, 3300, FALSE);
-    if (!NT_SUCCESS(st)) return st;
+    NTSTATUS st = STATUS_DEVICE_POWER_FAILURE;
+    if (s->CrashdumpMode) {
+        const T214_DUMP_PADS discharge = {0, T214_SD_PINS, T214_SD_PINS, T214_SD_PINS};
+        /* E4 must already be a GPIO output for its latch to switch card VDD. */
+        cardControlValid = (T214Read(s->T214Gpio, T214_PE_CNF) & T214_CARD_VDD_PIN) &&
+                           (T214Read(s->T214Gpio, T214_PE_OE) & T214_CARD_VDD_PIN);
+        if (!cardControlValid) goto power_failed;
+        savedPads = T214ReadDumpPads(s);
+        restorePads = TRUE;
+        if (!T214SetDumpPads(s, discharge, TRUE)) goto power_failed;
+    }
+    st = T214Ldo2(s, 3300, FALSE);
+    if (!NT_SUCCESS(st)) goto power_failed;
     SdPortWait(4000);
-    T214CardPower(s, FALSE);
+    if (!T214CardPower(s, FALSE) && s->CrashdumpMode) {
+        st = STATUS_DEVICE_POWER_FAILURE;
+        goto power_failed;
+    }
     SdPortWait(10000);
     T214Write(s->T214Pmc, 0x444, T214Read(s->T214Pmc, 0x444) | T214_IO_BIT);
     T214Write(s->T214Pmc, 0x4e4, T214Read(s->T214Pmc, 0x4e4) | T214_IO_BIT);
     s->T214CardOn = FALSE;
     s->T214Voltage18 = FALSE; s->T214Tuned = FALSE;
+    if (s->CrashdumpMode && (!(T214Read(s->T214Pmc, 0x444) & T214_IO_BIT) ||
+                             !(T214Read(s->T214Pmc, 0x4e4) & T214_IO_BIT))) {
+        st = STATUS_DEVICE_POWER_FAILURE;
+        goto power_failed;
+    }
+    if (restorePads) {
+        if (On) {
+            /* Hekate parks all six pins in peripheral mode, with disabled
+             * GPIO outputs and a CLK pull-down, while card VDD discharges. */
+            const T214_DUMP_PADS isolated = {T214_CLK_PULL_DOWN, 0, 0, 0};
+            if (!T214SetDumpPads(s, isolated, FALSE)) {
+                st = STATUS_DEVICE_POWER_FAILURE;
+                goto power_failed;
+            }
+            /* E4 has been low for 10 ms. Hold this state for the rest. */
+            for (ULONG offUs = 10000; offUs < T214_CARD_OFF_US; offUs += 50)
+                KeStallExecutionProcessor(50);
+        }
+        if (!T214SetDumpPads(s, savedPads, FALSE)) {
+            st = STATUS_DEVICE_POWER_FAILURE;
+            goto power_failed;
+        }
+        restorePads = FALSE;
+    }
     if (!On) return STATUS_SUCCESS;
     T214Write(s->T214Pmc, 0x444, T214Read(s->T214Pmc, 0x444) & ~T214_IO_BIT);
-    T214CardPower(s, TRUE); SdPortWait(10000);
+    if (s->CrashdumpMode && (T214Read(s->T214Pmc, 0x444) & T214_IO_BIT)) {
+        st = STATUS_DEVICE_POWER_FAILURE;
+        goto power_failed;
+    }
+    if (!T214CardPower(s, TRUE) && s->CrashdumpMode) {
+        st = STATUS_DEVICE_POWER_FAILURE;
+        goto power_failed;
+    }
+    SdPortWait(10000);
     st = T214Ldo2(s, 3300, TRUE);
-    if (!NT_SUCCESS(st)) return st;
+    if (!NT_SUCCESS(st)) goto power_failed;
     SdPortWait(1000);
     s->T214CardOn = TRUE;
     T214VendorReset(s);
     SdhcWriteRegisterUchar(s, SDHC_POWER_CONTROL, SDHC_PC_3_3V | SDHC_PC_BUS_POWER);
+    if (s->CrashdumpMode &&
+        ((SdhcReadRegisterUchar(s, SDHC_POWER_CONTROL) & (SDHC_PC_VOLTAGE_MASK | SDHC_PC_BUS_POWER)) !=
+         (SDHC_PC_3_3V | SDHC_PC_BUS_POWER) ||
+         (SdhcReadRegisterUshort(s, SDHC_HOST_CONTROL2) & SDHC_HC2_1_8V_SIGNALING))) {
+        st = STATUS_DEVICE_POWER_FAILURE;
+        goto power_failed;
+    }
+    SdhcWriteRegisterUshort(s, SDHC_ERROR_STATUS, 0xFFFF);
+    SdhcWriteRegisterUshort(s, SDHC_INTERRUPT_STATUS, 0xFFFF);
     SdhcWriteRegisterUshort(s, SDHC_CLOCK_CONTROL, clock);
     return STATUS_SUCCESS;
+
+power_failed:
+    if (s->CrashdumpMode) {
+        /* The rail or pad state is uncertain. Keep SDCLK off, remove card
+         * VDD and isolate the host pads before returning the original error. */
+        SdhcWriteRegisterUchar(s, SDHC_POWER_CONTROL, 0);
+        if (cardControlValid) T214CardPower(s, FALSE);
+        T214Write(s->T214Pmc, 0x444, T214Read(s->T214Pmc, 0x444) | T214_IO_BIT);
+        (VOID)T214Read(s->T214Pmc, 0x444);
+        if (restorePads) (VOID)T214SetDumpPads(s, savedPads, FALSE);
+        s->T214CardOn = FALSE;
+        s->T214Tuned = FALSE;
+    }
+    return st;
 }
 /* A reset-all clears SDHCI POWER_CONTROL without switching GPIO E4/LDO2.
  * Physical card power and the host's output-power bit are different states.
@@ -178,14 +408,24 @@ static NTSTATUS T214Power(PSDHC_EXTENSION s, BOOLEAN On)
 static NTSTATUS T214SetBusVoltage(PSDHC_EXTENSION s, SDPORT_BUS_VOLTAGE Voltage)
 {
     /* Dump initialization only maps resources. The live driver can change
-     * card voltage afterwards, so its cached power state cannot be reused. */
-    if (!s->CrashdumpMode && Voltage == SdBusVoltage33 && s->T214CardOn && !s->T214Voltage18) {
+     * card voltage afterwards, so its cached power state cannot be reused;
+     * however, Dump_Open calls SdResetHost(SdResetTypeAll) -> T214Power(TRUE)
+     * right before SdSetVoltage(SdBusVoltage33). Reuse that fresh reset-all
+     * cold power-cycle once instead of cycling VDD and PMC pads twice. */
+    if (Voltage == SdBusVoltage33 && s->T214CardOn && !s->T214Voltage18 &&
+        (!s->CrashdumpMode ||
+         (s->T214DumpFreshPower && s->T214Pmc != NULL &&
+          !(T214Read(s->T214Pmc, 0x444) & T214_IO_BIT)))) {
+        s->T214DumpFreshPower = FALSE;
         SdhcWriteRegisterUchar(s, SDHC_POWER_CONTROL, SDHC_PC_3_3V | SDHC_PC_BUS_POWER);
         SdPortWait(1000);
-        return (SdhcReadRegisterUchar(s, SDHC_POWER_CONTROL) &
-                (SDHC_PC_VOLTAGE_MASK | SDHC_PC_BUS_POWER)) ==
-                (SDHC_PC_3_3V | SDHC_PC_BUS_POWER) ? STATUS_SUCCESS : STATUS_DEVICE_POWER_FAILURE;
+        return ((SdhcReadRegisterUchar(s, SDHC_POWER_CONTROL) &
+                 (SDHC_PC_VOLTAGE_MASK | SDHC_PC_BUS_POWER)) ==
+                (SDHC_PC_3_3V | SDHC_PC_BUS_POWER) &&
+                !(SdhcReadRegisterUshort(s, SDHC_HOST_CONTROL2) & SDHC_HC2_1_8V_SIGNALING)) ?
+                STATUS_SUCCESS : STATUS_DEVICE_POWER_FAILURE;
     }
+    s->T214DumpFreshPower = FALSE;
     return T214Power(s, Voltage == SdBusVoltage33);
 }
 static NTSTATUS T214Signaling(PSDHC_EXTENSION s, BOOLEAN Enable)
@@ -366,6 +606,11 @@ static VOID T214Release(PSDHC_EXTENSION s)
 {
     if (s->T214Bounce) { MmFreeContiguousMemory(s->T214Bounce); s->T214Bounce = NULL; }
     if (s->T214GateHandle) { ZwClose(s->T214GateHandle); s->T214GateHandle = NULL; s->T214Gate = NULL; }
+    if (s->T214BorrowedDumpMaps) {
+        s->T214Car = s->T214Misc = s->T214Pmc = s->T214I2c = s->T214Gpio = NULL;
+        s->T214BorrowedDumpMaps = FALSE;
+        return;
+    }
     if (s->T214Car) { MmUnmapIoSpace(s->T214Car, 0x1000); s->T214Car = NULL; }
     if (s->T214Misc) { MmUnmapIoSpace(s->T214Misc, 0x4000); s->T214Misc = NULL; }
     if (s->T214Pmc) { MmUnmapIoSpace(s->T214Pmc, 0x1000); s->T214Pmc = NULL; }

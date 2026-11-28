@@ -349,26 +349,19 @@ int main(void) {
     assert(req.completed && req.status == STATUS_NO_SUCH_DEVICE);
     assert(bus.bus_clears == 0 && dev.Nacks == 2 && dev.Errors == 2 && dev.ArbLostRetries == 0);
 
-    /* 5. Stuck FIFO flush during INT_ARB_LOST escalates to RecoverBusTimeout. */
+    /* 5. Stuck FIFO flush on I2C5 escalates to STATUS_IO_TIMEOUT with 0 BusClear clocks. */
     memset(&dev, 0, sizeof(dev));
     dev.PhysLow = I2C5_PHYS_BASE;
-    reset_bus();
-    bus.arb_lost_mask = 1u;
-    memset(&req, 0, sizeof(req));
-    req.count = 1;
-    req.xfers[0] = (struct MockTransfer){SpbTransferDirectionToDevice, {NULL, write_cmd, 2}, 0};
-    /* Let initial TegraI2cResetFifos pass, then stick FIFO flush on error recovery: */
-    bus.fifo_flush_stuck = FALSE;
-    TegraI2cRunRequest(&dev, &tgt, &req, 1);
     reset_bus();
     bus.fifo_flush_stuck = TRUE;
     memset(&req, 0, sizeof(req));
     req.count = 1;
     req.xfers[0] = (struct MockTransfer){SpbTransferDirectionToDevice, {NULL, write_cmd, 2}, 0};
     TegraI2cRunRequest(&dev, &tgt, &req, 1);
-    assert(req.completed && req.status == STATUS_IO_TIMEOUT && bus.bus_clears == 1 && dev.Timeouts == 1);
+    assert(req.completed && req.status == STATUS_IO_TIMEOUT && bus.bus_clears == 0 && dev.Timeouts == 1);
 
-    /* 6. Genuine bus hang timeout on I2C5 still triggers BusClear recovery and STATUS_IO_TIMEOUT. */
+    /* 6. Genuine bus hang timeout on I2C5 skips BusClear (DFLL shares PWR_I2C),
+     *    while single-master I2C1 still executes BusClear on timeout. */
     memset(&dev, 0, sizeof(dev));
     dev.PhysLow = I2C5_PHYS_BASE;
     reset_bus();
@@ -378,9 +371,99 @@ int main(void) {
     req.count = 1;
     req.xfers[0] = (struct MockTransfer){SpbTransferDirectionFromDevice, {NULL, &val, 1}, 0};
     TegraI2cRunRequest(&dev, &tgt, &req, 1);
+    assert(req.completed && req.status == STATUS_IO_TIMEOUT && bus.bus_clears == 0 && dev.Timeouts == 1);
+
+    memset(&dev, 0, sizeof(dev));
+    dev.PhysLow = 0x7000C000u;
+    reset_bus();
+    bus.timeout_packet = TRUE;
+    val = 0;
+    memset(&req, 0, sizeof(req));
+    req.count = 1;
+    req.xfers[0] = (struct MockTransfer){SpbTransferDirectionFromDevice, {NULL, &val, 1}, 0};
+    TegraI2cRunRequest(&dev, &tgt, &req, 1);
     assert(req.completed && req.status == STATUS_IO_TIMEOUT && bus.bus_clears == 1 && dev.Timeouts == 1);
 
-    /* 6. D0Entry TegraI2cSelfTest on I2C5 replays full register read across DFLL INT_ARB_LOST. */
+    /* 7. Multi-write sequence on I2C5: once packet 0 has committed a write,
+     *    arbitration loss on packet 1 must NOT replay packet 0 (no duplicate side effects). */
+    memset(&dev, 0, sizeof(dev));
+    dev.PhysLow = I2C5_PHYS_BASE;
+    reset_bus();
+    bus.arb_lost_mask = (1u << 1); /* Packet 0 commits, packet 1 loses arbitration */
+    UCHAR write_cmd2[2] = {0x06, 0x55};
+    memset(&req, 0, sizeof(req));
+    req.count = 2;
+    req.xfers[0] = (struct MockTransfer){SpbTransferDirectionToDevice, {NULL, write_cmd, 2}, 0};
+    req.xfers[1] = (struct MockTransfer){SpbTransferDirectionToDevice, {NULL, write_cmd2, 2}, 0};
+    TegraI2cRunRequest(&dev, &tgt, &req, 2);
+    assert(req.completed && req.status == STATUS_IO_DEVICE_ERROR && req.info == 2);
+    assert(bus.packet_index == 2 && bus.bus_clears == 0 && dev.ArbLostRetries == 0 && dev.Errors == 1);
+
+    /* 8. M6 regression: 5-byte single-packet write on I2C5 must NOT auto-replay
+     *    on INT_ARB_LOST (data-phase arbitration loss could duplicate a committed prefix). */
+    memset(&dev, 0, sizeof(dev));
+    dev.PhysLow = I2C5_PHYS_BASE;
+    reset_bus();
+    bus.arb_lost_mask = 1u;
+    UCHAR five_bytes[5] = {0x23, 0x11, 0x22, 0x33, 0x44};
+    memset(&req, 0, sizeof(req));
+    req.count = 1;
+    req.xfers[0] = (struct MockTransfer){SpbTransferDirectionToDevice, {NULL, five_bytes, 5}, 0};
+    TegraI2cRunRequest(&dev, &tgt, &req, 1);
+    assert(req.completed && req.status == STATUS_IO_DEVICE_ERROR && req.info == 0);
+    assert(bus.packet_index == 1 && bus.bus_clears == 0 && dev.ArbLostRetries == 0 && dev.Errors == 1);
+
+    /* 9. Read-to-clear IRQ registers on MAX77620 (0x3C:0x05) AND MAX77812
+     *    (0x33:0x20 BUCK_INT R/C) AND unlisted registers must NOT auto-replay (A02/T8). */
+    memset(&dev, 0, sizeof(dev));
+    dev.PhysLow = I2C5_PHYS_BASE;
+    reset_bus();
+    bus.arb_lost_mask = (1u << 1);
+    TEGRA_I2C_TARGET pmic3c = {.Address = 0x3C, .Speed = 400000};
+    UCHAR irq_reg = 0x05u;
+    memset(&req, 0, sizeof(req));
+    req.count = 2;
+    req.xfers[0] = (struct MockTransfer){SpbTransferDirectionToDevice, {NULL, &irq_reg, 1}, 0};
+    req.xfers[1] = (struct MockTransfer){SpbTransferDirectionFromDevice, {NULL, &val, 1}, 0};
+    TegraI2cRunRequest(&dev, &pmic3c, &req, 2);
+    assert(req.completed && req.status == STATUS_IO_DEVICE_ERROR && req.info == 1);
+    assert(bus.packet_index == 2 && bus.bus_clears == 0 && dev.ArbLostRetries == 0);
+
+    /* T8: MAX77812 0x33:0x20 BUCK_INT (R/C) must NOT auto-replay on INT_ARB_LOST! */
+    memset(&dev, 0, sizeof(dev));
+    dev.PhysLow = I2C5_PHYS_BASE;
+    reset_bus();
+    bus.arb_lost_mask = (1u << 1);
+    UCHAR buck_int = 0x20u;
+    memset(&req, 0, sizeof(req));
+    req.count = 2;
+    req.xfers[0] = (struct MockTransfer){SpbTransferDirectionToDevice, {NULL, &buck_int, 1}, 0};
+    req.xfers[1] = (struct MockTransfer){SpbTransferDirectionFromDevice, {NULL, &val, 1}, 0};
+    TegraI2cRunRequest(&dev, &tgt, &req, 2);
+    assert(req.completed && req.status == STATUS_IO_DEVICE_ERROR && req.info == 1);
+    assert(bus.packet_index == 2 && bus.bus_clears == 0 && dev.ArbLostRetries == 0);
+
+    /* Unknown / unlisted registers (0x33:0x55, 0x3C:0x77, 0x1B:0x05) must NOT auto-replay! */
+    {
+        const USHORT bad_addrs[3] = {0x33u, 0x3Cu, 0x1Bu};
+        const UCHAR bad_regs[3] = {0x55u, 0x77u, 0x05u};
+        for (int k = 0; k < 3; ++k) {
+            memset(&dev, 0, sizeof(dev));
+            dev.PhysLow = I2C5_PHYS_BASE;
+            reset_bus();
+            bus.arb_lost_mask = (1u << 1);
+            TEGRA_I2C_TARGET t = {.Address = bad_addrs[k], .Speed = 400000};
+            UCHAR r = bad_regs[k];
+            memset(&req, 0, sizeof(req));
+            req.count = 2;
+            req.xfers[0] = (struct MockTransfer){SpbTransferDirectionToDevice, {NULL, &r, 1}, 0};
+            req.xfers[1] = (struct MockTransfer){SpbTransferDirectionFromDevice, {NULL, &val, 1}, 0};
+            TegraI2cRunRequest(&dev, &t, &req, 2);
+            assert(req.completed && req.status == STATUS_IO_DEVICE_ERROR && dev.ArbLostRetries == 0);
+        }
+    }
+
+    /* 10. D0Entry TegraI2cSelfTest on I2C5 replays full register read across DFLL INT_ARB_LOST. */
     memset(&dev, 0, sizeof(dev));
     dev.PhysLow = I2C5_PHYS_BASE;
     reset_bus();
@@ -398,6 +481,7 @@ extracted = '\n\n'.join([
     definition('static VOID TegraI2cBusClear('),
     definition('static NTSTATUS TegraI2cTransfer('),
     definition('static NTSTATUS TegraI2cMdlCopy('),
+    definition('static BOOLEAN TegraI2cIsSafeI2c5Retry('),
     definition('static VOID TegraI2cRunRequest('),
     definition('static VOID TegraI2cSelfTest('),
 ])

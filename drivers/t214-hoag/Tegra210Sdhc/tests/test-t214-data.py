@@ -53,7 +53,9 @@ typedef uint16_t USHORT; typedef uint8_t UCHAR, BOOLEAN, *PUCHAR;
 #define SDHC_CC_INTERNAL_CLOCK_ENABLE 1
 #define SDHC_CC_CLOCK_STABLE 2
 #define SDHC_CC_CLOCK_ENABLE 4
+#define SDHC_HC2_1_8V_SIGNALING 0x08
 #define SDHC_HC2_EXECUTE_TUNING 0x40
+#define T214_IO_BIT (1u << 12)
 #define STATUS_DEVICE_BUSY -2
 #define STATUS_IO_TIMEOUT -3
 #define NT_SUCCESS(s) ((s)>=0)
@@ -78,9 +80,9 @@ enum { SdBusVoltage33=1, SdBusVoltage30=2, SdBusVoltage18=3, SdBusVoltageOff=4 }
 #define KeMemoryBarrier() ((void)0)
 #define MAX(a,b) ((a)>(b)?(a):(b))
 #define min(a,b) ((a)<(b)?(a):(b))
-enum { SdTransferTypeNone, SdTransferTypeSingleBlock, SdTransferTypeMultiBlock, SdTransferTypeMultiBlockNoStop };
+enum { SdTransferTypeUndefined, SdTransferTypeNone, SdTransferTypeSingleBlock, SdTransferTypeMultiBlock, SdTransferTypeMultiBlockNoStop };
 enum { SdCommandClassStandard, SdCommandClassApp };
-enum { SdTransferDirectionRead, SdTransferDirectionWrite };
+enum { SdTransferDirectionUndefined, SdTransferDirectionRead, SdTransferDirectionWrite };
 enum { SdTransferMethodPio, SdTransferMethodSgDma };
 enum { SdRequestTypeCommandNoTransfer, SdRequestTypeCommandWithTransfer, SdRequestTypeStartTransfer };
 enum { SdResponseTypeR1 };
@@ -91,7 +93,7 @@ typedef struct { ULONG Index,Class,ResponseType,TransferDirection,TransferMethod
 typedef struct { ULONG Type; SDPORT_COMMAND Command; } SDPORT_REQUEST,*PSDPORT_REQUEST;
 typedef struct { LONG TargetFacts; ULONG NextReadLba,IssuedWriteLba; USHORT IssuedWriteCount;
  UCHAR IssuedWriteIndex; BOOLEAN AppPrefixAccepted,CrashdumpMode;
- BOOLEAN T214CardOn,T214Voltage18,T214DmaActive,T214DmaComplete,T214DmaFault;
+ BOOLEAN T214CardOn,T214Voltage18,T214DmaActive,T214DmaComplete,T214DmaFault,T214DumpFreshPower;
  PUCHAR T214Bounce,T214DmaBuffer; struct { ULONG LowPart; } T214BouncePa;
  ULONG T214DmaLength,T214DmaBlocks,T214DmaCapacity,T214DmaRequests,T214DmaMaxBlocks,T214PioFallbacks; struct { ULONG BaseClockFrequencyKhz; } Capabilities;
  ULONG T214SavedVendor[5],T214SavedEnables,T214SavedSignals;
@@ -99,8 +101,8 @@ typedef struct { LONG TargetFacts; ULONG NextReadLba,IssuedWriteLba; USHORT Issu
  USHORT T214SavedClock,T214SavedControl2;
  UCHAR T214SavedHost,T214SavedPower,T214SavedTimeout;
  BOOLEAN T214ContextValid;ULONG T214Saves,T214Restores,T214ResumeStatus;
- PUCHAR BaseAddress,T214Car;UCHAR regs[512]; } SDHC_EXTENSION,*PSDHC_EXTENSION;
-static UCHAR car_regs[4096];
+ PUCHAR BaseAddress,T214Car,T214Pmc;UCHAR regs[512]; } SDHC_EXTENSION,*PSDHC_EXTENSION;
+static UCHAR car_regs[4096],pmc_regs[4096];
 static struct { ULONG BlocksRead,BlocksWritten; } NvDiag;
 static LONG InterlockedExchange(LONG *p,LONG n){LONG o=*p;*p=n;return o;}
 static LONG InterlockedOr(LONG *p,LONG n){return *p|=n;}
@@ -188,6 +190,9 @@ int main(void){
  assert(T214SetBusVoltage(&s,SdBusVoltageOff)==0&&power_cycles==2&&!s.T214CardOn);
  s.CrashdumpMode=1;s.T214CardOn=1;s.T214Voltage18=0;
  assert(T214SetBusVoltage(&s,SdBusVoltage33)==0&&power_cycles==3);
+ s.T214Pmc=pmc_regs;s.T214DumpFreshPower=1;s.regs[SDHC_POWER_CONTROL]=0;
+ assert(T214SetBusVoltage(&s,SdBusVoltage33)==0&&power_cycles==3&&!s.T214DumpFreshPower&&s.regs[SDHC_POWER_CONTROL]==15);
+ assert(T214SetBusVoltage(&s,SdBusVoltage33)==0&&power_cycles==4);
  s.CrashdumpMode=0;
  ULONG actual;USHORT reg=SdhcCalcClockFrequency(&s,200000,&actual);
  assert(reg==0&&actual==199680);

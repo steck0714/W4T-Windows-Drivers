@@ -31,8 +31,14 @@ static NTSTATUS SwFanDvfsFailureLocked(PSWFAN_DEVICE Dev, NTSTATUS Cause)
 static NTSTATUS SwFanDvfsUpdateLocked(PSWFAN_DEVICE Dev, ULONG Temp, BOOLEAN Valid)
 {
     NTSTATUS Status;
-    Dev->LastTemp = Temp;
-    Dev->TempValid = Valid;
+    /* Authoritative temperature publication happens exclusively under
+     * SensorLock -> CpuLock. Never overwrite LastTemp/TempValid from a
+     * delayed policy callback; always consume the latest published sample
+     * once TempSeq has started advancing. */
+    if (Dev->TempSeq != 0u) {
+        Temp = Dev->LastTemp;
+        Valid = Dev->TempValid;
+    }
     if (Dev->Dfll.FaultLatched) return Dev->Dfll.LastStatus;
     if (!Valid || Temp >= 96u)
         return SwFanDvfsFailureLocked(Dev, STATUS_DEVICE_NOT_READY);

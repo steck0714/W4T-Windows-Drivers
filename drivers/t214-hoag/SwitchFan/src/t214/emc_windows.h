@@ -30,48 +30,62 @@ typedef struct {
     int Result;
 } SW_EMC_IRQ_REQUEST;
 
-/* Short DIRQL-only MMIO work, synchronized against the ISR. The passive
- * owner drops this lock before sending BPMP requests or taking rail locks. */
-static BOOLEAN SwEmcSynchronize(WDFINTERRUPT Interrupt, WDFCONTEXT Context)
+static BOOLEAN SwActmonMapped(const SWFAN_EMC *e)
 {
-    PSWFAN_DEVICE d=SwFanGetDevice(WdfInterruptGetDevice(Interrupt));
+    for (ULONG i = 0; i < SwActmonMapCount; ++i)
+        if (!e->ActmonMap[i]) return FALSE;
+    return TRUE;
+}
+
+/* Short DIRQL-only MMIO work. While the interrupt is online KMDF serializes
+ * this against the ISR. The passive owner drops the IRQ lock before sending
+ * BPMP requests or taking rail locks. */
+static VOID SwEmcIrqRun(PSWFAN_DEVICE d, SW_EMC_IRQ_REQUEST *r)
+{
     SWFAN_EMC *e=&d->Emc;
-    SW_EMC_IRQ_REQUEST *r=Context;
     struct sw_actmon_io io=SwActmonIo(e);
     uint64_t now=KeQueryInterruptTime()/10000u;
     r->Result=SwActmonOk;
     if (r->Operation==SwEmcIrqMask) {
+        if (!SwActmonMapped(e)) {
+            if (e->IrqState.marks_saved) r->Result=SwActmonInvalid;
+            return;
+        }
         sw_actmon_irq_mask(&e->IrqState,&io);
-        return TRUE;
+        return;
     }
     if (r->Operation==SwEmcIrqRestore) {
+        if (!SwActmonMapped(e)) {
+            if (e->IrqState.marks_saved || e->Actmon.owned) r->Result=SwActmonInvalid;
+            return;
+        }
         bool marks=sw_actmon_irq_restore(&e->IrqState,&io);
         bool base=sw_actmon_stop(&e->Actmon,&io);
         if (!marks || !base) r->Result=SwActmonReadback;
         else RtlZeroMemory(&e->IrqState,sizeof(e->IrqState));
-        return TRUE;
+        return;
     }
-    if (!e->InterruptOnline || d->Stopping || d->TimerStopping) {
-        r->Result=SwActmonInvalid; return TRUE;
+    if (!InterlockedCompareExchange(&e->InterruptOnline,0,0) || d->Stopping || d->TimerStopping) {
+        r->Result=SwActmonInvalid; return;
     }
     if (r->Operation==SwEmcIrqRate) {
-        r->Result=sw_actmon_irq_rate(&e->IrqState,&io,r->ActualKhz); return TRUE;
+        r->Result=sw_actmon_irq_rate(&e->IrqState,&io,r->ActualKhz); return;
     }
     if (!e->ActmonProbeAttempted) {
         e->ActmonProbeAttempted=TRUE;
         r->Result=sw_actmon_start(&e->Actmon,&io,r->ClockMKhz,r->ActualKhz,now);
         if (!r->Result) r->Result=sw_actmon_irq_start(&e->IrqState,&e->Actmon,&io,
                                                     r->ActualKhz,r->MaximumKhz);
-        if (r->Result) { e->ActmonError=r->Result; return TRUE; }
+        if (r->Result) { e->ActmonError=r->Result; return; }
     }
     if (e->ActmonError || e->IrqState.error) {
-        r->Result=e->ActmonError?e->ActmonError:e->IrqState.error; return TRUE;
+        r->Result=e->ActmonError?e->ActmonError:e->IrqState.error; return;
     }
-    if (now<e->Actmon.ready_ms) { r->Result=SwActmonWaiting; return TRUE; }
+    if (now<e->Actmon.ready_ms) { r->Result=SwActmonWaiting; return; }
     if ((SwActmonRead(e,SwActmonSource,0)&SW_ACTMON_SOURCE_MASK)!=SW_ACTMON_CLK_M ||
         (SwActmonRead(e,SwActmonResetStatus,0)&SW_ACTMON_GATE) ||
         !(SwActmonRead(e,SwActmonGateStatus,0)&SW_ACTMON_GATE)) {
-        r->Result=sw_actmon_irq_fail(&e->IrqState,&io); return TRUE;
+        r->Result=sw_actmon_irq_fail(&e->IrqState,&io); return;
     }
     if (r->ActualKhz!=e->IrqState.current_khz)
         r->Result=sw_actmon_irq_rate(&e->IrqState,&io,r->ActualKhz);
@@ -82,13 +96,28 @@ static BOOLEAN SwEmcSynchronize(WDFINTERRUPT Interrupt, WDFCONTEXT Context)
         r->BoostKhz=e->IrqState.boost_khz;
         r->Interrupts=e->IrqState.interrupts;
     }
+}
+
+static BOOLEAN SwEmcSynchronize(WDFINTERRUPT Interrupt, WDFCONTEXT Context)
+{
+    SwEmcIrqRun(SwFanGetDevice(WdfInterruptGetDevice(Interrupt)),Context);
     return TRUE;
 }
 
 static int SwEmcIrqRequest(SWFAN_EMC *e, SW_EMC_IRQ_REQUEST *r)
 {
     r->Result=SwActmonInvalid;
-    if (e->Interrupt) (VOID)WdfInterruptSynchronize(e->Interrupt,SwEmcSynchronize,r);
+    if (!e->Interrupt || !e->Device) return r->Result;
+    if (InterlockedCompareExchange(&e->InterruptOnline,0,0)) {
+        /* SelfManagedIoSuspend and EvtInterruptDisable are serialized by KMDF.
+         * No passive wait lock is added across this DIRQL synchronization. */
+        (VOID)WdfInterruptSynchronize(e->Interrupt,SwEmcSynchronize,r);
+    } else if (r->Operation==SwEmcIrqMask || r->Operation==SwEmcIrqRestore) {
+        /* Disconnect has run, so WdfInterruptSynchronize would dereference a
+         * NULL PKINTERRUPT. The ISR is already detached; MMIO remains mapped
+         * until ReleaseHardware, making local mask/restore safe without it. */
+        SwEmcIrqRun(SwFanGetDevice(e->Device),r);
+    }
     return r->Result;
 }
 
@@ -97,7 +126,8 @@ static BOOLEAN SwFanEmcIsr(WDFINTERRUPT Interrupt, ULONG MessageId)
     PSWFAN_DEVICE d=SwFanGetDevice(WdfInterruptGetDevice(Interrupt));
     struct sw_actmon_io io=SwActmonIo(&d->Emc);
     UNREFERENCED_PARAMETER(MessageId);
-    if (!d->Emc.InterruptOnline || !d->Emc.IrqState.running) return FALSE;
+    if (!InterlockedCompareExchange(&d->Emc.InterruptOnline,0,0) ||
+        !d->Emc.IrqState.running) return FALSE;
     if (!sw_actmon_irq_service(&d->Emc.IrqState,&io)) return FALSE;
     if (d->TimerStopping || d->Stopping) sw_actmon_irq_mask(&d->Emc.IrqState,&io);
     else (VOID)WdfDpcEnqueue(d->EmcDpc);
@@ -106,7 +136,7 @@ static BOOLEAN SwFanEmcIsr(WDFINTERRUPT Interrupt, ULONG MessageId)
 static NTSTATUS SwFanEmcInterruptEnable(WDFINTERRUPT Interrupt, WDFDEVICE Device)
 {
     UNREFERENCED_PARAMETER(Interrupt);
-    SwFanGetDevice(Device)->Emc.InterruptOnline=TRUE;
+    InterlockedExchange(&SwFanGetDevice(Device)->Emc.InterruptOnline,1);
     return STATUS_SUCCESS;
 }
 static NTSTATUS SwFanEmcInterruptDisable(WDFINTERRUPT Interrupt, WDFDEVICE Device)
@@ -114,8 +144,10 @@ static NTSTATUS SwFanEmcInterruptDisable(WDFINTERRUPT Interrupt, WDFDEVICE Devic
     SWFAN_EMC *e=&SwFanGetDevice(Device)->Emc;
     struct sw_actmon_io io=SwActmonIo(e);
     UNREFERENCED_PARAMETER(Interrupt);
-    sw_actmon_irq_mask(&e->IrqState,&io);
-    e->InterruptOnline=FALSE;
+    /* Publish offline before masking. Later Cleanup/ReleaseHardware calls can
+     * only perform local MMIO cleanup and can never enter KeSynchronizeExecution. */
+    InterlockedExchange(&e->InterruptOnline,0);
+    if (SwActmonMapped(e)) sw_actmon_irq_mask(&e->IrqState,&io);
     return STATUS_SUCCESS;
 }
 static VOID SwFanEmcDpc(WDFDPC Dpc)

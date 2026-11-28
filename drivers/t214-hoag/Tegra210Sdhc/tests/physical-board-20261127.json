@@ -1,0 +1,47 @@
+{
+  "date": "2026-11-27",
+  "board": "Nintendo Switch Lite (HDH-001, T214)",
+  "driver": "nvtsdhc",
+  "profile": "bounded WINARM",
+  "runtime_baseline": "0.5.1.11",
+  "fallback_version": "0.5.1.10",
+  "bound_inf": "oem47.inf",
+  "signed_package_sha256": {
+    "nvtsdhc.cat": "6ff638c6f843ddd9737edc1d9f05c9a9de9d7ef7cdb5e3f019051df0905d446f",
+    "nvtsdhc.inf": "06a27587b66ce68f473c5bea1f26cc358813dae77bc624c6b8b70c82370dcf54",
+    "nvtsdhc.sys": "e83ba40cf98c8bce6224112cd6130c7b833bebfb5af28be0c4b605dd741bbe35"
+  },
+  "runtime_boots": [
+    {
+      "system_boot_record": 105469,
+      "sd_problem_code": 0,
+      "active_sys_sha256": "e83ba40cf98c8bce6224112cd6130c7b833bebfb5af28be0c4b605dd741bbe35"
+    },
+    {
+      "system_boot_record": 105542,
+      "sd_problem_code": 0,
+      "active_sys_sha256": "e83ba40cf98c8bce6224112cd6130c7b833bebfb5af28be0c4b605dd741bbe35"
+    }
+  ],
+  "crash_dump": {
+    "assessment": "NO-GO",
+    "manual_bugcheck": "0xE2",
+    "attempts": 1,
+    "gpu_problem_code": 43,
+    "last_prepare": {
+      "status": "0x00000000",
+      "refs": 1,
+      "ready": 1
+    },
+    "restart": "manual",
+    "new_minidumps": 0,
+    "last_hardware_stage": "unknown"
+  },
+  "host_verification": {
+    "public_arm64_wdk_configurations": 8,
+    "crash_callback_model_configurations": 6,
+    "windows_port_replay_cases": 11,
+    "transient_completion_loss": "retry completed the 64 KiB write",
+    "persistent_completion_loss": "STATUS_IO_TIMEOUT"
+  }
+}

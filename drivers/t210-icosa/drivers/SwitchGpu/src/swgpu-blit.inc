@@ -17,6 +17,9 @@ C_ASSERT(F2_HEIGHT * 11u + 21u <= (F2_BENCH_PUSH_BYTES - 32u) / sizeof(ULONG));
 
 typedef struct _F2_RUN {
     ULONG MaxWaitUs, MaxPolls, IrqWakes, MapPolls, UnmapPolls, AbortPolls;
+    ULONG Pages[2];             /* Claude 0.15.0 (G3b): PTEs written per window, cleared at unmap */
+    ULONG DstFirst;             /* 0.15.2 (G3c): first PTE of the destination in window 1 */
+    BOOLEAN Persistent;         /* 0.15.2 (G3c): keep the destination mapped (F3 presents) */
     BOOLEAN Mapped, Issued;
 } F2_RUN;
 
@@ -103,6 +106,26 @@ static BOOLEAN F2RequestValid(const SWGPU_BLIT_REQUEST *Req)
         Req->SrcPitch == 0u || Req->DstPitch == 0u || !F2MdlValid(Req->Src) ||
         !F2MdlValid(Req->Dst) || (Req->Src->MdlFlags & MDL_IO_SPACE))
         return FALSE;
+    if (Req->DstLayout == SWGPU_BLIT_DST_BLOCK) {
+        /* Claude 0.14.0 (G2a): block-linear destination, origin in DstOffset. */
+        ULONG blockRows = 8u << Req->DstBlockHeightLog2;
+        if (Req->DstBlockHeightLog2 > 5u || (Req->DstPitch & 63u) || Req->DstPitch > 0xFFFFu ||
+            Req->DstHeight == 0u || Req->DstHeight > 0xFFFFu || (Req->DstHeight % blockRows) ||
+            (Req->DstKind != 0u && Req->DstKind != 0xFEu) ||
+            SWGPU_BL_BYTES(Req->DstPitch, Req->DstHeight) > MmGetMdlByteCount(Req->Dst))
+            return FALSE;
+        for (i = 0u; i < Req->Count; ++i) {
+            const SWGPU_BLIT_RECT *r = &Req->Rect[i];
+            ULONG x = r->DstOffset & 0xFFFFu, y = r->DstOffset >> 16;
+            if (!r->Rows || !r->RowBytes || r->RowBytes > Req->SrcPitch ||
+                x + r->RowBytes > Req->DstPitch || y + r->Rows > Req->DstHeight ||
+                (ULONGLONG)r->SrcOffset + (ULONGLONG)(r->Rows - 1u) * Req->SrcPitch +
+                    r->RowBytes > MmGetMdlByteCount(Req->Src))
+                return FALSE;
+        }
+        return TRUE;
+    }
+    if (Req->DstLayout != SWGPU_BLIT_DST_PITCH || Req->DstKind != 0u) return FALSE;
     for (i = 0u; i < Req->Count; ++i) {
         const SWGPU_BLIT_RECT *r = &Req->Rect[i];
         if (!r->Rows || r->Rows > 0xFFFFu || !r->RowBytes ||
@@ -127,6 +150,53 @@ static BOOLEAN F2CanRun(PSWGPU_DEVICE Dev)
            (Rd(Dev->Bar0, NV_PMC_ENABLE) & F1_CE_ENABLE) != 0u;
 }
 
+/* Claude 0.15.2 (G3c): the display's scanout buffers are the same few
+ * physically contiguous ranges on every present, so map each once and keep
+ * it. Window 1 has 3 persistent slots of 4 MiB at 4, 8 and 12 MiB; anything
+ * else (non-contiguous, larger) uses the start of window 1 per present as
+ * before. A slot counts as mapped only if its first and last GPU and SMMU
+ * PTEs read back exactly as this buffer needs them, so a reset, a G1 power
+ * cycle, an arena reused from the pool or a legacy map over it is noticed
+ * and simply mapped again. */
+#define G3_SLOT_PAGES 1024u
+#define G3_SLOTS      3u
+static ULONG g_G3NextSlot, g_G3SlotHits, g_G3SlotMisses;
+
+static ULONGLONG G3GpuPte(ULONG Index, ULONG Kind)
+{
+    ULONGLONG iova = (GR_VM_BLIT_BASE + (ULONGLONG)Index * PAGE_SIZE) | ACR_GM20B_IOMMU_TAG;
+    return (iova >> 8) | 1ull | ((ULONGLONG)Kind << 36);
+}
+
+static BOOLEAN G3DstSlot(const SWGPU_BLIT_REQUEST *Req, PPFN_NUMBER Pfns, ULONG Count, PULONG First)
+{
+    volatile ULONG *outerPt = (volatile ULONG *)((PUCHAR)g_GrVm.Arena + GR_VM_BLIT_SMMU_PT);
+    volatile ULONGLONG *gpuPt = (volatile ULONGLONG *)((PUCHAR)g_GrVm.Arena + GR_VM_BLIT_GPU_PGT);
+    const ULONG base = SWGPU_BLIT_WINDOW_BYTES / PAGE_SIZE;
+    ULONG s, i;
+    *First = base;
+    if (Count == 0u || Count > G3_SLOT_PAGES) return FALSE;
+    for (i = 1u; i < Count; ++i) if (Pfns[i] != Pfns[0] + i) return FALSE;
+    for (s = 0u; s < G3_SLOTS; ++s) {
+        ULONG f = base + (s + 1u) * G3_SLOT_PAGES, l = f + Count - 1u;
+        if (outerPt[f] == ((ULONG)Pfns[0] | SMMU_ATTR_RWNS) &&
+            outerPt[l] == ((ULONG)Pfns[Count - 1u] | SMMU_ATTR_RWNS) &&
+            gpuPt[f] == G3GpuPte(f, Req->DstKind) && gpuPt[l] == G3GpuPte(l, Req->DstKind) &&
+            (Count == G3_SLOT_PAGES || gpuPt[l + 1u] == 0u)) {
+            *First = f;
+            ++g_G3SlotHits;
+            return TRUE;
+        }
+    }
+    s = g_G3NextSlot++ % G3_SLOTS;
+    *First = base + (s + 1u) * G3_SLOT_PAGES;
+    /* A shorter buffer must not leave the old one's tail mapped. */
+    RtlZeroMemory((PULONGLONG)gpuPt + *First, G3_SLOT_PAGES * sizeof(ULONGLONG));
+    RtlZeroMemory((PULONG)outerPt + *First, G3_SLOT_PAGES * sizeof(ULONG));
+    ++g_G3SlotMisses;
+    return FALSE;
+}
+
 static BOOLEAN F2Map(PSWGPU_DEVICE Dev, const SWGPU_BLIT_REQUEST *Req, F2_RUN *Run)
 {
     volatile ULONG *outerPd = (volatile ULONG *)g_AcrVm.Arena;
@@ -135,9 +205,9 @@ static BOOLEAN F2Map(PSWGPU_DEVICE Dev, const SWGPU_BLIT_REQUEST *Req, F2_RUN *R
     volatile ULONGLONG *gpuPt = (volatile ULONGLONG *)((PUCHAR)g_GrVm.Arena + GR_VM_BLIT_GPU_PGT);
     const ULONG outerIndex = GR_VM_BLIT_BASE >> 22, gpuIndex = GR_VM_BLIT_BASE >> 27;
     ULONG set, i;
-    if (gpuPd[gpuIndex] != 0u) return FALSE;
-    for (i = 0u; i < GR_VM_BLIT_PDES; ++i)
-        if (outerPd[outerIndex + i] != 0u) return FALSE;
+    /* 0.15.2 (G3c): a persistent destination keeps the PDEs set between presents. */
+    if (!Run->Persistent && gpuPd[gpuIndex] != 0u &&
+        gpuPd[gpuIndex] != (((g_GrVm.Iova + GR_VM_BLIT_GPU_PGT) << 24) | (5ull << 32))) return FALSE;
     for (set = 0u; set < 2u; ++set) {
         PMDL mdl = set == 0u ? Req->Src : Req->Dst;
         PPFN_NUMBER pfns = MmGetMdlPfnArray(mdl);
@@ -150,10 +220,18 @@ static BOOLEAN F2Map(PSWGPU_DEVICE Dev, const SWGPU_BLIT_REQUEST *Req, F2_RUN *R
         PPFN_NUMBER pfns = MmGetMdlPfnArray(mdl);
         ULONG count = (MmGetMdlByteOffset(mdl) + MmGetMdlByteCount(mdl) + PAGE_SIZE - 1u) / PAGE_SIZE;
         ULONG first = set * (SWGPU_BLIT_WINDOW_BYTES / PAGE_SIZE);
+        if (set == 1u && Run->Persistent && G3DstSlot(Req, pfns, count, &first)) {
+            Run->DstFirst = first;          /* already mapped there: nothing to write */
+            continue;
+        }
+        if (set == 1u) Run->DstFirst = first;
+        /* A persistent slot stays mapped: unmap clears only what is per present. */
+        Run->Pages[set] = (set == 1u && Run->Persistent && first != SWGPU_BLIT_WINDOW_BYTES / PAGE_SIZE) ? 0u : count;
         for (i = 0u; i < count; ++i) {
             ULONGLONG iova = (GR_VM_BLIT_BASE + (ULONGLONG)(first + i) * PAGE_SIZE) | ACR_GM20B_IOMMU_TAG;
             outerPt[first + i] = (ULONG)pfns[i] | SMMU_ATTR_RWNS;
-            gpuPt[first + i] = (iova >> 8) | 1ull; /* GR arena's valid small PTE encoding */
+            /* GR arena's valid small PTE encoding; G2a: kind [43:36] of the destination. */
+            gpuPt[first + i] = (iova >> 8) | 1ull | (set == 1u ? (ULONGLONG)Req->DstKind << 36 : 0ull);
         }
     }
     KeMemoryBarrier();
@@ -174,10 +252,23 @@ static BOOLEAN F2Unmap(PSWGPU_DEVICE Dev, F2_RUN *Run)
     PULONG outerPd = (PULONG)g_AcrVm.Arena;
     PULONGLONG gpuPd = (PULONGLONG)((PUCHAR)g_GrVm.Arena + GR_VM_GPU_PGD_OFF);
     if (!Run->Mapped) return TRUE;
-    gpuPd[GR_VM_BLIT_BASE >> 27] = 0u;
-    RtlZeroMemory(outerPd + (GR_VM_BLIT_BASE >> 22), GR_VM_BLIT_PDES * sizeof(ULONG));
-    RtlZeroMemory((PUCHAR)g_GrVm.Arena + GR_VM_BLIT_GPU_PGT, 0x40000u);
-    RtlZeroMemory((PUCHAR)g_GrVm.Arena + GR_VM_BLIT_SMMU_PT, GR_VM_BLIT_PDES * PAGE_SIZE);
+    if (!Run->Persistent || Dev->BlitReset) {   /* 0.15.2: persistent slots keep the PDEs */
+        gpuPd[GR_VM_BLIT_BASE >> 27] = 0u;
+        RtlZeroMemory(outerPd + (GR_VM_BLIT_BASE >> 22), GR_VM_BLIT_PDES * sizeof(ULONG));
+    }
+    /* Claude 0.15.0 (G3b): clear only the PTEs this run wrote (F2Map writes
+     * exactly Pages[set] entries from each window start; the rest stay zero).
+     * 0.14 cleared 256 KB + 32 KB per present: ~0.3 ms on hardware. */
+    {
+        ULONG set;
+        for (set = 0u; set < 2u; ++set) {
+            ULONG first = set * (SWGPU_BLIT_WINDOW_BYTES / PAGE_SIZE), n = Run->Pages[set];
+            if (n > SWGPU_BLIT_WINDOW_BYTES / PAGE_SIZE) n = SWGPU_BLIT_WINDOW_BYTES / PAGE_SIZE;
+            RtlZeroMemory((PULONGLONG)((PUCHAR)g_GrVm.Arena + GR_VM_BLIT_GPU_PGT) + first, (SIZE_T)n * sizeof(ULONGLONG));
+            RtlZeroMemory((PULONG)((PUCHAR)g_GrVm.Arena + GR_VM_BLIT_SMMU_PT) + first, (SIZE_T)n * sizeof(ULONG));
+            Run->Pages[set] = 0u;
+        }
+    }
     F2FlushOuter(Dev);
     Run->Mapped = FALSE;
     return Dev->BlitReset || F2Invalidate(Dev, &Run->UnmapPolls);
@@ -261,8 +352,10 @@ static NTSTATUS F2SubmitPlan(PSWGPU_DEVICE Dev, const SWGPU_BLIT_REQUEST *Req,
         (Rd(Dev->Bar0, PMC_INTR_EN_NONSTALL) & 1u) &&
         (Rd(Dev->Bar0, FIFO_INTR_EN_1) & FIFO_INTR_0_CHANNEL_INTR);
     NTSTATUS status = STATUS_IO_TIMEOUT;
+    const BOOLEAN block = Req->DstLayout == SWGPU_BLIT_DST_BLOCK;
     if (Repeat == 0u || Repeat > F2_REPEATS || (SplitLines && Req->Count != 1u) ||
-        launchCount > ((pushBytes - 32u) / sizeof(ULONG) - 21u) / 11u)
+        (block && (Repeat != 1u || SplitLines)) ||
+        launchCount > ((pushBytes - 32u) / sizeof(ULONG) - 21u) / (block ? 18u : 11u))
         return STATUS_INVALID_PARAMETER;
     if (NeedIrq && !useIrq) return STATUS_DEVICE_NOT_READY;
     if (put >= ringEntries || Rd(Dev->Bar1Cpu, getOffset) != put) return STATUS_DEVICE_BUSY;
@@ -277,16 +370,25 @@ static NTSTATUS F2SubmitPlan(PSWGPU_DEVICE Dev, const SWGPU_BLIT_REQUEST *Req,
     for (i = 0u; i < launchCount; ++i) {
         const SWGPU_BLIT_RECT *r = &Req->Rect[SplitLines ? 0u : i % Req->Count];
         const ULONG row = SplitLines ? i : 0u;
+        if (block) {
+            /* clb0b5.h SET_DST_BLOCK_SIZE..SET_DST_ORIGIN: WIDTH ONE_GOB, HEIGHT
+             * log2 GOBs [7:4], DEPTH ONE_GOB, GOB_HEIGHT FERMI_8 [15:12] = 1. */
+            push[n++] = F1Method(F1_COPY_SUBCHANNEL, 0x070Cu, 6u);
+            push[n++] = (Req->DstBlockHeightLog2 << 4) | (1u << 12);
+            push[n++] = Req->DstPitch; push[n++] = Req->DstHeight; push[n++] = 1u; push[n++] = 0u;
+            push[n++] = r->DstOffset;               /* origin: Y [31:16], X bytes [15:0] */
+        }
         push[n++] = F1Method(F1_COPY_SUBCHANNEL, 0x0400u, 8u);
         push[n++] = 0u;
         push[n++] = GR_VM_BLIT_BASE + MmGetMdlByteOffset(Req->Src) + r->SrcOffset + row * Req->SrcPitch;
         push[n++] = 0u;
-        push[n++] = GR_VM_BLIT_BASE + SWGPU_BLIT_WINDOW_BYTES + MmGetMdlByteOffset(Req->Dst) +
-            r->DstOffset + row * Req->DstPitch;
+        push[n++] = GR_VM_BLIT_BASE + Run->DstFirst * PAGE_SIZE + MmGetMdlByteOffset(Req->Dst) +
+            (block ? 0u : r->DstOffset + row * Req->DstPitch);
         push[n++] = Req->SrcPitch; push[n++] = Req->DstPitch;
         push[n++] = r->RowBytes; push[n++] = SplitLines ? 1u : r->Rows;
         push[n++] = F1Method(F1_COPY_SUBCHANNEL, 0x0300u, 1u);
-        push[n++] = i + 1u == launchCount ? 0x38Eu : 0x386u;
+        /* LAUNCH_DMA: bit 8 DST_MEMORY_LAYOUT 1 = pitch, 0 = block linear. */
+        push[n++] = (i + 1u == launchCount ? 0x38Eu : 0x386u) & (block ? ~0x100u : ~0u);
     }
     push[n++] = F1Method(0u, 0x0010u, 4u);
     push[n++] = 0u; push[n++] = ceSemVa; push[n++] = 0xF2000001u; push[n++] = 1u;
@@ -754,10 +856,42 @@ done:
     TraceDurable(L"F2Result", Out->Result);
 }
 
+/* Claude 0.15.0 (G3a): where a present's ~1 ms goes. Sums of microseconds
+ * for map, submit + wait, finish (unmap), and bytes; flushed every 64. */
+static ULONGLONG g_G3Us[3], g_G3Bytes;
+static ULONG g_G3Max[3], g_G3Count;
+
+static VOID G3Account(const SWGPU_BLIT_REQUEST *Req, LARGE_INTEGER T0, LARGE_INTEGER T1,
+                      LARGE_INTEGER T2, LARGE_INTEGER T3, LONGLONG Freq)
+{
+    LONGLONG d[3];
+    ULONG i;
+    d[0] = T1.QuadPart - T0.QuadPart; d[1] = T2.QuadPart - T1.QuadPart; d[2] = T3.QuadPart - T2.QuadPart;
+    for (i = 0u; i < 3u; ++i) {
+        ULONG us = (ULONG)(d[i] * 1000000ll / Freq);
+        g_G3Us[i] += us;
+        if (us > g_G3Max[i]) g_G3Max[i] = us;
+    }
+    for (i = 0u; i < Req->Count; ++i) g_G3Bytes += (ULONGLONG)Req->Rect[i].RowBytes * Req->Rect[i].Rows;
+    if ((++g_G3Count & 63u) == 0u) {
+        Trace(L"G3Count", g_G3Count);
+        Trace(L"G3MapAvgUs", (ULONG)(g_G3Us[0] / g_G3Count));
+        Trace(L"G3SubmitAvgUs", (ULONG)(g_G3Us[1] / g_G3Count));
+        Trace(L"G3FinishAvgUs", (ULONG)(g_G3Us[2] / g_G3Count));
+        Trace(L"G3MapMaxUs", g_G3Max[0]);
+        Trace(L"G3SubmitMaxUs", g_G3Max[1]);
+        Trace(L"G3FinishMaxUs", g_G3Max[2]);
+        Trace(L"G3AvgKB", (ULONG)(g_G3Bytes / g_G3Count / 1024u));
+        Trace(L"G3SlotHits", g_G3SlotHits);
+        Trace(L"G3SlotMisses", g_G3SlotMisses);
+    }
+}
+
 static NTSTATUS F3Present(PSWGPU_DEVICE Dev, const SWGPU_BLIT_REQUEST *Req)
 {
     F2_RUN run = {0};
     NTSTATUS status;
+    LARGE_INTEGER t0, t1, t2, t3, freq;
     if (!Dev->InterruptSourcesEnabled || !F2CanRun(Dev)) {
         /* Claude 0.12.6: F3 on hardware got 18 NOT_READY while resident.
          * Record which condition failed (bit set = condition not met). */
@@ -780,12 +914,22 @@ static NTSTATUS F3Present(PSWGPU_DEVICE Dev, const SWGPU_BLIT_REQUEST *Req)
     }
     if (Req->DstPitch > SWGPU_BLIT_WINDOW_BYTES || !F2RequestValid(Req))
         return STATUS_INVALID_PARAMETER;
+    run.Persistent = TRUE;                  /* 0.15.2 (G3c) */
+    t0 = KeQueryPerformanceCounter(&freq);
     KeFlushIoBuffers(Req->Src, FALSE, TRUE);
     /* The scanout destinations are write-combined. The CPU barrier before
      * submit and CE/L2 completion before return order both producers. */
-    if (F2Map(Dev, Req, &run)) status = F2Submit(Dev, Req, &run, TRUE);
-    else status = STATUS_DEVICE_HARDWARE_ERROR;
+    if (F2Map(Dev, Req, &run)) {
+        t1 = KeQueryPerformanceCounter(NULL);
+        status = F2Submit(Dev, Req, &run, TRUE);
+    } else {
+        t1 = KeQueryPerformanceCounter(NULL);
+        status = STATUS_DEVICE_HARDWARE_ERROR;
+    }
+    t2 = KeQueryPerformanceCounter(NULL);
     status = F2Finish(Dev, &run, status);
+    t3 = KeQueryPerformanceCounter(NULL);
+    if (NT_SUCCESS(status)) G3Account(Req, t0, t1, t2, t3, freq.QuadPart);
     Dev->BlitLastWaitUs = run.MaxWaitUs;
     Dev->BlitLastPolls = run.MaxPolls + run.MapPolls + run.UnmapPolls + run.AbortPolls;
     return status;

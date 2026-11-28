@@ -1,5 +1,5 @@
 /* W4T-CREDIT-BEGIN
- * Origin : ruje0504-2/Windows-for-Switch-Drivers (drivers/SwitchFan, commit de636f5), Lite (t214/Hoag) line;
+ * Origin : ruje0504-2/Windows-for-Switch-Drivers (drivers/SwitchFan, commit b214806), Lite (t214/Hoag) line;
  *          shared implementations come from hayato41200/Windows-for-Switch-Drivers
  *          (see drivers/t214-hoag/README.md).
  * Authors: hayato41200, ruje0504-2 (and their contributors). The upstream file has no author or
@@ -97,6 +97,8 @@ typedef struct _SWFAN_DEVICE {
 #endif
     KSPIN_LOCK TimerLock;
     volatile BOOLEAN Stopping, TimerStopping;
+    BOOLEAN SuspendCompleted;
+    NTSTATUS SuspendStatus;
     ULONG Duty;
     WDFWAITLOCK FanLock;
     ULONG FanProfile, FanTargetPwm, FanProfileFlags;
@@ -104,6 +106,7 @@ typedef struct _SWFAN_DEVICE {
     struct sw_fan_filter FanFilter;
     ULONG Failures;
     ULONG LastTemp;
+    ULONG TempSeq;
     BOOLEAN TempValid;
     LONG Runs;
 } SWFAN_DEVICE, *PSWFAN_DEVICE;
@@ -259,24 +262,26 @@ static NTSTATUS SwFanSampleTemp(PSWFAN_DEVICE Dev, PULONG OutTemp)
     if (NT_SUCCESS(Status)) {
         Status = SwFanReadReg(Dev->Sensor, TMP451_LOCAL, &Local);
     }
-    SwFanSensorUnlock(Dev);
-    if (!NT_SUCCESS(Status)) {
-        return Status;
-    }
-    Temp = (Remote > Local) ? Remote : Local;
-    SwFanCpuLock(Dev);
-    if (!Dev->Stopping) {
-        Dev->LastTemp = Temp;
-        Dev->TempValid = TRUE;
+    if (NT_SUCCESS(Status)) {
+        Temp = (Remote > Local) ? Remote : Local;
+        /* Keep SensorLock across CpuLock publication (SensorLock -> CpuLock)
+         * so an older TMP451 read can never publish after a newer read. */
+        SwFanCpuLock(Dev);
+        if (!Dev->Stopping) {
+            Dev->LastTemp = Temp;
+            Dev->TempValid = TRUE;
+            ++Dev->TempSeq;
 #ifdef SWITCH_LITE_GPU
-        Dev->SocTempC = Remote;
-        Dev->BoardTempC = Local;
-        Dev->TempSampleTime = KeQueryInterruptTime();
+            Dev->SocTempC = Remote;
+            Dev->BoardTempC = Local;
+            Dev->TempSampleTime = KeQueryInterruptTime();
 #endif
-    } else {
-        Status = STATUS_DEVICE_NOT_READY;
+        } else {
+            Status = STATUS_DEVICE_NOT_READY;
+        }
+        SwFanCpuUnlock(Dev);
     }
-    SwFanCpuUnlock(Dev);
+    SwFanSensorUnlock(Dev);
     if (NT_SUCCESS(Status) && OutTemp != NULL) {
         *OutTemp = Temp;
     }
@@ -357,18 +362,21 @@ VOID SwFanEvtTimer(WDFTIMER Timer)
     if (NT_SUCCESS(Status)) {
         Status = SwFanReadReg(Dev->Sensor, TMP451_LOCAL, &Local);
     }
-    SwFanSensorUnlock(Dev);
     if (NT_SUCCESS(Status)) {
         ULONG Temp = (Remote > Local) ? Remote : Local;
         SwFanCpuLock(Dev);
-        Dev->LastTemp = Temp;
-        Dev->TempValid = TRUE;
+        if (!Dev->Stopping) {
+            Dev->LastTemp = Temp;
+            Dev->TempValid = TRUE;
+            ++Dev->TempSeq;
 #ifdef SWITCH_LITE_GPU
-        Dev->SocTempC = Remote;
-        Dev->BoardTempC = Local;
-        Dev->TempSampleTime = KeQueryInterruptTime();
+            Dev->SocTempC = Remote;
+            Dev->BoardTempC = Local;
+            Dev->TempSampleTime = KeQueryInterruptTime();
 #endif
+        }
         SwFanCpuUnlock(Dev);
+        SwFanSensorUnlock(Dev);
         Dev->Failures = 0;
         WdfWaitLockAcquire(Dev->FanLock, NULL);
         ULONG Duty = SwFanDutyForTemp(Temp, Dev->Duty);
@@ -390,7 +398,9 @@ VOID SwFanEvtTimer(WDFTIMER Timer)
     } else {
         SwFanCpuLock(Dev);
         Dev->TempValid = FALSE;
+        ++Dev->TempSeq;
         SwFanCpuUnlock(Dev);
+        SwFanSensorUnlock(Dev);
         SwFanTrace(L"LastSensorError", (ULONG)Status);
         /* A stopped fan needs cooling on the first lost temperature sample. */
         WdfWaitLockAcquire(Dev->FanLock, NULL);
@@ -643,7 +653,11 @@ NTSTATUS SwFanEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST Raw, WDFCMRESLIS
     ULONG Count = WdfCmResourceListGetCount(Translated), Index;
     BOOLEAN HaveSensor = FALSE;
     Dev->ConnectionCount = 0;
+    Dev->SuspendCompleted = FALSE;
+    Dev->SuspendStatus = STATUS_SUCCESS;
 #ifdef SWITCH_LITE_GPU
+    Dev->Emc.Device = Device;
+    InterlockedExchange(&Dev->Emc.InterruptOnline, 0);
     Dev->Emc.MailResources = 0;
     PCM_PARTIAL_RESOURCE_DESCRIPTOR actmonRaw=NULL,actmonTranslated=NULL;
 #endif
@@ -974,11 +988,21 @@ NTSTATUS SwFanEvtSelfManagedIoInit(WDFDEVICE Device)
     return SwFanEvtRestart(Device);
 }
 
+static BOOLEAN SwFanIsTerminalPowerAction(POWER_ACTION Action)
+{
+    return Action == PowerActionShutdown || Action == PowerActionShutdownReset ||
+           Action == PowerActionShutdownOff;
+}
+
 NTSTATUS SwFanEvtSuspend(WDFDEVICE Device)
 {
     PSWFAN_DEVICE Dev = SwFanGetDevice(Device);
     NTSTATUS Status;
+    NTSTATUS EmcStatus = STATUS_SUCCESS;
     KIRQL irql;
+    /* A successful suspend is complete for this D0/SelfManagedIo generation.
+     * Failed sleep/hibernate transitions may still be retried by teardown. */
+    if (Dev->SuspendCompleted) return Dev->SuspendStatus;
     KeAcquireSpinLock(&Dev->TimerLock, &irql);
     Dev->TimerStopping = TRUE;
     KeReleaseSpinLock(&Dev->TimerLock, irql);
@@ -994,9 +1018,11 @@ NTSTATUS SwFanEvtSuspend(WDFDEVICE Device)
     WdfWaitLockAcquire(Dev->EmcLock,NULL);
     if (Dev->Emc.Active) {
         Dev->Emc.StopStatus = SwFanEmcStopLoad(Dev);
-        Dev->Emc.Active = FALSE;
+        /* Preserve unfinished restoration for the post-disconnect teardown
+         * fallback. SwEmcIrqRequest then uses local MMIO, never the IRQ handle. */
+        if (NT_SUCCESS(Dev->Emc.StopStatus)) Dev->Emc.Active = FALSE;
     }
-    NTSTATUS emcStatus = Dev->Emc.StopStatus;
+    EmcStatus = Dev->Emc.StopStatus;
     WdfWaitLockRelease(Dev->EmcLock);
     KeAcquireSpinLock(&Dev->TimerLock, &irql);
     Dev->Stopping = TRUE;
@@ -1014,10 +1040,23 @@ NTSTATUS SwFanEvtSuspend(WDFDEVICE Device)
     KeReleaseSpinLock(&Dev->TimerLock, irql);
 #endif
     Status = SwCpuApply(Dev, FALSE);
-#ifdef SWITCH_LITE_GPU
-    if (NT_SUCCESS(Status) && !NT_SUCCESS(emcStatus)) Status=emcStatus;
-#endif
+    if (NT_SUCCESS(Status) && !NT_SUCCESS(EmcStatus)) Status=EmcStatus;
     if (Dev->Pwm != NULL) SwFanSetDuty(Dev, 76);
+    if (!NT_SUCCESS(Status) && SwFanIsTerminalPowerAction(WdfDeviceGetSystemPowerAction(Device))) {
+        /* There is no D0 resume after shutdown/reboot. A sibling SPB target may
+         * already be in D3; retain local fan/timer/clock teardown and record the
+         * failed external restoration instead of forcing PowerGotoDxFailed. */
+        SwFanTrace(L"ShutdownSuspendError", (ULONG)Status);
+        SwFanTrace(L"ShutdownEmcStopError", (ULONG)EmcStatus);
+        Status = STATUS_SUCCESS;
+#ifdef SWITCH_LITE_GPU
+        WdfWaitLockAcquire(Dev->EmcLock, NULL);
+        Dev->Emc.Active = FALSE;
+        WdfWaitLockRelease(Dev->EmcLock);
+#endif
+    }
+    Dev->SuspendStatus = Status;
+    Dev->SuspendCompleted = NT_SUCCESS(Status) ? TRUE : FALSE;
     return Status;
 }
 
@@ -1026,6 +1065,8 @@ NTSTATUS SwFanEvtRestart(WDFDEVICE Device)
     PSWFAN_DEVICE Dev = SwFanGetDevice(Device);
     KIRQL irql;
     NTSTATUS Status = Dev->IsLite ? SwFanConfigureSensor(Dev->Sensor) : STATUS_SUCCESS;
+    Dev->SuspendCompleted = FALSE;
+    Dev->SuspendStatus = STATUS_SUCCESS;
     SwFanStartBacklight(Device);
     SwFanTrace(L"ConfigureSensorStatus", (ULONG)Status);
     if (!NT_SUCCESS(Status)) {
@@ -1193,7 +1234,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
         RtlCopyMemory(&SwFanParamsPath[RegistryPath->Length / sizeof(WCHAR)], L"\\Parameters", sizeof(L"\\Parameters"));
         (VOID)RtlCreateRegistryKey(RTL_REGISTRY_ABSOLUTE, SwFanParamsPath);
     }
-    SwFanTrace(L"DriverVersion", 33);
+    SwFanTrace(L"DriverVersion", 36);
     WDF_DRIVER_CONFIG_INIT(&Config, SwFanEvtDeviceAdd);
     return WdfDriverCreate(DriverObject, RegistryPath, WDF_NO_OBJECT_ATTRIBUTES, &Config, WDF_NO_HANDLE);
 }

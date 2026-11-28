@@ -4,28 +4,247 @@
  * S4 experiment; this path allocates no DMA buffer and does not enable S4.
  */
 
-/* SDPORT_INITIALIZE is a PASSIVE_LEVEL preparation callback (sdport.h).
- * Map resources now; do not reset, retime or power-cycle the live boot disk.
- * Later bus/request callbacks use only these mappings and bounded polling. */
+#define NV_T214_DUMP_DRIVER_VER 0x0005010bu
+#define NV_T214_DUMP_READY_BIT  (1ULL << 32)
+
+/* Interrupt time is monotonic in 100 ns units and available at HIGH_LEVEL. */
+#define T214_DUMP_COMMAND_WAIT_100NS (2ULL * 10000000)
+#define T214_DUMP_DATA_WAIT_100NS    (10ULL * 10000000)
+#define T214_DUMP_WRITE_ATTEMPTS 3
+
+static VOID T214ArmDumpWait(PSDHC_EXTENSION s, ULONG required)
+{
+    ULONGLONG counter;
+    ULONGLONG interval = (required & SDHC_IS_CMD_COMPLETE) ?
+        T214_DUMP_COMMAND_WAIT_100NS : T214_DUMP_DATA_WAIT_100NS;
+    s->T214DumpDeadline = KeQueryInterruptTimePrecise(&counter) + interval;
+}
+
+static USHORT T214DumpTimeoutError(PSDHC_EXTENSION s, PSDPORT_REQUEST request, ULONG events)
+{
+    ULONG required = request->RequiredEvents;
+    ULONG arrived = events & required;
+    ULONG buffers = SDHC_IS_BUFFER_READ_READY | SDHC_IS_BUFFER_WRITE_READY;
+    ULONGLONG counter;
+
+    if (!required || !s->T214DumpDeadline) return 0;
+    if (arrived && ((arrived & ~buffers) || request->Type != SdRequestTypeStartTransfer ||
+                    !request->Command.BlockCount)) return 0;
+    if (KeQueryInterruptTimePrecise(&counter) < s->T214DumpDeadline) return 0;
+    if (arrived) {
+        /* A latched buffer-ready edge can outlive the block it described. */
+        ULONG ready = (arrived & SDHC_IS_BUFFER_READ_READY) ?
+            SDHC_PS_BUFFER_READ_ENABLE : SDHC_PS_BUFFER_WRITE_ENABLE;
+        if (SdhcReadRegisterUlong(s, SDHC_PRESENT_STATE) & ready) return 0;
+    }
+    return (required & SDHC_IS_CMD_COMPLETE) ? SDHC_ES_CMD_TIMEOUT : SDHC_ES_DATA_TIMEOUT;
+}
+
+#ifdef _MSC_VER
+#define NV_DUMP_EXPORT __declspec(dllexport)
+#else
+#define NV_DUMP_EXPORT
+#endif
+
+typedef struct _NV_DUMP_PREP_RECEIPT {
+    ULONG Version;
+    ULONG DriverVer;
+    ULONG Action;
+    ULONG Seq;
+    ULONG Irql;
+    NTSTATUS Status;
+    ULONG Refs;
+    ULONG Ready;
+    ULONGLONG SystemTime;
+    ULONGLONG PerfCounter;
+    ULONGLONG PerfFreq;
+    ULONG_PTR Routine;
+} NV_DUMP_PREP_RECEIPT;
+
+#ifdef _NTDDK_
+C_ASSERT(sizeof(NV_DUMP_PREP_RECEIPT) == 64);
+#endif
+
+static volatile LONG g_DumpPrepSeq;
+static volatile LONG64 g_DumpPrepState;
+static KSPIN_LOCK g_DumpPrepLock;
+static PUCHAR g_DumpMaps[5];
+
+NV_DUMP_EXPORT NTSTATUS DumpPreInitialize(VOID);
+NV_DUMP_EXPORT VOID DumpUninitialize(VOID);
+
+static VOID T214UnmapDumpPrepared(VOID)
+{
+    static const ULONG lengths[5] = {0x1000, 0x4000, 0x1000, 0x1000, 0x1000};
+    for (LONG i = 4; i >= 0; --i) {
+        if (g_DumpMaps[i] != NULL) {
+            MmUnmapIoSpace(g_DumpMaps[i], lengths[i]);
+            g_DumpMaps[i] = NULL;
+        }
+    }
+}
+
+static VOID T214RecordDumpPrepReceipt(ULONG Action, NTSTATUS Status, ULONG Seq)
+{
+    LONG64 state = InterlockedCompareExchange64(&g_DumpPrepState, 0, 0);
+    NV_DUMP_PREP_RECEIPT receipt;
+    RtlZeroMemory(&receipt, sizeof(receipt));
+    receipt.Version = 1;
+    receipt.DriverVer = NV_T214_DUMP_DRIVER_VER;
+    receipt.Action = Action;
+    receipt.Seq = Seq;
+    receipt.Irql = (ULONG)KeGetCurrentIrql();
+    receipt.Status = Status;
+    receipt.Refs = (ULONG)state;
+    receipt.Ready = (state & (LONG64)NV_T214_DUMP_READY_BIT) ? 1u : 0u;
+    receipt.Routine = Action == 1 ? (ULONG_PTR)&DumpPreInitialize : (ULONG_PTR)&DumpUninitialize;
+#ifdef _NTDDK_
+    LARGE_INTEGER sysTime, perfFreq;
+    KeQuerySystemTime(&sysTime);
+    receipt.SystemTime = (ULONGLONG)sysTime.QuadPart;
+    receipt.PerfCounter = (ULONGLONG)KeQueryPerformanceCounter(&perfFreq).QuadPart;
+    receipt.PerfFreq = (ULONGLONG)perfFreq.QuadPart;
+
+    HANDLE svcKey = NULL, paramKey = NULL, prepKey = NULL;
+    UNICODE_STRING name;
+    OBJECT_ATTRIBUTES attr;
+    RtlInitUnicodeString(&name, L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\nvtsdhc");
+    InitializeObjectAttributes(&attr, &name, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (NT_SUCCESS(ZwOpenKey(&svcKey, KEY_CREATE_SUB_KEY | KEY_QUERY_VALUE, &attr))) {
+        RtlInitUnicodeString(&name, L"Parameters");
+        InitializeObjectAttributes(&attr, &name, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, svcKey, NULL);
+        if (NT_SUCCESS(ZwCreateKey(&paramKey, KEY_CREATE_SUB_KEY | KEY_QUERY_VALUE, &attr, 0, NULL,
+                                   REG_OPTION_NON_VOLATILE, NULL))) {
+            RtlInitUnicodeString(&name, L"DumpPreparation");
+            InitializeObjectAttributes(&attr, &name, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, paramKey, NULL);
+            if (NT_SUCCESS(ZwCreateKey(&prepKey, KEY_SET_VALUE, &attr, 0, NULL,
+                                       REG_OPTION_NON_VOLATILE, NULL))) {
+                RtlInitUnicodeString(&name, Action == 1 ? L"LastPrepare" : L"LastRelease");
+                if (NT_SUCCESS(ZwSetValueKey(prepKey, &name, 0, REG_BINARY, &receipt, sizeof(receipt)))) {
+                    ZwFlushKey(prepKey);
+                }
+            }
+        }
+    }
+    if (prepKey != NULL) ZwClose(prepKey);
+    if (paramKey != NULL) ZwClose(paramKey);
+    if (svcKey != NULL) ZwClose(svcKey);
+#else
+    T214HostDumpPrepReceipt(&receipt);
+#endif
+}
+
+/* crashdmp.sys invokes DumpPreInitialize at PASSIVE_LEVEL during boot so MMIO
+ * mappings already exist when dumpsdport.sys calls SdhcSlotInitialize at HIGH_LEVEL. */
+NV_DUMP_EXPORT
+NTSTATUS
+DumpPreInitialize(
+    VOID
+    )
+{
+    ULONG seq = (ULONG)InterlockedIncrement(&g_DumpPrepSeq);
+    KIRQL irql = KeGetCurrentIrql();
+    if (irql > DISPATCH_LEVEL) {
+        /* Registration owns references only at an IRQL where its matching
+         * uninitialize can release them. Dump I/O consumes the prepared map. */
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    KIRQL oldIrql;
+    NTSTATUS status = STATUS_SUCCESS;
+    KeAcquireSpinLock(&g_DumpPrepLock, &oldIrql);
+    LONG64 state = InterlockedCompareExchange64(&g_DumpPrepState, 0, 0);
+    if (state & (LONG64)NV_T214_DUMP_READY_BIT) {
+        InterlockedIncrement64(&g_DumpPrepState);
+    } else {
+        status = STATUS_INSUFFICIENT_RESOURCES;
+        g_DumpMaps[0] = T214Map(0x60006000, 0x1000);
+        g_DumpMaps[1] = T214Map(0x70000000, 0x4000);
+        g_DumpMaps[2] = T214Map(0x7000e000, 0x1000);
+        g_DumpMaps[3] = T214Map(0x7000d000, 0x1000);
+        g_DumpMaps[4] = T214Map(0x6000d000, 0x1000);
+        if (g_DumpMaps[0] && g_DumpMaps[1] && g_DumpMaps[2] && g_DumpMaps[3] && g_DumpMaps[4]) {
+            if ((T214Read(g_DumpMaps[1], 0x804) & 0xfff0u) == 0x2120u) {
+                status = STATUS_SUCCESS;
+            } else {
+                status = STATUS_NOT_SUPPORTED;
+            }
+        }
+        if (NT_SUCCESS(status)) {
+            LONG64 next;
+            do {
+                state = InterlockedCompareExchange64(&g_DumpPrepState, 0, 0);
+                next = ((state + 1) & 0xffffffffLL) | (LONG64)NV_T214_DUMP_READY_BIT;
+            } while (InterlockedCompareExchange64(&g_DumpPrepState, next, state) != state);
+        } else {
+            T214UnmapDumpPrepared();
+        }
+    }
+    KeReleaseSpinLock(&g_DumpPrepLock, oldIrql);
+    if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
+        T214RecordDumpPrepReceipt(1, status, seq);
+    }
+    return status;
+}
+
+NV_DUMP_EXPORT
+VOID
+DumpUninitialize(
+    VOID
+    )
+{
+    if (KeGetCurrentIrql() > DISPATCH_LEVEL) {
+        return;
+    }
+    ULONG seq = (ULONG)InterlockedIncrement(&g_DumpPrepSeq);
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&g_DumpPrepLock, &oldIrql);
+    LONG64 state, next;
+    do {
+        state = InterlockedCompareExchange64(&g_DumpPrepState, 0, 0);
+        ULONG refs = (ULONG)state;
+        if (refs == 0) {
+            next = 0;
+            break;
+        }
+        refs -= 1;
+        next = refs ? ((LONG64)refs | (state & (LONG64)NV_T214_DUMP_READY_BIT)) : 0;
+    } while (InterlockedCompareExchange64(&g_DumpPrepState, next, state) != state);
+    if ((ULONG)state != 0 && next == 0) {
+        T214UnmapDumpPrepared();
+    }
+    KeReleaseSpinLock(&g_DumpPrepLock, oldIrql);
+    if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
+        T214RecordDumpPrepReceipt(2, STATUS_SUCCESS, seq);
+    }
+}
+
+/* Resolve the currently prepared stack at the start of exclusive dump I/O.
+ * Slot preparation can precede DumpPreInitialize. Do not cache pointers
+ * across preparation/release of another dump or hibernation stack. */
 static NTSTATUS T214InitializeDump(PSDHC_EXTENSION s)
 {
-    NTSTATUS status = STATUS_INSUFFICIENT_RESOURCES;
-    s->T214Car = T214Map(0x60006000, 0x1000);
-    s->T214Misc = T214Map(0x70000000, 0x4000);
-    s->T214Pmc = T214Map(0x7000e000, 0x1000);
-    s->T214I2c = T214Map(0x7000d000, 0x1000);
-    s->T214Gpio = T214Map(0x6000d000, 0x1000);
-    if (!s->T214Car || !s->T214Misc || !s->T214Pmc || !s->T214I2c || !s->T214Gpio) goto fail;
-    if ((T214Read(s->T214Misc, 0x804) & 0xfff0u) != 0x2120u) {
-        status = STATUS_NOT_SUPPORTED;
-        goto fail;
-    }
-    s->Capabilities.MaximumBlockCount = 32; /* 16 KiB, PIO only. */
-    s->Capabilities.MaximumBlockSize = 512;
+    LONG64 state = InterlockedCompareExchange64(&g_DumpPrepState, 0, 0);
+    if (!(state & (LONG64)NV_T214_DUMP_READY_BIT) || !(ULONG)state)
+        return STATUS_DEVICE_NOT_READY;
+    s->T214Car = g_DumpMaps[0];
+    s->T214Misc = g_DumpMaps[1];
+    s->T214Pmc = g_DumpMaps[2];
+    s->T214I2c = g_DumpMaps[3];
+    s->T214Gpio = g_DumpMaps[4];
+    s->T214BorrowedDumpMaps = TRUE;
+    s->T214DumpFreshPower = FALSE;
     return STATUS_SUCCESS;
-fail:
-    T214Release(s);
-    return status;
+}
+
+/* Dump_Open can disable port events before asking for reset-all. */
+static BOOLEAN T214DumpEventsAccessible(PSDHC_EXTENSION s)
+{
+    return s->T214BorrowedDumpMaps &&
+           (InterlockedCompareExchange64(&g_DumpPrepState, 0, 0) & (LONG64)NV_T214_DUMP_READY_BIT) &&
+           s->T214Car && s->T214Car == g_DumpMaps[0] &&
+           (T214Read(s->T214Car, 0x10) & (1u << 14)) &&
+           !(T214Read(s->T214Car, 0x04) & (1u << 14));
 }
 
 /* Called only for the dump stack's reset-all, never during preparation.
@@ -35,6 +254,11 @@ fail:
 static NTSTATUS T214DumpTakeoverClock(PSDHC_EXTENSION s)
 {
     const ULONG sdmmc1 = 1u << 14;
+    /* dumpsdport can return the last reset's status after exhausting writes.
+     * An unconfirmed last write must still fail at that recovery boundary. */
+    if (s->T214DumpWriteFailures >= T214_DUMP_WRITE_ATTEMPTS) return STATUS_IO_TIMEOUT;
+    NTSTATUS status = T214InitializeDump(s);
+    if (!NT_SUCCESS(status)) return status;
     PUCHAR car = s->T214Car;
     BOOLEAN ready = (T214Read(car, 0x10) & sdmmc1) &&
                     !(T214Read(car, 0x04) & sdmmc1);
@@ -46,7 +270,7 @@ static NTSTATUS T214DumpTakeoverClock(PSDHC_EXTENSION s)
      * Only SDMMC1 is held in reset; other CAR clients are untouched. */
     T214Write(car, 0x300, sdmmc1);
     if (!(T214Read(car, 0x04) & sdmmc1)) return STATUS_DEVICE_POWER_FAILURE;
-    NTSTATUS status = T214ParentClock(s);
+    status = T214ParentClock(s);
     if (!NT_SUCCESS(status)) return status;
     if ((T214Read(car, 0x150) & 0xe00000ffu) != (3u << 29))
         return STATUS_DEVICE_CONFIGURATION_ERROR;
@@ -71,8 +295,8 @@ static NTSTATUS T214ReadIdentitySector(PSDHC_EXTENSION s, ULONG Lba, PUCHAR Buff
     if (!T214WaitClear(s->BaseAddress, SDHC_PRESENT_STATE,
                       SDHC_PS_CMD_INHIBIT | SDHC_PS_DAT_INHIBIT, 100000))
         return STATUS_DEVICE_BUSY;
-    T214Write(s->BaseAddress, SDHC_INTERRUPT_STATUS, 0xffffffff);
-    T214Write(s->BaseAddress, SDHC_INTERRUPT_STATUS_ENABLE, 0x037f8023);
+    T214Write(s->BaseAddress, SDHC_INTERRUPT_STATUS, 0xffffffffu);
+    T214Write(s->BaseAddress, SDHC_INTERRUPT_STATUS_ENABLE, 0x037f8023u);
     SdhcWriteRegisterUchar(s, SDHC_TIMEOUT_CONTROL, SDHC_TC_MAX_DATA_TIMEOUT);
     SdhcWriteRegisterUshort(s, SDHC_BLOCK_SIZE, 512);
     SdhcWriteRegisterUshort(s, SDHC_BLOCK_COUNT, 1);
@@ -93,7 +317,7 @@ static NTSTATUS T214ReadIdentitySector(PSDHC_EXTENSION s, ULONG Lba, PUCHAR Buff
             }
             received = TRUE;
         }
-        SdhcWriteRegisterUshort(s, SDHC_INTERRUPT_STATUS, (USHORT)events);
+        SdhcWriteRegisterUshort(s, SDHC_INTERRUPT_STATUS, (USHORT)(events & 0x23u));
         if (received && commandDone && transferDone) return STATUS_SUCCESS;
         KeStallExecutionProcessor(5);
     }
@@ -143,7 +367,7 @@ static NTSTATUS T214ValidateDumpTarget(PSDHC_EXTENSION s)
     }
     s->NextReadLba = next;
     SdhcWriteRegisterUchar(s, SDHC_TIMEOUT_CONTROL, timeout);
-    T214Write(s->BaseAddress, SDHC_INTERRUPT_STATUS, 0xffffffff);
+    T214Write(s->BaseAddress, SDHC_INTERRUPT_STATUS, 0xffff00e3u);
     T214Write(s->BaseAddress, SDHC_INTERRUPT_STATUS_ENABLE, enables);
     T214Write(s->BaseAddress, SDHC_INTERRUPT_SIGNAL_ENABLE, signals);
     return status;
@@ -151,8 +375,9 @@ static NTSTATUS T214ValidateDumpTarget(PSDHC_EXTENSION s)
 
 static NTSTATUS T214PrepareDumpWrite(PSDHC_EXTENSION s, PSDPORT_REQUEST r)
 {
-    if (!s->CrashdumpMode || r->Type != SdRequestTypeCommandWithTransfer ||
-        (r->Command.Index != 24 && r->Command.Index != 25) ||
+    if (!s->CrashdumpMode || (r->Command.Index != 24 && r->Command.Index != 25))
+        return STATUS_SUCCESS;
+    if (r->Type != SdRequestTypeCommandWithTransfer ||
         !LiteBlocksInExtent(r->Command.Argument, r->Command.BlockCount, WINARM_FIRST, WINARM_COUNT) ||
         (s->TargetFacts & LiteWriteFacts) == LiteWriteFacts)
         return STATUS_SUCCESS;

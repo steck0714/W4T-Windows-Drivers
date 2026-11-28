@@ -62,12 +62,13 @@ typedef struct {
  UCHAR *Pwm,*Car,*BacklightPwm; ULONG FanOffset,Duty,DisplayState,LastTemp,BootCpuKhz,Brightness;
  void *Sensor,*SensorLock,*Timer,*BacklightLock,*FanLock,*Device;
  BOOLEAN IsLite,Stopping,TimerStopping,BacklightReady,CpuConfigured,CpuApplied,TempValid,CpuOverclockEnabled;
+ BOOLEAN SuspendCompleted; NTSTATUS SuspendStatus;
  unsigned TimerLock;
  ULONG FanProfile,FanTargetPwm,FanProfileFlags;
  uint64_t FanSampleTime;
  struct sw_fan_filter FanFilter;
  struct {ULONG CpuKhz;} Config;
- ULONG Failures; LONG Runs;
+ ULONG Failures,TempSeq; LONG Runs;
 } SWFAN_DEVICE,*PSWFAN_DEVICE;
 static PSWFAN_DEVICE SwFanGetDevice(void *d){return d;}
 static PSWFAN_DEVICE SwFanGetTimer(void *d){return d;}

@@ -130,7 +130,7 @@ Revision History:
 
 #define SDHC_CMD_TYPE_SUSPEND           0x0040
 #define SDHC_CMD_TYPE_RESUME            0x0080
-#define SDHC_CMD_TYPE_ABORT             0x0060
+#define SDHC_CMD_TYPE_ABORT             0x00c0
 
 //
 // Bits defined in SDHC_PRESENT_STATE
@@ -1410,6 +1410,10 @@ typedef struct _SDHC_EXTENSION {
     BOOLEAN T214ContextValid;
     ULONG T214Saves, T214Restores, T214ResumeStatus;
     BOOLEAN T214CardOn, T214Voltage18, T214Tuned, T214DmaActive, T214DmaComplete, T214DmaFault;
+    BOOLEAN T214BorrowedDumpMaps, T214DumpFreshPower;
+    ULONGLONG T214DumpDeadline;
+    BOOLEAN T214DumpPioStarted;
+    UCHAR T214DumpWriteFailures;
 #if NV_T214_DDR200
     UCHAR T214Scr[8], T214SwitchStatus[64], T214Cid[16];
     ULONG T214CardInfoValid, T214Rca;
@@ -1432,7 +1436,10 @@ typedef struct _SDHC_EXTENSION {
     UCHAR IssuedWriteIndex;
     BOOLEAN AppPrefixAccepted;
 #endif
-      
+    /* Normal SDPORT slots only. Cleanup receives this opaque miniport owner. */
+    PSD_MINIPORT OwnerMiniport;
+    LIST_ENTRY ActiveLink;
+
 } SDHC_EXTENSION, *PSDHC_EXTENSION;
 
 // ---------------------------------------------------------------------------

@@ -35,6 +35,7 @@ typedef struct {
  UCHAR *Car; LITE_PERFORMANCE Config; void *Pmic; LARGE_INTEGER PmicIds[2];
  ULONG ConnectionCount,BootPllx,BootCpuKhz;UCHAR BootVout;
  BOOLEAN CpuConfigured,CpuApplied,CpuThrottled,CpuOverclockEnabled;
+ ULONG LastTemp,TempSeq; BOOLEAN TempValid;
 } SWFAN_DEVICE,*PSWFAN_DEVICE;
 static PSWFAN_DEVICE SwFanGetDevice(void *d){return d;}
 static void SwFanTrace(const void *n,ULONG v){(void)n;(void)v;}
@@ -59,6 +60,7 @@ static void regwrite(ULONG *p,ULONG v){
 #define WRITE_REGISTER_ULONG(p,v) regwrite((p),(v))
 #include "../src/t214/clock.h"
 int main(void){
+ (void)&SwCpuApply;
  ULONG regs[64]={0};car=regs;regs[0x20/4]=0x20008888;
  regs[0xe0/4]=(1u<<30)|(1u<<27)|(2u<<20)|(156u<<8)|2u;
  SWFAN_DEVICE d={0};d.Car=(UCHAR*)regs;d.Config.CpuKhz=LITE_CPU_KHZ;

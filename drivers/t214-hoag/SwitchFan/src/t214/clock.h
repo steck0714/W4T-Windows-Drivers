@@ -199,6 +199,12 @@ static VOID SwCpuTemperature(PSWFAN_DEVICE Dev, ULONG Temp, BOOLEAN Valid)
     NTSTATUS Status;
     SwFanCpuLock(Dev);
     if (!Dev->CpuConfigured) { SwFanCpuUnlock(Dev); return; }
+    /* Consume the latest SensorLock->CpuLock published sample if one exists so
+     * a delayed timer callback can never downgrade a newer hot/invalid sample. */
+    if (Dev->TempSeq != 0u) {
+        Temp = Dev->LastTemp;
+        Valid = Dev->TempValid;
+    }
 #ifdef SWFAN_HAVE_DFLL
     if (Dev->PowerMode < SwNvpCount || Dev->Dfll.FaultLatched) {
         (VOID)SwFanDvfsUpdateLocked(Dev, Temp, Valid);

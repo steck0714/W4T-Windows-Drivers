@@ -206,6 +206,9 @@ static BOOLEAN SwFanDfllAcquireClocks(PSWFAN_DEVICE d, ULONG *i2c_khz)
 static NTSTATUS SwFanDfllStopLocked(PSWFAN_DEVICE d)
 {
     struct sw_dfll_io io = SwFanDfllIo(d);
+    if (!d->Car) return d->Dfll.LastStatus = STATUS_DEVICE_NOT_READY;
+    for (ULONG i = 0; i < SwDfllResourceCount; ++i)
+        if (!d->Dfll.Map[i]) return d->Dfll.LastStatus = STATUS_DEVICE_NOT_READY;
     if (d->Dfll.Control.prepared && !SwDfllStop(&io, &d->Dfll.Control))
         return d->Dfll.LastStatus = STATUS_DEVICE_HARDWARE_ERROR;
     if (!SwFanDfllReleaseClocks(d)) return d->Dfll.LastStatus = STATUS_DEVICE_HARDWARE_ERROR;

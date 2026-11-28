@@ -94,7 +94,7 @@ typedef struct {
     BOOLEAN IsLite, Stopping, BacklightReady;
     BOOLEAN CpuConfigured, CpuApplied, CpuThrottled, CpuOverclockEnabled;
     BOOLEAN BaseCpuOverclockEnabled, GpuBridgeSeen, TempValid;
-    ULONG DisplayState, Duty, LastTemp;
+    ULONG DisplayState, Duty, LastTemp, TempSeq;
     ULONG PowerMode, PolicySeq;
     volatile LONG GpuDvfsPolicy;
     ULONG GpuReportedKhz, GpuReportedUv, GpuStatusWord;
@@ -200,6 +200,7 @@ static NTSTATUS WdfRequestRetrieveOutputBuffer(WDFREQUEST r, size_t min_len, PVO
     return STATUS_SUCCESS;
 }
 static ULONGLONG interrupt_time = 10000000;
+static ULONGLONG advance_on_pmic_read = 0;
 static ULONGLONG KeQueryInterruptTime(void) { return interrupt_time; }
 static NTSTATUS SwFanReadReg(void *t, UCHAR reg, UCHAR *v)
 {
@@ -212,6 +213,7 @@ static NTSTATUS SwFanReadReg(void *t, UCHAR reg, UCHAR *v)
         return STATUS_SUCCESS;
     }
     assert(t == (void *)1 && pmic_locked);
+    if (advance_on_pmic_read) interrupt_time += advance_on_pmic_read;
     *v = pmic_regs[reg];
     return STATUS_SUCCESS;
 }
@@ -225,18 +227,20 @@ static NTSTATUS SwFanSampleTemp(PSWFAN_DEVICE Dev, PULONG OutTemp)
     if (Dev->Stopping || Dev->Sensor == NULL) { SwFanSensorUnlock(Dev); return STATUS_DEVICE_NOT_READY; }
     Status = SwFanReadReg(Dev->Sensor, TMP451_REMOTE, &Remote);
     if (NT_SUCCESS(Status)) Status = SwFanReadReg(Dev->Sensor, TMP451_LOCAL, &Local);
+    if (NT_SUCCESS(Status)) {
+        Temp = (Remote > Local) ? Remote : Local;
+        SwFanCpuLock(Dev);
+        if (!Dev->Stopping) {
+            Dev->LastTemp = Temp;
+            Dev->TempValid = TRUE;
+            ++Dev->TempSeq;
+            Dev->SocTempC = Remote;
+            Dev->BoardTempC = Local;
+            Dev->TempSampleTime = KeQueryInterruptTime();
+        } else Status = STATUS_DEVICE_NOT_READY;
+        SwFanCpuUnlock(Dev);
+    }
     SwFanSensorUnlock(Dev);
-    if (!NT_SUCCESS(Status)) return Status;
-    Temp = (Remote > Local) ? Remote : Local;
-    SwFanCpuLock(Dev);
-    if (!Dev->Stopping) {
-        Dev->LastTemp = Temp;
-        Dev->TempValid = TRUE;
-        Dev->SocTempC = Remote;
-        Dev->BoardTempC = Local;
-        Dev->TempSampleTime = KeQueryInterruptTime();
-    } else Status = STATUS_DEVICE_NOT_READY;
-    SwFanCpuUnlock(Dev);
     if (NT_SUCCESS(Status) && OutTemp != NULL) *OutTemp = Temp;
     return Status;
 }
@@ -435,6 +439,45 @@ static void test_emc_gpu_vote(PSWFAN_DEVICE d)
     assert(send_gpu_pmic(d,&op) == STATUS_INVALID_DEVICE_STATE);
     op = (struct tg_gpu_pmic_request){0x33,TG_GPU_PMIC_RELEASE_RAIL,1,0x5414};
     assert(send_gpu_pmic(d,&op) == STATUS_SUCCESS && pmic_regs[0x06] == 0x54 && pmic_regs[0x23] == 20);
+
+    /* V7-01 + A05 SwitchFan claim_token & cross-reload handoff verification:
+     * (1) Tokenized CLAIM_RAIL returns ACK | tok2 and sets claimed=true;
+     * (2) Handoff REPORT_GPU_STATUS records & revokes (1->0) isolation across KMD reload;
+     * (3) Newer CLAIM_RAIL advances claim_token to tok3 and rejects stale tok2 RELEASE_RAIL
+     *     with STATUS_INVALID_DEVICE_STATE BEFORE touching PMIC registers! */
+    op = (struct tg_gpu_pmic_request){2u,TG_GPU_PMIC_CLAIM_RAIL,1,TG_GPU_EMC_VOTE_ABI};
+    assert(send_gpu_pmic(d,&op) == STATUS_SUCCESS && d->EmcGpuVote.claimed && !d->EmcGpuVote.released);
+    uint32_t tok2 = op.address & 0xffffu;
+    assert((op.address & TG_GPU_RAIL_STATE_ACK) && tok2 >= 2u && d->EmcGpuVote.claim_token == tok2);
+    op = (struct tg_gpu_pmic_request){TG_GPU_RAIL_HANDOFF_MAGIC | 0x33u, TG_GPU_PMIC_REPORT_GPU_STATUS, 1,
+        (tok2 << 16) | TG_GPU_RAIL_STATE_HANDOFF | TG_GPU_RAIL_STATE_ISOLATED};
+    assert(send_gpu_pmic(d,&op) == STATUS_SUCCESS);
+    op = (struct tg_gpu_pmic_request){TG_GPU_RAIL_QUERY_MAGIC, TG_GPU_PMIC_QUERY_ADDRESS, 0, 0};
+    assert(send_gpu_pmic(d,&op) == STATUS_SUCCESS && op.value == 0x33u &&
+           op.address == (TG_GPU_RAIL_STATE_ACK | TG_GPU_RAIL_STATE_CLAIMED |
+                          TG_GPU_RAIL_STATE_HANDOFF | TG_GPU_RAIL_STATE_ISOLATED) &&
+           (op.write & 0xffffu) == tok2);
+    /* Sticky 1->0 revocation updates handoff_isolated to 0 immediately: */
+    op = (struct tg_gpu_pmic_request){TG_GPU_RAIL_HANDOFF_MAGIC | 0x33u, TG_GPU_PMIC_REPORT_GPU_STATUS, 1,
+        (tok2 << 16) | TG_GPU_RAIL_STATE_HANDOFF};
+    assert(send_gpu_pmic(d,&op) == STATUS_SUCCESS);
+    op = (struct tg_gpu_pmic_request){TG_GPU_RAIL_QUERY_MAGIC, TG_GPU_PMIC_QUERY_ADDRESS, 0, 0};
+    assert(send_gpu_pmic(d,&op) == STATUS_SUCCESS &&
+           !(op.address & TG_GPU_RAIL_STATE_ISOLATED) && (op.address & TG_GPU_RAIL_STATE_HANDOFF));
+    /* New generation CLAIM_RAIL advances token and rejects stale tok2 RELEASE_RAIL: */
+    op = (struct tg_gpu_pmic_request){tok2 + 1u, TG_GPU_PMIC_CLAIM_RAIL, 1, TG_GPU_EMC_VOTE_ABI};
+    assert(send_gpu_pmic(d,&op) == STATUS_SUCCESS);
+    uint32_t tok3 = op.address & 0xffffu;
+    assert(tok3 > tok2 && d->EmcGpuVote.claimed && !d->EmcGpuVote.handoff_active);
+    pmic_regs[0x23] = 110; pmic_regs[0x06] = 0x55;
+    op = (struct tg_gpu_pmic_request){0x33, TG_GPU_PMIC_RELEASE_RAIL, 1, (tok2 << 16) | 0x5414u};
+    assert(send_gpu_pmic(d,&op) == STATUS_INVALID_DEVICE_STATE &&
+           d->EmcGpuVote.claimed && pmic_regs[0x06] == 0x55 && pmic_regs[0x23] == 110);
+    /* Matching tok3 RELEASE_RAIL succeeds and clears claimed & claim_token: */
+    op = (struct tg_gpu_pmic_request){0x33, TG_GPU_PMIC_RELEASE_RAIL, 1, (tok3 << 16) | 0x5414u};
+    assert(send_gpu_pmic(d,&op) == STATUS_SUCCESS && !d->EmcGpuVote.claimed &&
+           d->EmcGpuVote.released && d->EmcGpuVote.claim_token == 0u &&
+           pmic_regs[0x06] == 0x54 && pmic_regs[0x23] == 20);
 }
 
 int main(void)
@@ -478,6 +521,7 @@ int main(void)
     d.ConnectionCount = 3;
     d.TempValid = TRUE;
     d.LastTemp = 41;
+    d.TempSampleTime = interrupt_time;
     d.Duty = 51;
     d.CpuOverclockEnabled = TRUE;
     d.BaseCpuOverclockEnabled = TRUE;
@@ -632,28 +676,75 @@ int main(void)
     op = (struct tg_gpu_pmic_request){ 0, TG_GPU_PMIC_QUERY_TEMP, 0, 0 };
     assert(send_gpu_pmic(&d, &op) == STATUS_SUCCESS && op.value == 44 && d.TempValid && d.LastTemp == 44 && sensor_reads == 2);
 
-    /* On-demand sensor failure during D0Entry window rejects cleanly. */
+    /* On-demand sensor failure propagates its true NTSTATUS (e.g. STATUS_IO_TIMEOUT)
+     * instead of masking it as STATUS_DEVICE_NOT_READY. */
     d.TempValid = FALSE;
     fail_sensor_read = true;
     op = (struct tg_gpu_pmic_request){ 0, TG_GPU_PMIC_QUERY_TEMP, 0, 0 };
-    assert(send_gpu_pmic(&d, &op) == STATUS_DEVICE_NOT_READY && !d.TempValid);
+    assert(send_gpu_pmic(&d, &op) == STATUS_IO_TIMEOUT && !d.TempValid);
     op = (struct tg_gpu_pmic_request){ 0x33, 0x06, 1, 1 };
-    assert(send_gpu_pmic(&d, &op) == STATUS_DEVICE_NOT_READY && !pmic_locked && !sensor_locked);
+    assert(send_gpu_pmic(&d, &op) == STATUS_IO_TIMEOUT && !pmic_locked && !sensor_locked && !cpu_locked);
     fail_sensor_read = false;
+
+    /* Stale cached temperature (> 5 s old) triggers a fresh on-demand sample. */
+    d.TempValid = TRUE;
+    d.LastTemp = 40;
+    d.TempSampleTime = interrupt_time;
+    interrupt_time += SWFAN_TEMP_MAX_AGE_100NS + 10000ULL;
+    sensor_remote = 47;
+    sensor_reads = 0;
+    op = (struct tg_gpu_pmic_request){ 0, TG_GPU_PMIC_QUERY_TEMP, 0, 0 };
+    assert(send_gpu_pmic(&d, &op) == STATUS_SUCCESS && op.value == 47 && sensor_reads == 2);
 
     /* On-demand over-temperature (>=80 C) populates TempValid but blocks M1 enable. */
     d.TempValid = FALSE;
     sensor_remote = 82;
     op = (struct tg_gpu_pmic_request){ 0x33, 0x06, 1, 1 };
-    assert(send_gpu_pmic(&d, &op) == STATUS_DEVICE_NOT_READY && d.TempValid && d.LastTemp == 82);
+    assert(send_gpu_pmic(&d, &op) == STATUS_DEVICE_NOT_READY && d.TempValid && d.LastTemp == 82 && !cpu_locked);
+
+    /* M2 regression: a newer 85 C sample published under SensorLock->CpuLock
+     * must NEVER be overwritten back to 42 C by a delayed SwCpuTemperature call! */
+    d.TempValid = FALSE;
+    sensor_remote = 85;
+    sensor_local = 45;
+    op = (struct tg_gpu_pmic_request){ 0, TG_GPU_PMIC_QUERY_TEMP, 0, 0 };
+    assert(send_gpu_pmic(&d, &op) == STATUS_SUCCESS && op.value == 85 && d.TempSeq > 0);
+    SwCpuTemperature(&d, 42, TRUE);
+    assert(d.LastTemp == 85 && d.TempValid);
+    op = (struct tg_gpu_pmic_request){ 0, TG_GPU_PMIC_QUERY_TEMP, 0, 0 };
+    assert(send_gpu_pmic(&d, &op) == STATUS_SUCCESS && op.value == 85);
+    op = (struct tg_gpu_pmic_request){ 0x33, 0x06, 1, 1 };
+    assert(send_gpu_pmic(&d, &op) == STATUS_DEVICE_NOT_READY && !cpu_locked && !pmic_locked);
+
+    /* Zero timestamp with TempValid=TRUE is treated as unsampled (triggers fresh read). */
+    d.TempValid = TRUE;
+    d.LastTemp = 40;
+    d.TempSampleTime = 0;
+    sensor_remote = 46;
+    sensor_reads = 0;
+    op = (struct tg_gpu_pmic_request){ 0, TG_GPU_PMIC_QUERY_TEMP, 0, 0 };
+    assert(send_gpu_pmic(&d, &op) == STATUS_SUCCESS && op.value == 46 && sensor_reads == 2 && d.TempSampleTime != 0);
 
     /* Cool on-demand sample allows M1 enable immediately after D0Entry. */
     d.TempValid = FALSE;
     sensor_remote = 43;
+    sensor_local = 37;
     pmic_regs[0x23] = 110;
     pmic_regs[0x06] = 0x54;
     op = (struct tg_gpu_pmic_request){ 0x33, 0x06, 1, 1 };
-    assert(send_gpu_pmic(&d, &op) == STATUS_SUCCESS && pmic_regs[0x06] == 0x55 && d.TempValid && d.LastTemp == 43);
+    assert(send_gpu_pmic(&d, &op) == STATUS_SUCCESS && pmic_regs[0x06] == 0x55 && d.TempValid && d.LastTemp == 43 && !cpu_locked);
+
+    /* A03 / T9 regression: sample age 4.99 s at dual-lock entry + 20 ms consumed
+     * across M1_VOUT/ENABLE pre-reads reaches 5.01 s -> must reject M1 enable! */
+    pmic_regs[0x06] = 0x54;
+    d.TempValid = TRUE;
+    d.LastTemp = 45;
+    d.TempSampleTime = interrupt_time;
+    interrupt_time += SWFAN_TEMP_MAX_AGE_100NS - 100000ULL; /* 4.99 s old */
+    advance_on_pmic_read = 100000ULL; /* +10 ms per pre-read => +20 ms => 5.01 s */
+    op = (struct tg_gpu_pmic_request){ 0x33, 0x06, 1, 1 };
+    assert(send_gpu_pmic(&d, &op) == STATUS_DEVICE_NOT_READY && pmic_regs[0x06] == 0x54 && !cpu_locked && !pmic_locked);
+    advance_on_pmic_read = 0;
 
     /* Unsupported / invalid inputs rejected cleanly. */
     assert(SwFanSetPowerMode(&d, 8) == STATUS_INVALID_PARAMETER);

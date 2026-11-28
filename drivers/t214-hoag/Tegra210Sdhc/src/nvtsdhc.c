@@ -107,6 +107,7 @@ static VOID LiteObserveRead(PSDHC_EXTENSION slot, PSDPORT_COMMAND cmd)
     }
 }
 
+#if NV_T214_SDR104
 /* DMA returns a complete range at once. Only the partition-table and volume
  * boot sectors affect the write guard; ordinary FAT/NTFS data need no
  * per-sector dispatch at DPC level. Keep the same identity checks in one place. */
@@ -130,6 +131,7 @@ static VOID LiteObserveReadRange(PSDHC_EXTENSION slot, PSDPORT_COMMAND cmd, ULON
     }
     slot->NextReadLba = blocks > MAXULONG - first ? MAXULONG : first + blocks;
 }
+#endif
 
 static BOOLEAN LiteBlocksInExtent(ULONG lba, ULONG count, ULONG first, ULONG length)
 {
@@ -188,6 +190,12 @@ static BOOLEAN LiteAllowRequest(PSDHC_EXTENSION slot, PSDPORT_REQUEST request)
     case 11: case 12: case 13: case 15: case 16: case 17: case 18: case 19: case 22:
     case 41: case 51: case 55:
         return TRUE;
+    case 23:
+        return !slot->AppPrefixAccepted &&
+               request->Type == SdRequestTypeCommandNoTransfer &&
+               cmd->Class == SdCommandClassStandard &&
+               (cmd->TransferType == SdTransferTypeNone || cmd->TransferType == SdTransferTypeUndefined) &&
+               cmd->TransferDirection == SdTransferDirectionUndefined && cmd->BlockCount == 0;
     case 52: case 53:
         return (cmd->Argument & 0x80000000u) == 0;
     default:
@@ -260,7 +268,6 @@ typedef struct _NV_DIAG {
 
     // Written to <service>\Parameters\Diag every NV_DIAG_REG_SECONDS once
     // Windows is running, to see how the slot performs.
-    PVOID Extension;
     ULONG ClockKhzRequested;
     ULONG ClockKhzActual;
     ULONG BusWidth;
@@ -323,12 +330,22 @@ typedef struct _NV_DIAG {
 #endif
 #define NV_PIO_POLL_US 200
 #define NV_PIO_POLL_BLOCKS 32
+#ifndef NV_PIO_DUMP_POLL_US
+#define NV_PIO_DUMP_POLL_US 500000
+#endif
 
 // Clock and bus settings written to <service>\Parameters\Diag when the port
 // sets them: a queued worker writes a copied snapshot, never in a port
 // callback or crashdump mode. No timer, flush, or extra hardware register reads.
 #ifndef NV_DIAG_CLOCK
 #define NV_DIAG_CLOCK 1
+#endif
+
+static PDRIVER_OBJECT NvRuntimeDriver;
+static KSPIN_LOCK NvSlotLock;
+static LIST_ENTRY NvActiveSlots;
+#if NV_DIAG_CLOCK
+static PSDHC_EXTENSION NvDiagSaveOwner;
 #endif
 
 static NV_DIAG NvDiag = { .LastErrorCommand = 0xFF };
@@ -363,6 +380,21 @@ static VOID T214ObserveCardInfo(PSDHC_EXTENSION s, PSDPORT_REQUEST request)
     }
 }
 #endif
+
+static VOID NvRegisterRuntimeSlot(PSDHC_EXTENSION slot)
+{
+    /* SDPORT's public slot header precedes PrivateExtension. Keep the parent
+     * opaque: Cleanup need only match its own slot registrations. */
+    PSDPORT_SLOT_EXTENSION port = CONTAINING_RECORD(slot, SDPORT_SLOT_EXTENSION, PrivateExtension);
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&NvSlotLock, &oldIrql);
+    if (slot->OwnerMiniport == NULL) {
+        slot->OwnerMiniport = port->Miniport;
+        InsertTailList(&NvActiveSlots, &slot->ActiveLink);
+    }
+    NvDiag.Initialized = TRUE;
+    KeReleaseSpinLock(&NvSlotLock, oldIrql);
+}
 
 static UCHAR
 NvDiagErrorKind(
@@ -451,7 +483,8 @@ NvDiagSetValue(
 /* Snapshot only from the port callback. The worker owns an immutable copy:
  * registry I/O can re-enter this boot miniport even at PASSIVE_LEVEL, and
  * must never execute synchronously inside a bus/request callback. */
-static WORK_QUEUE_ITEM NvDiagSaveItem;
+/* Each queued item references the normal driver object until its callback
+ * returns. Its snapshot lives in this image and contains no slot pointers. */
 static volatile LONG NvDiagSaveQueued;
 static volatile LONG64 NvDiagNextPeriodicSave;
 static struct { PCWSTR Name; ULONG Value; } NvDiagSnapshot[80];
@@ -466,19 +499,27 @@ static VOID NvDiagCapture(PCWSTR Name, ULONG Value)
 
 static VOID
 NvDiagSaveWorker(
-    _In_ PVOID Context
+    _In_ PVOID Driver,
+    _In_opt_ PVOID Context,
+    _In_ PIO_WORKITEM WorkItem
     )
 {
     static ULONG Saves;
     UNICODE_STRING Path;
     OBJECT_ATTRIBUTES Attributes;
     HANDLE Key;
+    KIRQL oldIrql;
+    UNREFERENCED_PARAMETER(Driver);
     UNREFERENCED_PARAMETER(Context);
+
+    KeAcquireSpinLock(&NvSlotLock, &oldIrql);
+    BOOLEAN active = NvDiagSaveOwner != NULL;
+    KeReleaseSpinLock(&NvSlotLock, oldIrql);
 
     RtlInitUnicodeString(&Path, NvDiag.RegistryPath);
     InitializeObjectAttributes(&Attributes, &Path,
                                OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
-    if (NT_SUCCESS(ZwCreateKey(&Key, KEY_SET_VALUE, &Attributes, 0, NULL,
+    if (active && NT_SUCCESS(ZwCreateKey(&Key, KEY_SET_VALUE, &Attributes, 0, NULL,
                                REG_OPTION_NON_VOLATILE, NULL))) {
         NvDiagSetValue(Key, L"Saves", ++Saves);
         for (ULONG i = 0; i < NvDiagSnapshotCount; ++i) {
@@ -486,7 +527,12 @@ NvDiagSaveWorker(
         }
         ZwClose(Key);
     }
+    IoUninitializeWorkItem(WorkItem);
+    ExFreePoolWithTag(WorkItem, 'wDvN');
+    KeAcquireSpinLock(&NvSlotLock, &oldIrql);
+    NvDiagSaveOwner = NULL;
     InterlockedExchange(&NvDiagSaveQueued, 0);
+    KeReleaseSpinLock(&NvSlotLock, oldIrql);
 }
 
 static VOID
@@ -494,8 +540,20 @@ NvDiagSaveClock(
     _In_ PSDHC_EXTENSION SdhcExtension
     )
 {
-    if (SdhcExtension->CrashdumpMode || NvDiag.RegistryPath[0] == L'\0' ||
+    if (SdhcExtension->CrashdumpMode || KeGetCurrentIrql() > DISPATCH_LEVEL ||
+        NvDiag.RegistryPath[0] == L'\0' ||
         InterlockedCompareExchange(&NvDiagSaveQueued, 1, 0) != 0) {
+        return;
+    }
+
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&NvSlotLock, &oldIrql);
+    PIO_WORKITEM work = NULL;
+    if (SdhcExtension->OwnerMiniport != NULL)
+        work = ExAllocatePool2(POOL_FLAG_NON_PAGED, IoSizeofWorkItem(), 'wDvN');
+    if (work == NULL) {
+        InterlockedExchange(&NvDiagSaveQueued, 0);
+        KeReleaseSpinLock(&NvSlotLock, oldIrql);
         return;
     }
 
@@ -591,11 +649,10 @@ NvDiagSaveClock(
     NvDiagCapture( L"DataBlocks", NvDiag.DataBlocks);
     NvDiagCapture( L"DataUs", NvDiag.DataUs);
     NvDiagCapture( L"GapUs", NvDiag.GapUs);
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    ExInitializeWorkItem(&NvDiagSaveItem, NvDiagSaveWorker, NULL);
-    ExQueueWorkItem(&NvDiagSaveItem, DelayedWorkQueue);
-#pragma clang diagnostic pop
+    NvDiagSaveOwner = SdhcExtension;
+    IoInitializeWorkItem(NvRuntimeDriver, work);
+    IoQueueWorkItemEx(work, NvDiagSaveWorker, DelayedWorkQueue, NULL);
+    KeReleaseSpinLock(&NvSlotLock, oldIrql);
 }
 
 static VOID
@@ -621,7 +678,6 @@ NvDiagThread(
     OBJECT_ATTRIBUTES Attributes;
     HANDLE Key;
     LARGE_INTEGER Interval;
-    PSDHC_EXTENSION Ext;
     ULONG Seconds = 0;
 
     UNREFERENCED_PARAMETER(Context);
@@ -639,7 +695,6 @@ NvDiagThread(
             continue;
         }
 
-        Ext = (PSDHC_EXTENSION) NvDiag.Extension;
         NvDiagSetValue(Key, L"Seconds", Seconds);
         NvDiagSetValue(Key, L"ClockKhzRequested", NvDiag.ClockKhzRequested);
         NvDiagSetValue(Key, L"ClockKhzActual", NvDiag.ClockKhzActual);
@@ -659,10 +714,16 @@ NvDiagThread(
         NvDiagSetValue(Key, L"RegClockControl", NvDiag.RegClockControl);
         NvDiagSetValue(Key, L"RegHostControl", NvDiag.RegHostControl);
         NvDiagSetValue(Key, L"RegPresentState", NvDiag.PresentState);
-        if (Ext != NULL) {
-            NvDiagSetValue(Key, L"BaseClockKhz",
-                           Ext->Capabilities.BaseClockFrequencyKhz);
+        KIRQL oldIrql;
+        ULONG baseClock = 0;
+        KeAcquireSpinLock(&NvSlotLock, &oldIrql);
+        BOOLEAN haveSlot = !IsListEmpty(&NvActiveSlots);
+        if (haveSlot) {
+            PSDHC_EXTENSION slot = CONTAINING_RECORD(NvActiveSlots.Blink, SDHC_EXTENSION, ActiveLink);
+            baseClock = slot->Capabilities.BaseClockFrequencyKhz;
         }
+        KeReleaseSpinLock(&NvSlotLock, oldIrql);
+        if (haveSlot) NvDiagSetValue(Key, L"BaseClockKhz", baseClock);
 
         // Write it to the hive file now, so it survives holding the power button.
         ZwFlushKey(Key);
@@ -728,6 +789,12 @@ Return Value:
         .PrivateExtensionSize = sizeof(SDHC_EXTENSION),
         .CrashdumpSupported = !NV_T210_LITE_SLOT || NV_T214_CRASHDUMP,
     };
+
+    if (DriverObject != NULL) {
+        NvRuntimeDriver = (PDRIVER_OBJECT)DriverObject;
+        KeInitializeSpinLock(&NvSlotLock);
+        InitializeListHead(&NvActiveSlots);
+    }
 
 #if NV_DIAG_STOP
     if (DriverObject != NULL) {
@@ -955,8 +1022,58 @@ Return value:
     //
 
     SdhcExtension->CrashdumpMode = CrashdumpMode;
+    if (CrashdumpMode) {
+        /* The dump copy has no membership in the normal controller list. */
+        SdhcExtension->OwnerMiniport = NULL;
+        InitializeListHead(&SdhcExtension->ActiveLink);
+    }
 #if NV_T214_SDR104
-    if (CrashdumpMode && KeGetCurrentIrql() != PASSIVE_LEVEL) return STATUS_NOT_SUPPORTED;
+    if (CrashdumpMode) {
+#if NV_T214_CRASHDUMP
+        if (Length < 0x200 || PhysicalBase.QuadPart != 0x700B0000) {
+            return STATUS_DEVICE_CONFIGURATION_ERROR;
+        }
+#else
+        if (KeGetCurrentIrql() != PASSIVE_LEVEL) return STATUS_NOT_SUPPORTED;
+#endif
+    }
+#endif
+
+#if NV_T214_CRASHDUMP
+    if (CrashdumpMode) {
+        /* The live driver may have gated or reset SDMMC1. Preparation
+         * must not touch its registers or take the clock from that driver. */
+        RtlZeroMemory(&SdhcExtension->Capabilities, sizeof(SdhcExtension->Capabilities));
+        Capabilities = &SdhcExtension->Capabilities;
+        Capabilities->SpecVersion = SDHC_SPEC_VERSION_3;
+        Capabilities->MaximumOutstandingRequests = 1;
+        Capabilities->MaximumBlockSize = 512;
+        Capabilities->MaximumBlockCount = 32;
+        Capabilities->BaseClockFrequencyKhz = 199680; /* set and checked at reset-all */
+        Capabilities->AlignmentRequirement = sizeof(ULONG) - 1;
+        Capabilities->PioTransferMaxThreshold = MAXULONG;
+        Capabilities->Flags.UsePioForRead = Capabilities->Flags.UsePioForWrite = TRUE;
+        Capabilities->Supported.Voltage33V = Capabilities->Supported.AutoCmd12 = 1;
+        SdhcExtension->OutstandingRequests[0] = NULL;
+        SdhcExtension->T214Bounce = NULL;
+        SdhcExtension->T214GateHandle = NULL;
+        SdhcExtension->T214Gate = NULL;
+        SdhcExtension->T214Car = SdhcExtension->T214Misc = SdhcExtension->T214Pmc = NULL;
+        SdhcExtension->T214I2c = SdhcExtension->T214Gpio = NULL;
+        SdhcExtension->T214BorrowedDumpMaps = FALSE;
+        SdhcExtension->T214DumpFreshPower = FALSE;
+        SdhcExtension->T214DumpDeadline = 0;
+        SdhcExtension->T214DumpPioStarted = FALSE;
+        SdhcExtension->T214DumpWriteFailures = 0;
+        SdhcExtension->T214DmaActive = SdhcExtension->T214DmaComplete = FALSE;
+        SdhcExtension->T214DmaFault = FALSE;
+        SdhcExtension->T214Voltage18 = SdhcExtension->T214CardOn = FALSE;
+#if NV_T214_DDR200
+        SdhcExtension->T214DdrActive = SdhcExtension->T214DdrFatal = FALSE;
+        SdhcExtension->T214DdrRecoverNeeded = FALSE;
+#endif
+        return STATUS_SUCCESS;
+    }
 #endif
 
     //
@@ -982,20 +1099,23 @@ Return value:
 
 #if NV_T210_LITE_SLOT
     {
-        PHYSICAL_ADDRESS CarAddress;
-        PULONG CarBase;
-        ULONG Source;
+        ULONG Source = 0;
 
         if (PhysicalBase.QuadPart != 0x700B0000) {
             return STATUS_DEVICE_CONFIGURATION_ERROR;
         }
-        CarAddress.QuadPart = NV_T210_CAR_BASE;
-        CarBase = MmMapIoSpaceEx(CarAddress, PAGE_SIZE, PAGE_READONLY | PAGE_NOCACHE);
-        if (CarBase == NULL) {
-            return STATUS_INSUFFICIENT_RESOURCES;
+        {
+            PHYSICAL_ADDRESS CarAddress;
+            PULONG CarBase;
+
+            CarAddress.QuadPart = NV_T210_CAR_BASE;
+            CarBase = MmMapIoSpaceEx(CarAddress, PAGE_SIZE, PAGE_READONLY | PAGE_NOCACHE);
+            if (CarBase == NULL) {
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+            Source = READ_REGISTER_ULONG(&CarBase[NV_T210_CLK_SOURCE_SDMMC1 / sizeof(ULONG)]);
+            MmUnmapIoSpace(CarBase, PAGE_SIZE);
         }
-        Source = READ_REGISTER_ULONG(&CarBase[NV_T210_CLK_SOURCE_SDMMC1 / sizeof(ULONG)]);
-        MmUnmapIoSpace(CarBase, PAGE_SIZE);
 #if NV_T214_SDR104
         Capabilities->BaseClockFrequencyKhz = T214InheritedClockKhz(Source);
 #else
@@ -1054,7 +1174,7 @@ Return value:
 
 #if NV_T214_SDR104
     if (Length < 0x200) return STATUS_NOT_SUPPORTED;
-    NTSTATUS t214Status = CrashdumpMode ? T214InitializeDump(SdhcExtension) : T214Initialize(SdhcExtension);
+    NTSTATUS t214Status = T214Initialize(SdhcExtension);
     if (!NT_SUCCESS(t214Status)) return t214Status;
 #endif
 #if NV_T210_ADMA32
@@ -1235,20 +1355,6 @@ Return value:
         Capabilities->Supported.Limit200mA = 1;
     }
 
-#if NV_T214_CRASHDUMP
-    if (CrashdumpMode) {
-        /* Keep the emergency path at default speed/3.3 V. No DMA,
-         * voltage switch, tuning interrupt or retuning timer is needed. */
-        Capabilities->Supported.HighSpeed = 0;
-        Capabilities->Supported.SDR50 = 0;
-        Capabilities->Supported.DDR50 = 0;
-        Capabilities->Supported.SDR104 = 0;
-        Capabilities->Supported.SignalingVoltage18V = 0;
-        Capabilities->Supported.TuningForSDR50 = 0;
-        Capabilities->Supported.SoftwareTuning = 0;
-        Capabilities->TuningTimerCountInSeconds = 0;
-    }
-#endif
 
     //
     // Initialize our array of outstanding requests to keep track
@@ -1276,8 +1382,9 @@ Return value:
 
     NvDiag.RegCapabilities = CapabilitiesReg.AsUlong;
     NvDiag.RegCapabilities2 = Capabilities2Reg.AsUlong;
-    NvDiag.Extension = SdhcExtension;
-    NvDiag.Initialized = TRUE;
+    if (!CrashdumpMode) {
+        NvRegisterRuntimeSlot(SdhcExtension);
+    }
     return STATUS_SUCCESS;
 }
 
@@ -1326,6 +1433,10 @@ Return value:
     }
 #endif
     switch (BusOperation->Type) {
+    case SdResetHw:
+        Status = SdhcExtension->CrashdumpMode ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+        break;
+
     case SdResetHost:
         Status = SdhcResetHost(SdhcExtension,
                                BusOperation->Parameters.ResetType);
@@ -1526,9 +1637,37 @@ Return value:
 {
 
     PSDHC_EXTENSION SdhcExtension;
+    USHORT HwEvents;
 
     SdhcExtension = (PSDHC_EXTENSION) PrivateExtension;
-    *Events = (ULONG) SdhcGetInterruptStatus(SdhcExtension);
+    *Errors = 0;
+    *CardChange = *SdioInterrupt = *Tuning = FALSE;
+    HwEvents = SdhcGetInterruptStatus(SdhcExtension);
+    *Events = (ULONG) HwEvents;
+    if (SdhcExtension->CrashdumpMode &&
+        (*Events & SDHC_IS_ERROR_INTERRUPT) == 0 &&
+        SdhcExtension->OutstandingRequests[0] != NULL) {
+
+        PSDPORT_REQUEST Request = SdhcExtension->OutstandingRequests[0];
+        ULONG Needed = Request->RequiredEvents & ~(*Events);
+        if ((Needed & SDHC_IS_CMD_COMPLETE) == 0 &&
+            (Needed & (SDHC_IS_BUFFER_WRITE_READY | SDHC_IS_BUFFER_READ_READY)) != 0) {
+
+            ULONG Present = SdhcReadRegisterUlong(SdhcExtension, SDHC_PRESENT_STATE);
+            if ((Needed & SDHC_IS_BUFFER_WRITE_READY) != 0 &&
+                (Present & SDHC_PS_BUFFER_WRITE_ENABLE) != 0) {
+                *Events |= SDHC_IS_BUFFER_WRITE_READY;
+            }
+            if ((Needed & SDHC_IS_BUFFER_READ_READY) != 0 &&
+                (Present & SDHC_PS_BUFFER_READ_ENABLE) != 0) {
+                *Events |= SDHC_IS_BUFFER_READ_READY;
+            }
+        }
+#if NV_T214_CRASHDUMP
+        *Errors = T214DumpTimeoutError(SdhcExtension, Request, *Events);
+        if (*Errors) *Events |= SDHC_IS_ERROR_INTERRUPT;
+#endif
+    }
 
     //
     // If there aren't any events to handle, then we don't need to
@@ -1543,7 +1682,9 @@ Return value:
     NvDiag.Interrupts += 1;
     if (*Events & SDHC_IS_ERROR_INTERRUPT) {
         NvDiag.ErrorInterrupts += 1;
-        *Errors = (ULONG) SdhcGetErrorStatus(SdhcExtension);
+        if (HwEvents & SDHC_IS_ERROR_INTERRUPT) {
+            *Errors = (ULONG) SdhcGetErrorStatus(SdhcExtension);
+        }
     }
 
     //
@@ -1551,10 +1692,12 @@ Return value:
     //
 
     if (*Events & SDHC_IS_CARD_DETECT) {
+        if (!NV_T210_LITE_SLOT || !SdhcExtension->CrashdumpMode) {
 #if NV_T210_LITE_WINARM_WRITE
-        LiteForgetCard(SdhcExtension);
+            LiteForgetCard(SdhcExtension);
 #endif
-        *CardChange = TRUE;
+            *CardChange = TRUE;
+        }
     }
 
     //
@@ -1580,7 +1723,9 @@ Return value:
     // See how Storport does this (if it does).
     //
 
-    SdhcAcknowledgeInterrupts(SdhcExtension, (USHORT) *Events);
+    if (HwEvents != 0) {
+        SdhcAcknowledgeInterrupts(SdhcExtension, HwEvents);
+    }
     *Events &= ~(SDHC_IS_CARD_DETECT |
                  SDHC_IS_CARD_INTERRUPT |
                  SDHC_IS_TUNING_INTERRUPT);
@@ -1619,7 +1764,10 @@ Return value:
     NTSTATUS Status;
 
     SdhcExtension = (PSDHC_EXTENSION) PrivateExtension;
+    if (SdhcExtension->CrashdumpMode && SdhcExtension->OutstandingRequests[0] != NULL)
+        return STATUS_DEVICE_BUSY;
 #if NV_T214_CRASHDUMP
+    USHORT blocksBefore = Request->Command.BlockCount;
     Status = T214PrepareDumpWrite(SdhcExtension, Request);
     if (!NT_SUCCESS(Status)) return Status;
 #endif
@@ -1718,7 +1866,25 @@ Return value:
         NvDiag.LastCommand = Request->Command.Index;
     }
 
+#if NV_T214_CRASHDUMP
+    if (SdhcExtension->CrashdumpMode && Status == STATUS_PENDING) {
+        BOOLEAN data = Request->Type == SdRequestTypeStartTransfer;
+        /* Reissuing a PIO request for the same untouched block is not progress. */
+        if (!data || !SdhcExtension->T214DumpPioStarted ||
+            Request->Command.BlockCount < blocksBefore) {
+            T214ArmDumpWait(SdhcExtension, Request->RequiredEvents);
+        }
+        SdhcExtension->T214DumpPioStarted = data;
+    }
+#endif
+
     if (!NT_SUCCESS(Status)) {
+#if NV_T210_LITE_WINARM_WRITE
+        if (SdhcExtension->CrashdumpMode) SdhcExtension->IssuedWriteCount = 0;
+        if (Request->Type != SdRequestTypeStartTransfer) {
+            SdhcExtension->AppPrefixAccepted = FALSE;
+        }
+#endif
         NvDiag.LastErrorCommand = Request->Command.Index;
         NvDiag.LastErrorKind = 8;
         if (Index < SDHC_MAX_OUTSTANDING_REQUESTS) SdhcExtension->OutstandingRequests[Index] = NULL;
@@ -1830,7 +1996,25 @@ Return value:
     if (Index == SDHC_MAX_OUTSTANDING_REQUESTS) {
         return;
     }
+#if NV_T214_CRASHDUMP
+    if (SdhcExtension->CrashdumpMode && !Errors && (Request->RequiredEvents & Events) &&
+        (Request->RequiredEvents & ~Events)) {
+        T214ArmDumpWait(SdhcExtension, Request->RequiredEvents & ~Events);
+    }
+#endif
     Request->RequiredEvents &= ~Events;
+#if NV_T214_CRASHDUMP
+    if (SdhcExtension->CrashdumpMode &&
+        (Request->Command.Index == 24 || Request->Command.Index == 25)) {
+        if (Errors) {
+            if (SdhcExtension->T214DumpWriteFailures < T214_DUMP_WRITE_ATTEMPTS)
+                ++SdhcExtension->T214DumpWriteFailures;
+        } else if (Request->Type == SdRequestTypeStartTransfer && !Request->Command.BlockCount &&
+                   !Request->RequiredEvents && (Events & SDHC_IS_TRANSFER_COMPLETE)) {
+            SdhcExtension->T214DumpWriteFailures = 0;
+        }
+    }
+#endif
 #if NV_T214_SDR104
     if (Errors && SdhcExtension->T214DmaActive) {
         SdhcExtension->T214DmaErrors++;
@@ -1844,6 +2028,7 @@ Return value:
 #endif
 #if NV_T210_LITE_WINARM_WRITE
     if (Errors) {
+        if (SdhcExtension->CrashdumpMode) SdhcExtension->IssuedWriteCount = 0;
         SdhcExtension->AppPrefixAccepted = FALSE;
     } else if (Request->Type == SdRequestTypeCommandNoTransfer &&
                (Events & SDHC_IS_CMD_COMPLETE) != 0) {
@@ -1872,10 +2057,22 @@ Return value:
         NvDiag.CommandsOk += 1;
     }
 
+    /* dumpsdport!Dump_WritePending stamps Request->Status with
+     * STATUS_MORE_PROCESSING_REQUIRED whenever IO_DUMP_WRITE_START yields
+     * STATUS_PENDING across polls (both before CMD_COMPLETE and after PIO
+     * pushed all blocks and awaits SDHC_IS_TRANSFER_COMPLETE). Preserve
+     * STATUS_MORE_PROCESSING_REQUIRED only when PIO StartTransfer still has
+     * remaining blocks to move. */
+    const BOOLEAN MorePioBlocks =
+        (Request->Type == SdRequestTypeStartTransfer) &&
+        (Request->Command.TransferMethod == SdTransferMethodPio) &&
+        (Request->Command.BlockCount != 0) &&
+        (Request->Status == STATUS_MORE_PROCESSING_REQUIRED);
+
     if ((Request == NvDiag.DataRequest) &&
         ((Errors != 0) ||
          ((Request->RequiredEvents == 0) &&
-          (Request->Status != STATUS_MORE_PROCESSING_REQUIRED)))) {
+          (!MorePioBlocks)))) {
 
         LARGE_INTEGER Frequency;
 
@@ -1912,10 +2109,10 @@ Return value:
 
     } else if (Request->RequiredEvents == 0) {
 #if NV_T214_DDR200
-        if (Request->Status != STATUS_MORE_PROCESSING_REQUIRED)
+        if (!MorePioBlocks)
             T214ObserveCardInfo(SdhcExtension, Request);
 #endif
-        if (Request->Status != STATUS_MORE_PROCESSING_REQUIRED) {
+        if (!MorePioBlocks) {
             Request->Status = STATUS_SUCCESS;
         }
 
@@ -1958,6 +2155,9 @@ Return value:
 
     InterruptMask = SdhcConvertEventsToHwMask(EventMask);
     SdhcExtension = (PSDHC_EXTENSION) PrivateExtension;
+#if NV_T214_CRASHDUMP
+    if (SdhcExtension->CrashdumpMode && !T214DumpEventsAccessible(SdhcExtension)) return;
+#endif
     if (Enable) {
         SdhcEnableInterrupt(SdhcExtension, 
                             InterruptMask);
@@ -1981,6 +2181,9 @@ SdhcSlotClearEvents(
 
     SdhcExtension = (PSDHC_EXTENSION) PrivateExtension;
     Interrupts = SdhcConvertEventsToHwMask(EventMask);
+#if NV_T214_CRASHDUMP
+    if (SdhcExtension->CrashdumpMode && !T214DumpEventsAccessible(SdhcExtension)) return;
+#endif
     SdhcAcknowledgeInterrupts(SdhcExtension, Interrupts);
 }
 
@@ -2118,13 +2321,31 @@ Return value:
 
 {
 
-    UNREFERENCED_PARAMETER(Miniport);
-#if NV_T214_SDR104
-    if (NvDiag.Extension != NULL) {
-        T214Release((PSDHC_EXTENSION)NvDiag.Extension);
-        NvDiag.Extension = NULL;
-    }
+    if (NvRuntimeDriver == NULL) return;
+    LIST_ENTRY retired;
+    KIRQL oldIrql;
+    InitializeListHead(&retired);
+    KeAcquireSpinLock(&NvSlotLock, &oldIrql);
+    for (PLIST_ENTRY entry = NvActiveSlots.Flink; entry != &NvActiveSlots; ) {
+        PSDHC_EXTENSION slot = CONTAINING_RECORD(entry, SDHC_EXTENSION, ActiveLink);
+        entry = entry->Flink;
+        if (slot->OwnerMiniport != Miniport) continue;
+        slot->OwnerMiniport = NULL;
+#if NV_DIAG_CLOCK
+        if (NvDiagSaveOwner == slot) NvDiagSaveOwner = NULL;
 #endif
+        RemoveEntryList(&slot->ActiveLink);
+        InsertTailList(&retired, &slot->ActiveLink);
+    }
+    KeReleaseSpinLock(&NvSlotLock, oldIrql);
+    while (!IsListEmpty(&retired)) {
+        PLIST_ENTRY entry = RemoveHeadList(&retired);
+#if NV_T214_SDR104
+        T214Release(CONTAINING_RECORD(entry, SDHC_EXTENSION, ActiveLink));
+#else
+        UNREFERENCED_PARAMETER(entry);
+#endif
+    }
 }
 
 //-----------------------------------------------------------------------------
@@ -2265,7 +2486,9 @@ Return value:
     if (SdhcExtension->CrashdumpMode && ResetType == SdResetTypeAll) {
         /* Reset-all stops inherited DMA/DDR host state. With SDCLK still
          * off, remove the card's vendor mode before SDPORT sends CMD0. */
-        return T214Power(SdhcExtension, TRUE);
+        NTSTATUS powerStatus = T214Power(SdhcExtension, TRUE);
+        if (NT_SUCCESS(powerStatus)) SdhcExtension->T214DumpFreshPower = TRUE;
+        return powerStatus;
     }
 #endif
     return STATUS_SUCCESS;
@@ -2316,7 +2539,8 @@ Return value:
     }
 #endif
 #if NV_T214_SDR104
-    ULONG limit = (SdhcExtension->T214Voltage18 && SdhcExtension->SpeedMode == SdhcSpeedModeSDR104) ? 200000 : 50000;
+    ULONG limit = SdhcExtension->CrashdumpMode ? 25000 :
+        ((SdhcExtension->T214Voltage18 && SdhcExtension->SpeedMode == SdhcSpeedModeSDR104) ? 200000 : 50000);
     if (Frequency > limit) Frequency = limit;
 #else
     if (NV_T210_LITE_SLOT && Frequency > 25000) Frequency = 25000;
@@ -2375,7 +2599,7 @@ Return value:
     // for fixed eMMC devices during runtime Dx transitions.
     //
 
-    Delay = (SdhcExtension->Removable) ? (10 * 1000) : 50;
+    Delay = (SdhcExtension->Removable || SdhcExtension->CrashdumpMode) ? (10 * 1000) : 50;
     SdPortWait(Delay);
 #if NV_DIAG_CLOCK
     NvDiagSaveClock(SdhcExtension);
@@ -2616,6 +2840,11 @@ Return value:
         return STATUS_NOT_SUPPORTED;
     SdhcExtension->SpeedMode = Speed == SdBusSpeedSDR104 ? SdhcSpeedModeSDR104 :
                               Speed == SdBusSpeedHigh ? SdhcSpeedModeHigh : SdhcSpeedModeNormal;
+    if (SdhcExtension->T214Voltage18 &&
+        (Speed == SdBusSpeedNormal || Speed == SdBusSpeedHigh)) {
+        return SdhcSetUhsMode(SdhcExtension,
+                              Speed == SdBusSpeedHigh ? SDHC_HC2_SDR25 : SDHC_HC2_SDR12);
+    }
 #endif
     switch (Speed) {
     case SdBusSpeedNormal:
@@ -2919,7 +3148,8 @@ Return value:
 
 #if NV_T214_SDR104
 #if NV_T214_DDR200
-    NTSTATUS t214Status = T214DdrTry(SdhcExtension);
+    NTSTATUS t214Status = SdhcExtension->CrashdumpMode ?
+        T214Tune(SdhcExtension) : T214DdrTry(SdhcExtension);
 #else
     NTSTATUS t214Status = T214Tune(SdhcExtension);
 #endif
@@ -3175,6 +3405,11 @@ Return value:
         SdhcReadRegisterUshort(SdhcExtension, SdhcExtension->CrashdumpMode ?
                               SDHC_INTERRUPT_STATUS_ENABLE : SDHC_INTERRUPT_SIGNAL_ENABLE);
 
+#if NV_T210_LITE_SLOT
+    if (SdhcExtension->CrashdumpMode) {
+        NormalInterruptMask &= ~SDHC_IS_CARD_DETECT;
+    }
+#endif
     InterruptEnable |= NormalInterruptMask;
 
     //
@@ -3542,6 +3777,7 @@ Return value:
 
 {
 
+    ULONG Argument;
     PSDPORT_COMMAND Command;
     USHORT CommandType;
     USHORT CommandReg;
@@ -3553,9 +3789,29 @@ Return value:
     //
 
     Command = &Request->Command;
-    if ((Command->TransferType != SdTransferTypeNone) &&
-        (Command->TransferType != SdTransferTypeUndefined)) {
+    BOOLEAN hasData = Command->TransferType != SdTransferTypeNone &&
+                      Command->TransferType != SdTransferTypeUndefined;
+    BOOLEAN dumpStop = SdhcExtension->CrashdumpMode &&
+        (Command->Type == SdCommandTypeAbort ||
+         (Command->Index == 12 && Command->Class == SdCommandClassStandard && !hasData));
+    if (SdhcExtension->CrashdumpMode) {
+        ULONG InhibitMask = SDHC_PS_CMD_INHIBIT;
+        if (dumpStop && hasData) return STATUS_INVALID_PARAMETER;
+        if (!dumpStop && (hasData || Command->ResponseType == SdResponseTypeR1B ||
+                         Command->ResponseType == SdResponseTypeR5B)) {
+            InhibitMask |= SDHC_PS_DAT_INHIBIT;
+        }
+        for (ULONG Waited = 0;
+             (SdhcReadRegisterUlong(SdhcExtension, SDHC_PRESENT_STATE) & InhibitMask) != 0;
+             Waited += 5) {
+            if (Waited >= NV_PIO_DUMP_POLL_US) {
+                return STATUS_DEVICE_BUSY;
+            }
+            KeStallExecutionProcessor(5);
+        }
+    }
 
+    if (hasData) {
         Status = SdhcBuildTransfer(SdhcExtension, Request);
         if (!NT_SUCCESS(Status)) {
             return Status;
@@ -3566,7 +3822,19 @@ Return value:
     // Set the response parameters based off the given response type.
     //
 
-    SdhcWriteRegisterUlong(SdhcExtension, SDHC_ARGUMENT, Command->Argument);
+    /* dumpsdport!Dump_Open clears Capabilities.Supported.SignalingVoltage18V
+     * and cold-power-cycles the slot to 3.3 V, yet its ACMD41 helper still
+     * sets S18R (bit 24) whenever CMD8 succeeded and then skips CMD11.
+     * A UHS-I card that accepts S18R=1 (S18A=1) ignores CMD2 until CMD11;
+     * clear S18R on crash-dump ACMD41 so the card completes init at 3.3 V. */
+    Argument = Command->Argument;
+    if (SdhcExtension->CrashdumpMode &&
+        (Command->Index == 41) &&
+        ((Command->Class == SdCommandClassApp) ||
+         (Command->ResponseType == SdResponseTypeR3))) {
+        Argument &= ~0x01000000u;
+    }
+    SdhcWriteRegisterUlong(SdhcExtension, SDHC_ARGUMENT, Argument);
 
     CommandReg = Command->Index << 8;
     switch (Command->ResponseType) {
@@ -3609,7 +3877,7 @@ Return value:
         TransferMode = 0;
         CommandReg |= SDHC_CMD_DATA_PRESENT;
 
-    } else {
+    } else if (!SdhcExtension->CrashdumpMode) {
         TransferMode = 
             SdhcReadRegisterUshort(SdhcExtension, SDHC_TRANSFER_MODE);
 
@@ -3669,6 +3937,34 @@ Return value:
         }
     }
 
+    if (SdhcExtension->CrashdumpMode) {
+#if NV_T214_SDR104
+        SdhcExtension->T214DumpFreshPower = FALSE;
+#endif
+        SdhcWriteRegisterUlong(SdhcExtension, SDHC_INTERRUPT_SIGNAL_ENABLE, 0);
+        if ((SdhcReadRegisterUshort(SdhcExtension, SDHC_INTERRUPT_STATUS) &
+             SDHC_IS_ERROR_INTERRUPT) != 0) {
+            SdhcWriteRegisterUshort(SdhcExtension, SDHC_AUTO_CMD12_ERROR_STATUS, 0xFFFF);
+            SdhcWriteRegisterUshort(SdhcExtension, SDHC_AUTO_CMD12_ERROR_STATUS, 0);
+            SdhcWriteRegisterUshort(SdhcExtension, SDHC_ERROR_STATUS, 0xFFFF);
+        }
+        SdhcWriteRegisterUshort(SdhcExtension,
+                                SDHC_INTERRUPT_STATUS,
+                                SDHC_IS_CMD_COMPLETE |
+                                    SDHC_IS_TRANSFER_COMPLETE |
+                                    SDHC_IS_BUFFER_READ_READY |
+                                    SDHC_IS_BUFFER_WRITE_READY |
+                                    SDHC_IS_CARD_DETECT);
+        SdhcWriteRegisterUshort(
+            SdhcExtension,
+            SDHC_INTERRUPT_STATUS_ENABLE,
+            SdhcReadRegisterUshort(SdhcExtension, SDHC_INTERRUPT_STATUS_ENABLE) |
+                (USHORT)Request->RequiredEvents |
+                SDHC_IS_CMD_COMPLETE |
+                SDHC_IS_TRANSFER_COMPLETE);
+        SdhcWriteRegisterUshort(SdhcExtension, SDHC_ERROR_STATUS_ENABLE, 0xFFFF);
+    }
+
     //
     // Issue the actual command.
     //
@@ -3688,7 +3984,7 @@ Return value:
         SdhcExtension->IssuedWriteCount = Command->BlockCount;
     }
 #endif
-    CommandReg |= CommandType;
+    CommandReg |= dumpStop ? SDHC_CMD_TYPE_ABORT : CommandType;
     SdhcWriteRegisterUshort(SdhcExtension, SDHC_COMMAND, CommandReg);
 
     //
@@ -3811,7 +4107,12 @@ Return value:
     if (BlockCount > 1 || (NV_T210_LITE_WINARM_WRITE && Request->Command.Index == 25)) {
         TransferMode |= SDHC_TM_MULTIBLOCK;
         TransferMode |= SDHC_TM_BLKCNT_ENABLE;
-        TransferMode |= SDHC_TM_AUTO_CMD12_ENABLE;
+        if (SdhcExtension->CrashdumpMode && Request->Command.UseAutoCmd23)
+            return STATUS_NOT_SUPPORTED; /* the dump profile advertises only Auto CMD12 */
+        if (Request->Command.TransferType != SdTransferTypeMultiBlockNoStop &&
+            (!SdhcExtension->CrashdumpMode || Request->Command.UseAutoCmd12)) {
+            TransferMode |= SDHC_TM_AUTO_CMD12_ENABLE;
+        }
     }
 
     if (Request->Command.TransferMethod == SdTransferMethodSgDma) {
@@ -3883,7 +4184,7 @@ Return value:
 
 #if NV_PIO_BUFFERED
     // One buffered read for the whole block instead of one call per DWORD.
-    if (Length >= sizeof(ULONG)) {
+    if (!SdhcExtension->CrashdumpMode && Length >= sizeof(ULONG)) {
         SdhcReadRegisterBufferUlong(SdhcExtension,
                                     SDHC_DATA_PORT,
                                     (PULONG) Buffer,
@@ -3892,7 +4193,7 @@ Return value:
         Buffer += Length & ~(sizeof(ULONG) - 1);
         Length &= sizeof(ULONG) - 1;
     }
-#else
+#endif
     while (Length >= sizeof(ULONG)) {
         SdhcReadRegisterBufferUlong(SdhcExtension,
                                     SDHC_DATA_PORT,
@@ -3902,7 +4203,6 @@ Return value:
         Buffer += sizeof(ULONG);
         Length -= sizeof(ULONG);
     }
-#endif
 
     if (Length >= sizeof(USHORT)) {
         SdhcReadRegisterBufferUshort(SdhcExtension,
@@ -3965,7 +4265,7 @@ Return value:
 
 #if NV_PIO_BUFFERED
     // One buffered write for the whole block instead of one call per DWORD.
-    if (Length >= sizeof(ULONG)) {
+    if (!SdhcExtension->CrashdumpMode && Length >= sizeof(ULONG)) {
         SdhcWriteRegisterBufferUlong(SdhcExtension,
                                      SDHC_DATA_PORT,
                                      (PULONG) Buffer,
@@ -3974,7 +4274,7 @@ Return value:
         Buffer += Length & ~(sizeof(ULONG) - 1);
         Length &= sizeof(ULONG) - 1;
     }
-#else
+#endif
     while (Length >= sizeof(ULONG)) {
         SdhcWriteRegisterBufferUlong(SdhcExtension,
                                      SDHC_DATA_PORT,
@@ -3984,7 +4284,6 @@ Return value:
         Buffer += sizeof(ULONG);
         Length -= sizeof(ULONG);
     }
-#endif
 
     if (Length >= sizeof(USHORT)) {
         SdhcWriteRegisterBufferUshort(SdhcExtension,
@@ -4248,18 +4547,39 @@ Return value:
 
 {
 
+    if (SdhcExtension->CrashdumpMode &&
+        (!Request->Command.BlockCount || !Request->Command.BlockSize || !Request->Command.DataBuffer ||
+         (Request->Command.TransferDirection != SdTransferDirectionRead &&
+          Request->Command.TransferDirection != SdTransferDirectionWrite))) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
     NT_ASSERT((Request->Command.TransferDirection == SdTransferDirectionRead) ||
               (Request->Command.TransferDirection == SdTransferDirectionWrite));
 
 #if NV_PIO_POLL
     BOOLEAN Read;
+    ULONG MaxBlocks;
     ULONG Moved;
+    ULONG PollUs;
     ULONG ReadyBit;
     ULONG Waited;
 
     Read = (Request->Command.TransferDirection == SdTransferDirectionRead);
     ReadyBit = Read ? SDHC_PS_BUFFER_READ_ENABLE : SDHC_PS_BUFFER_WRITE_ENABLE;
-    for (Moved = 0; Moved < NV_PIO_POLL_BLOCKS; Moved += 1) {
+    MaxBlocks = SdhcExtension->CrashdumpMode ? MAXULONG : NV_PIO_POLL_BLOCKS;
+    PollUs = SdhcExtension->CrashdumpMode ? NV_PIO_DUMP_POLL_US : NV_PIO_POLL_US;
+    if (SdhcExtension->CrashdumpMode) {
+        SdhcWriteRegisterUlong(SdhcExtension, SDHC_INTERRUPT_SIGNAL_ENABLE, 0);
+        SdhcWriteRegisterUshort(
+            SdhcExtension,
+            SDHC_INTERRUPT_STATUS_ENABLE,
+            SdhcReadRegisterUshort(SdhcExtension, SDHC_INTERRUPT_STATUS_ENABLE) |
+                SDHC_IS_TRANSFER_COMPLETE |
+                (Read ? SDHC_IS_BUFFER_READ_READY : SDHC_IS_BUFFER_WRITE_READY));
+        SdhcWriteRegisterUshort(SdhcExtension, SDHC_ERROR_STATUS_ENABLE, 0xFFFF);
+    }
+    for (Moved = 0; Moved < MaxBlocks; Moved += 1) {
 
         //
         // The buffer-ready event that started this call may be for a block
@@ -4268,11 +4588,16 @@ Return value:
         //
 
         for (Waited = 0; ; Waited += 1) {
+            if (SdhcExtension->CrashdumpMode &&
+                (SdhcReadRegisterUshort(SdhcExtension, SDHC_INTERRUPT_STATUS) &
+                 SDHC_IS_ERROR_INTERRUPT) != 0) {
+                return STATUS_IO_DEVICE_ERROR;
+            }
             if ((SdhcReadRegisterUlong(SdhcExtension, SDHC_PRESENT_STATE) & ReadyBit) != 0) {
                 break;
             }
 
-            if ((Waited >= NV_PIO_POLL_US) ||
+            if ((Waited >= PollUs) ||
                 ((SdhcReadRegisterUshort(SdhcExtension, SDHC_INTERRUPT_STATUS) &
                   SDHC_IS_ERROR_INTERRUPT) != 0)) {
 
@@ -4282,6 +4607,7 @@ Return value:
             KeStallExecutionProcessor(1);
         }
 
+        if (SdhcExtension->CrashdumpMode) PollUs -= Waited;
         if ((SdhcReadRegisterUlong(SdhcExtension, SDHC_PRESENT_STATE) & ReadyBit) == 0) {
             break;
         }
@@ -4305,6 +4631,10 @@ Return value:
         }
 
         Request->Command.BlockCount -= 1;
+#if NV_T210_LITE_WINARM_WRITE
+        if (SdhcExtension->CrashdumpMode && !Read)
+            SdhcExtension->IssuedWriteCount = Request->Command.BlockCount;
+#endif
         if (Request->Command.BlockCount == 0) {
             Request->RequiredEvents |= SDHC_IS_TRANSFER_COMPLETE;
             Request->Status = STATUS_SUCCESS;

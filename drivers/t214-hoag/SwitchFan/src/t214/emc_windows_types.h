@@ -27,7 +27,9 @@ typedef struct {
     struct sw_actmon Actmon;
     struct sw_actmon_irq IrqState;
     WDFINTERRUPT Interrupt;
-    BOOLEAN InterruptOnline;
+    /* KMDF publishes disconnect before releasing the underlying PKINTERRUPT.
+     * Interlocked access gives DIRQL and PASSIVE_LEVEL a common barrier. */
+    volatile LONG InterruptOnline;
     ULONGLONG DemandInterrupts;
     ULONG DemandKhz;
     volatile LONG CpuRateKhz;
